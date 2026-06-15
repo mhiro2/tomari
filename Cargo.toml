@@ -26,7 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-directories = "5"
+directories = "6"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
