@@ -11,12 +11,13 @@
 //! real key-down/up the tap can treat as the Caps modifier ([`crate::eventtap`]).
 //!
 //! We shell out to `/usr/bin/hidutil` rather than call the private
-//! `IOHIDEventSystemClient` API. Setting the property replaces the whole
-//! `UserKeyMapping` list, so a user's own pre-existing `hidutil` mapping is not
-//! preserved across [`apply`]/[`clear`] (acceptable for a keyboard tool that owns
-//! remapping; a future version could merge instead). The mapping is per-user,
-//! needs no elevated privileges, and persists until reboot or removal — so we
-//! reconcile it on every tap (re)start and clear it on quit.
+//! `IOHIDEventSystemClient` API. Setting the property replaces the *whole*
+//! `UserKeyMapping` list, so [`apply`] and [`clear`] read the current list first
+//! and write it back with only our Caps Lock → F18 entry added or removed —
+//! a user's own pre-existing `hidutil` mappings (another key remap, say) survive
+//! rather than being wiped. The mapping is per-user, needs no elevated
+//! privileges, and persists until reboot or removal — so we reconcile it on
+//! every tap (re)start and clear it on quit.
 
 use std::process::Command;
 
@@ -46,16 +47,90 @@ fn set_mapping(json: &str) -> Result<(), String> {
     }
 }
 
-/// Remap Caps Lock to F18 at the HID level.
-pub fn apply() -> Result<(), String> {
-    set_mapping(&format!(
-        r#"{{"UserKeyMapping":[{{"HIDKeyboardModifierMappingSrc":{CAPS_USAGE:#x},"HIDKeyboardModifierMappingDst":{F18_USAGE:#x}}}]}}"#
-    ))
+/// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs.
+/// `None` when `hidutil` could not be run at all — distinct from an empty list,
+/// so callers never mistake "unreadable" for "no mappings" and clobber the
+/// user's own remaps.
+fn read_entries() -> Option<Vec<(u64, u64)>> {
+    let output = Command::new("/usr/bin/hidutil")
+        .args(["property", "--get", "UserKeyMapping"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_entries(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Remove all `UserKeyMapping` entries, restoring Caps Lock's native behavior.
+/// Parse every `UserKeyMapping` entry out of `hidutil property --get` text into
+/// `(src, dst)` usage pairs. Splitting on `}` yields one block per entry (the
+/// trailing fragment carries neither field and is dropped).
+fn parse_entries(text: &str) -> Vec<(u64, u64)> {
+    text.split('}')
+        .filter_map(|entry| {
+            let src = entry_field(entry, "HIDKeyboardModifierMappingSrc")?;
+            let dst = entry_field(entry, "HIDKeyboardModifierMappingDst")?;
+            Some((src, dst))
+        })
+        .collect()
+}
+
+/// The entry list with our Caps Lock → F18 mapping ensured present: any existing
+/// entry whose *source* is Caps Lock is replaced (we own that source), every
+/// other mapping is kept untouched.
+fn with_caps_mapping(mut entries: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    entries.retain(|&(src, _)| src != CAPS_USAGE);
+    entries.push((CAPS_USAGE, F18_USAGE));
+    entries
+}
+
+/// The entry list with *only* our Caps Lock → F18 mapping removed, leaving every
+/// other mapping in place. `None` when ours is not present, so the caller can
+/// skip a redundant write.
+fn without_caps_mapping(entries: Vec<(u64, u64)>) -> Option<Vec<(u64, u64)>> {
+    if !entries.contains(&(CAPS_USAGE, F18_USAGE)) {
+        return None;
+    }
+    Some(
+        entries
+            .into_iter()
+            .filter(|&pair| pair != (CAPS_USAGE, F18_USAGE))
+            .collect(),
+    )
+}
+
+/// Serialize `(src, dst)` pairs into the JSON `hidutil property --set` expects.
+fn serialize_mapping(entries: &[(u64, u64)]) -> String {
+    let body = entries
+        .iter()
+        .map(|(src, dst)| {
+            format!(
+                r#"{{"HIDKeyboardModifierMappingSrc":{src:#x},"HIDKeyboardModifierMappingDst":{dst:#x}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"UserKeyMapping":[{body}]}}"#)
+}
+
+/// Remap Caps Lock to F18 at the HID level, preserving the user's other
+/// mappings. Errors if the current list cannot be read, rather than overwriting
+/// it blind.
+pub fn apply() -> Result<(), String> {
+    let entries = read_entries().ok_or("could not read current hidutil key mappings")?;
+    set_mapping(&serialize_mapping(&with_caps_mapping(entries)))
+}
+
+/// Remove our Caps Lock → F18 mapping, restoring Caps Lock's native behavior
+/// while leaving every other `UserKeyMapping` entry the user set in place.
 pub fn clear() -> Result<(), String> {
-    set_mapping(r#"{"UserKeyMapping":[]}"#)
+    let entries = read_entries().ok_or("could not read current hidutil key mappings")?;
+    match without_caps_mapping(entries) {
+        // Ours was present: write back the list without it.
+        Some(remaining) => set_mapping(&serialize_mapping(&remaining)),
+        // Ours was not there — nothing of ours to remove, so leave the list be.
+        None => Ok(()),
+    }
 }
 
 /// Whether our Caps Lock → F18 remap is currently in effect, read from the live
@@ -135,6 +210,78 @@ pub fn reconcile(should_manage: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for a user's own pre-existing remap (some other key), used to
+    /// prove merge/remove never touch mappings that are not ours.
+    const OTHER_SRC: u64 = 0x7_0000_0004;
+    const OTHER_DST: u64 = 0x7_0000_0005;
+
+    #[test]
+    fn parse_entries_reads_every_pair() {
+        // The decimal shape `hidutil property --get` prints, with two entries.
+        let text = format!(
+            "(\n  {{\n    HIDKeyboardModifierMappingSrc = {CAPS_USAGE};\n    \
+             HIDKeyboardModifierMappingDst = {F18_USAGE};\n  }}\n  {{\n    \
+             HIDKeyboardModifierMappingSrc = {OTHER_SRC};\n    \
+             HIDKeyboardModifierMappingDst = {OTHER_DST};\n  }}\n)"
+        );
+        assert_eq!(
+            parse_entries(&text),
+            vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]
+        );
+    }
+
+    #[test]
+    fn apply_merge_preserves_a_foreign_mapping() {
+        // Turning Caps management on must keep the user's other remap.
+        let merged = with_caps_mapping(vec![(OTHER_SRC, OTHER_DST)]);
+        assert!(merged.contains(&(OTHER_SRC, OTHER_DST)));
+        assert!(merged.contains(&(CAPS_USAGE, F18_USAGE)));
+    }
+
+    #[test]
+    fn apply_merge_replaces_a_conflicting_caps_source() {
+        // A pre-existing Caps Lock remap to something else is ours to own:
+        // replace it, leaving exactly one entry for the Caps source.
+        let merged = with_caps_mapping(vec![(CAPS_USAGE, OTHER_DST), (OTHER_SRC, OTHER_DST)]);
+        assert_eq!(
+            merged.iter().filter(|&&(src, _)| src == CAPS_USAGE).count(),
+            1
+        );
+        assert!(merged.contains(&(CAPS_USAGE, F18_USAGE)));
+        assert!(merged.contains(&(OTHER_SRC, OTHER_DST)));
+    }
+
+    #[test]
+    fn clear_removes_only_our_entry() {
+        let remaining =
+            without_caps_mapping(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]).unwrap();
+        assert_eq!(remaining, vec![(OTHER_SRC, OTHER_DST)]);
+    }
+
+    #[test]
+    fn clear_is_a_noop_when_ours_is_absent() {
+        // A foreign Caps remap is not ours to remove, nor is an empty list.
+        assert!(
+            without_caps_mapping(vec![(CAPS_USAGE, OTHER_DST), (OTHER_SRC, OTHER_DST)]).is_none()
+        );
+        assert!(without_caps_mapping(vec![]).is_none());
+    }
+
+    #[test]
+    fn serialize_empty_is_an_empty_list() {
+        assert_eq!(serialize_mapping(&[]), r#"{"UserKeyMapping":[]}"#);
+    }
+
+    #[test]
+    fn serialize_emits_each_entry_as_hex() {
+        // The exact shape `hidutil property --set` previously received for our
+        // lone entry, so the merge path keeps feeding hidutil what it accepts.
+        assert_eq!(
+            serialize_mapping(&[(CAPS_USAGE, F18_USAGE)]),
+            r#"{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006d}]}"#
+        );
+    }
 
     #[test]
     fn detects_our_caps_to_f18_entry_decimal() {
