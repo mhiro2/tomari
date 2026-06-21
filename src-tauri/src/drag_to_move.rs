@@ -13,7 +13,7 @@
 //! *Accessibility*.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -30,6 +30,7 @@ use tomari_window::{
     DragWindow, WindowHandle, drag_move_frame, drag_resize_frame, window_at_point,
 };
 
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -82,7 +83,7 @@ pub fn gesture_for_flags(flags: CGEventFlags) -> Option<Gesture> {
 /// (Re)start the tap to match the current settings: tear down any existing tap
 /// and, if drag-to-move is enabled, start a fresh one.
 pub fn restart(app: &AppHandle) {
-    let mut guard = MOVE_TAP.lock().unwrap();
+    let mut guard = MOVE_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
 
     if !drag_to_move_enabled_for(app) {
@@ -103,23 +104,119 @@ pub fn restart(app: &AppHandle) {
 fn drag_to_move_enabled_for(app: &AppHandle) -> bool {
     app.try_state::<AppState>()
         .map(|s| {
-            let settings = s.settings.lock().unwrap();
+            let settings = s.settings.lock_safe();
             settings.window_management_enabled && settings.drag_to_move_enabled
         })
         .unwrap_or(false)
 }
 
-/// An in-flight move/resize: the window grabbed on mouse-down plus the anchor
-/// state the gesture deltas are measured from. The cursor and frame are sampled
-/// once on the press; later drags apply a delta against these, never re-reading
-/// the window or re-hit-testing under the cursor.
+/// An in-flight move/resize: a handle to the [`MoveWorker`] driving the grabbed
+/// window. The anchor (frame and cursor at press time) lives in the worker;
+/// dropping this ends the gesture (closes the worker's channel and joins it).
 struct MoveDrag {
-    window: DragWindow,
+    worker: MoveWorker,
+}
+
+/// Off-thread applier for an in-flight move/resize.
+///
+/// The event-tap callback must never make an Accessibility call itself: this is
+/// an active tap, so a synchronous AX write to a wedged target app would block
+/// the callback and stall input system-wide until the OS disables the tap.
+/// Instead the callback posts the latest cursor position here and returns at
+/// once; this worker thread owns the window and applies the moves. It coalesces
+/// any queued positions to the most recent before each AX write (so a slow
+/// write never makes the window chase a backlog), and stops on the first failure
+/// rather than hammering a dead or unresponsive target. Each write is itself
+/// bounded by the AX messaging timeout set on the window element.
+struct MoveWorker {
+    /// Channel for the newest cursor position. `None` once dropped, which ends
+    /// the worker's receive loop.
+    tx: Option<Sender<(f64, f64)>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl MoveWorker {
+    fn spawn(
+        window: DragWindow,
+        gesture: Gesture,
+        start_frame: Rect,
+        start_cursor: (f64, f64),
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(f64, f64)>();
+        match std::thread::Builder::new()
+            .name("tomari-dragmove-apply".into())
+            .spawn(move || apply_loop(&window, gesture, start_frame, start_cursor, &rx))
+        {
+            Ok(thread) => Self {
+                tx: Some(tx),
+                thread: Some(thread),
+            },
+            // Spawn failed (resource exhaustion): keep no sender, so `post`
+            // becomes a no-op rather than queueing into a channel nothing drains.
+            // The window simply won't follow this drag.
+            Err(e) => {
+                tracing::warn!(error = %e, "could not start drag-to-move worker thread");
+                Self {
+                    tx: None,
+                    thread: None,
+                }
+            }
+        }
+    }
+
+    /// Hand the worker the newest cursor position. Non-blocking: if the worker
+    /// has already stopped (window gone), the send simply fails and is ignored.
+    fn post(&self, location: (f64, f64)) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(location);
+        }
+    }
+}
+
+impl Drop for MoveWorker {
+    fn drop(&mut self) {
+        // Drop the sender first so the worker's `recv` returns and the loop
+        // exits, then join so a final in-flight (timeout-bounded) AX write
+        // finishes before the next gesture can start on the same window.
+        self.tx = None;
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Apply coalesced cursor positions to the grabbed window until the channel
+/// closes (the gesture ended) or an AX write fails (the window vanished or the
+/// app stopped answering within the messaging timeout).
+fn apply_loop(
+    window: &DragWindow,
     gesture: Gesture,
-    /// The window's frame when the press landed.
     start_frame: Rect,
-    /// The cursor position when the press landed.
     start_cursor: (f64, f64),
+    rx: &Receiver<(f64, f64)>,
+) {
+    while let Ok(mut location) = rx.recv() {
+        // Coalesce: jump to the most recent queued position so the window never
+        // chases a backlog of stale points behind a slow AX server.
+        while let Ok(newer) = rx.try_recv() {
+            location = newer;
+        }
+        let delta = (location.0 - start_cursor.0, location.1 - start_cursor.1);
+        let result = match gesture {
+            Gesture::Move => {
+                let frame = drag_move_frame(start_frame, delta);
+                window.set_origin(frame.x, frame.y)
+            }
+            Gesture::Resize => {
+                let frame = drag_resize_frame(start_frame, delta);
+                window.set_size(frame.width, frame.height)
+            }
+        };
+        if let Err(e) = result {
+            tracing::debug!(error = %e, "drag-to-move stopped: window no longer writable");
+            break;
+        }
+    }
 }
 
 fn start(app: AppHandle) -> Result<MoveTap, String> {
@@ -218,9 +315,12 @@ fn handle_event(
         etype,
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
-        // We may have missed the matching mouse-up; drop any in-flight grab so a
-        // later press starts clean rather than resuming a stale gesture.
-        *drag.lock().unwrap() = None;
+        // We may have missed the matching mouse-up; end any in-flight grab so a
+        // later press starts clean rather than resuming a stale gesture. Take it
+        // out before dropping (off-lock) so the worker join is not held under the
+        // mutex.
+        let stale = drag.lock_safe().take();
+        drop(stale);
         let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
         if !port.is_null() {
             unsafe { CGEventTapEnable(port, true) };
@@ -253,65 +353,58 @@ fn handle_drag_to_move(
     }
 
     if !drag_to_move_enabled(app_state) {
-        // Defensive: drop any state left over if the feature was just disabled.
-        *drag.lock().unwrap() = None;
+        // Defensive: end any gesture left over if the feature was just disabled.
+        // Take it out before dropping (off-lock) so the worker join never runs
+        // while the mutex is held.
+        let stale = drag.lock_safe().take();
+        drop(stale);
         return CallbackResult::Keep;
     }
 
     match etype {
         CGEventType::LeftMouseDown => {
+            // End any stale gesture first — off-lock, since dropping its worker
+            // joins (a missed mouse-up could leave one in flight).
+            let stale = drag.lock_safe().take();
+            drop(stale);
+
             // A gesture engages only when its exact chord is held; otherwise this
             // is an ordinary click and must pass through untouched.
             let Some(gesture) = gesture_for_flags(event.get_flags()) else {
-                *drag.lock().unwrap() = None;
                 return CallbackResult::Keep;
             };
             let location = event.location();
             match grab(app_state, gesture, location.x, location.y) {
                 Some(grabbed) => {
-                    *drag.lock().unwrap() = Some(grabbed);
+                    *drag.lock_safe() = Some(grabbed);
                     // Consume the press: the app underneath must not act on it.
                     CallbackResult::Drop
                 }
                 // Modifiers held but nothing draggable under the cursor (or no
                 // permission): leave the click alone.
-                None => {
-                    *drag.lock().unwrap() = None;
-                    CallbackResult::Keep
-                }
+                None => CallbackResult::Keep,
             }
         }
         CGEventType::LeftMouseDragged => {
             let location = event.location();
-            // Copy the anchor out and clone the (CF-retained) handle, then drop
-            // the lock *before* the synchronous AX call: a wedged target app
-            // must not stall the tap callback while the mutex is held.
-            let grabbed = {
-                let guard = drag.lock().unwrap();
-                guard
-                    .as_ref()
-                    .map(|d| (d.window.clone(), d.gesture, d.start_frame, d.start_cursor))
-            };
-            let Some((window, gesture, start_frame, start_cursor)) = grabbed else {
-                return CallbackResult::Keep;
-            };
-            let delta = (location.x - start_cursor.0, location.y - start_cursor.1);
-            match gesture {
-                Gesture::Move => {
-                    let frame = drag_move_frame(start_frame, delta);
-                    let _ = window.set_origin(frame.x, frame.y);
+            // Just hand the worker the latest cursor position: the AX write
+            // happens off this thread, so a wedged target app can never stall
+            // the active tap (which would delay input system-wide).
+            let guard = drag.lock_safe();
+            match guard.as_ref() {
+                Some(d) => {
+                    d.worker.post((location.x, location.y));
+                    CallbackResult::Drop
                 }
-                Gesture::Resize => {
-                    let frame = drag_resize_frame(start_frame, delta);
-                    let _ = window.set_size(frame.width, frame.height);
-                }
+                None => CallbackResult::Keep,
             }
-            CallbackResult::Drop
         }
         CGEventType::LeftMouseUp => {
             // End the gesture. If one was in flight we own the matching up, so
             // consume it; otherwise it belongs to a normal click — pass it on.
-            if drag.lock().unwrap().take().is_some() {
+            // `ended` drops at the end of this arm (off-lock), joining the worker.
+            let ended = drag.lock_safe().take();
+            if ended.is_some() {
                 CallbackResult::Drop
             } else {
                 CallbackResult::Keep
@@ -324,7 +417,7 @@ fn handle_drag_to_move(
 /// Whether drag-to-move should run: it shares the window-management master
 /// switch and has its own opt-in toggle.
 fn drag_to_move_enabled(app_state: &AppState) -> bool {
-    let settings = app_state.settings.lock().unwrap();
+    let settings = app_state.settings.lock_safe();
     settings.window_management_enabled && settings.drag_to_move_enabled
 }
 
@@ -335,12 +428,12 @@ fn grab(app_state: &AppState, gesture: Gesture, x: f64, y: f64) -> Option<MoveDr
     if !app_state.windows.permission_granted() {
         return None;
     }
+    // The hit-test and frame read run here on the tap thread, but both are now
+    // bounded by the window element's AX messaging timeout, so even a wedged app
+    // releases the press promptly. Every *subsequent* write is off-thread.
     let window = window_at_point(x, y).ok()?;
     let start_frame = window.frame().ok()?;
     Some(MoveDrag {
-        window,
-        gesture,
-        start_frame,
-        start_cursor: (x, y),
+        worker: MoveWorker::spawn(window, gesture, start_frame, (x, y)),
     })
 }

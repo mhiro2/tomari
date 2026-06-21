@@ -55,6 +55,34 @@ unsafe extern "C" {
         y: f32,
         element: *mut CFTypeRef,
     ) -> AXError;
+    fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout_in_seconds: f32) -> AXError;
+}
+
+/// Cap on every Accessibility round-trip made through a dragged/hit-tested
+/// element. A title-bar drag or a per-frame move issues these from an event-tap
+/// thread; without a bound a target app whose AX server has wedged would block
+/// that thread until the OS disables the tap (and, for the active drag-to-move
+/// tap, stall input system-wide). 0.25 s is comfortably long for a healthy app
+/// to answer yet short enough that a hung one cannot stall input perceptibly.
+/// A bounded call simply returns an AX error, which the drag paths treat as
+/// "abort this gesture".
+const AX_MESSAGING_TIMEOUT_SECS: f32 = 0.25;
+
+/// Bound every Accessibility message sent to `element` to
+/// [`AX_MESSAGING_TIMEOUT_SECS`]. Best-effort: if the call fails the element
+/// keeps the (unbounded) global default, so log it — that is the case where a
+/// wedged app could still block a caller, and it must not pass silently.
+///
+/// # Safety
+/// `element` must be a valid `AXUIElementRef`.
+unsafe fn set_messaging_timeout(element: CFTypeRef) {
+    let err = unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECS) };
+    if err != kAXErrorSuccess {
+        tracing::warn!(
+            error = err,
+            "could not bound AX messaging timeout; calls stay unbounded"
+        );
+    }
 }
 
 /// RAII guard that `CFRelease`s an owned (`Copy`/`Create`-returned) CF object.
@@ -253,7 +281,7 @@ impl WindowManager for AxWindowManager {
             // The window element is +1-retained, so it stays valid on its own
             // after the system-wide and application elements are released.
             let (_system, _app, window) = focused_window()?;
-            Ok(Box::new(DragWindow { window }))
+            Ok(Box::new(DragWindow::new(window)))
         }
     }
 
@@ -355,6 +383,15 @@ pub struct DragWindow {
     window: CFOwned,
 }
 
+impl DragWindow {
+    /// Wrap an owned AX window element, bounding every later round-trip to it so
+    /// a wedged target app cannot block the thread that drags or measures it.
+    fn new(window: CFOwned) -> Self {
+        unsafe { set_messaging_timeout(window.0) };
+        Self { window }
+    }
+}
+
 // SAFETY: an `AXUIElementRef` is a CoreFoundation object (thread-safe
 // retain/release) and the HIServices accessibility client API it is used with
 // is documented as thread-safe, so the handle may move between threads.
@@ -428,6 +465,9 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
             return Err(Error::NoFocusedWindow);
         }
         let system = CFOwned(system);
+        // Bound the hit-test too: it messages the app under the cursor, which
+        // could be the wedged one we are trying not to block on.
+        set_messaging_timeout(system.0);
 
         let mut hit: CFTypeRef = std::ptr::null();
         let err = AXUIElementCopyElementAtPosition(system.0, x as f32, y as f32, &mut hit);
@@ -438,10 +478,10 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
 
         for _ in 0..32 {
             if element_role(element.0).as_deref() == Some("AXWindow") {
-                return Ok(DragWindow { window: element });
+                return Ok(DragWindow::new(element));
             }
             if let Some(window) = copy_attr(element.0, "AXWindow") {
-                return Ok(DragWindow { window });
+                return Ok(DragWindow::new(window));
             }
             match copy_attr(element.0, "AXParent") {
                 Some(parent) => element = parent,
