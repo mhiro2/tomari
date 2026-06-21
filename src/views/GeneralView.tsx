@@ -1,7 +1,7 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { useEffect, useRef, useState } from 'react';
 
-import { Group, SwitchRow } from '../components/ui';
+import { Banner, Group, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
 import { cmdErrorMessage } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
@@ -35,6 +35,10 @@ export function GeneralView({
   const { settings, update } = useSettings();
   const [version, setVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateState>({ phase: 'idle' });
+  // Turning the menu bar icon off hides the only visible affordance of an
+  // Accessory app (no Dock icon either), so confirm it first and spell out the
+  // ways back in. Turning it back on needs no confirmation.
+  const [confirmHideTray, setConfirmHideTray] = useState(false);
   // Guards against overlapping checks: the tray entry (via StrictMode's double
   // mount, or rapid clicks) and the manual button share one in-flight check.
   const checking = useRef(false);
@@ -92,7 +96,13 @@ export function GeneralView({
           title={t('settings.showInMenuBar')}
           desc={settings.showInMenuBar ? undefined : t('settings.hiddenHint')}
           checked={settings.showInMenuBar}
-          onChange={(v) => update({ showInMenuBar: v })}
+          onChange={(v) => {
+            if (v) {
+              update({ showInMenuBar: true });
+            } else {
+              setConfirmHideTray(true);
+            }
+          }}
         />
         <div className="item">
           <div className="item__body">
@@ -114,6 +124,34 @@ export function GeneralView({
           </div>
         </div>
       </Group>
+
+      {confirmHideTray && (
+        <Banner tone="warn">
+          <div className="banner__body">
+            <strong>{t('settings.hideTrayConfirmTitle')}</strong>
+            <p>{t('settings.hideTrayConfirmBody')}</p>
+            <div className="banner__actions">
+              <button
+                type="button"
+                className="btn btn--amber"
+                onClick={() => {
+                  update({ showInMenuBar: false });
+                  setConfirmHideTray(false);
+                }}
+              >
+                {t('settings.hideTrayConfirmAction')}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setConfirmHideTray(false)}
+              >
+                {t('common.cancel')}
+              </button>
+            </div>
+          </div>
+        </Banner>
+      )}
 
       <Group label={t('settings.externalControl')} note={t('settings.externalControlHint')}>
         <SwitchRow

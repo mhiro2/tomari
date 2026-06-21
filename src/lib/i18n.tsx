@@ -112,6 +112,10 @@ const en = {
   'settings.showInMenuBar': 'Show in menu bar',
   'settings.hiddenHint':
     'Hidden from the menu bar — reopen Tomari any time by launching it again from Spotlight or Launchpad, or with the global shortcut (default ⌘⇧K).',
+  'settings.hideTrayConfirmTitle': 'Hide the menu bar icon?',
+  'settings.hideTrayConfirmBody':
+    'Tomari keeps running with no menu bar icon and no Dock icon. To open it again, launch Tomari from Spotlight or Launchpad, or use the global shortcut (default ⌘⇧K).',
+  'settings.hideTrayConfirmAction': 'Hide icon',
   'settings.language': 'Language',
   'settings.language.system': 'System',
   'settings.keyboardCustomization': 'Keyboard customization',
@@ -254,6 +258,10 @@ const ja: Record<MessageKey, string> = {
   'settings.showInMenuBar': 'メニューバーに表示',
   'settings.hiddenHint':
     'メニューバー非表示中でも、Spotlight や Launchpad から Tomari を再度起動すればいつでも開けます。グローバルショートカット（デフォルト ⌘⇧K）でも開けます。',
+  'settings.hideTrayConfirmTitle': 'メニューバーアイコンを非表示にしますか？',
+  'settings.hideTrayConfirmBody':
+    'Tomari はメニューバーにも Dock にもアイコンを出さずに動き続けます。再び開くには、Spotlight や Launchpad から Tomari を起動するか、グローバルショートカット（デフォルト ⌘⇧K）を使ってください。',
+  'settings.hideTrayConfirmAction': 'アイコンを非表示',
   'settings.language': '言語',
   'settings.language.system': 'システム',
   'settings.keyboardCustomization': 'キーボードカスタマイズ',
