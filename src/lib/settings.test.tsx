@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider, useSettings } from './settings';
-import type { AppSettings } from './types';
+import type { AppSettings, SaveSettingsOutcome } from './types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
@@ -38,9 +38,11 @@ function saveCalls() {
 describe('SettingsProvider', () => {
   it('optimistically updates the UI and persists the new value', async () => {
     mockInvoke.mockReset();
-    mockInvoke.mockImplementation((cmd: string) =>
-      cmd === 'get_settings' ? Promise.resolve(SETTINGS) : Promise.resolve(null),
-    );
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'save_settings') return Promise.resolve({ applyWarnings: [] });
+      return Promise.resolve(null);
+    });
 
     render(
       <SettingsProvider>
@@ -66,7 +68,10 @@ describe('SettingsProvider', () => {
     const resolvers: (() => void)[] = [];
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
-      if (cmd === 'save_settings') return new Promise<void>((resolve) => resolvers.push(resolve));
+      if (cmd === 'save_settings')
+        return new Promise<SaveSettingsOutcome>((resolve) =>
+          resolvers.push(() => resolve({ applyWarnings: [] })),
+        );
       return Promise.resolve(null);
     });
 

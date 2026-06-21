@@ -11,13 +11,16 @@ import type {
   Hotkey,
   KeepAwakeStatus,
   ModifierRule,
+  SaveSettingsOutcome,
   UpdateInfo,
   WindowPreset,
 } from './types';
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 
-export const saveSettings = (settings: AppSettings): Promise<void> =>
+// Resolves once the settings are persisted; `applyWarnings` lists any side
+// effect that saved but could not be applied to the system.
+export const saveSettings = (settings: AppSettings): Promise<SaveSettingsOutcome> =>
   invoke('save_settings', { settings });
 
 export const listHotkeys = (): Promise<Hotkey[]> => invoke('list_hotkeys');

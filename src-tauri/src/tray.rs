@@ -205,12 +205,19 @@ fn input_monitoring_granted() -> bool {
 
 /// Show or hide the menu-bar tray icon to honor the "Show in menu bar" setting.
 /// With the Accessory activation policy the panel is still reachable via the
-/// global shortcut while the icon is hidden.
-pub fn set_visible(app: &AppHandle, visible: bool) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID)
-        && let Err(e) = tray.set_visible(visible)
-    {
-        tracing::warn!(error = %e, "failed to toggle tray visibility");
+/// global shortcut while the icon is hidden. Returns whether it applied; a
+/// failure (or a missing tray) is logged and reported as `false`.
+pub fn set_visible(app: &AppHandle, visible: bool) -> bool {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        tracing::warn!("tray icon not found while toggling visibility");
+        return false;
+    };
+    match tray.set_visible(visible) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to toggle tray visibility");
+            false
+        }
     }
 }
 

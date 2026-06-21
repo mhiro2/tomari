@@ -20,6 +20,17 @@ pub struct AcceleratorCheck {
     error: Option<String>,
 }
 
+/// Outcome of [`save_settings`]: the settings always persist (a write failure
+/// rejects the command instead), but a side effect may still fail to apply.
+/// `apply_warnings` names each one that did, so the UI can warn that the stored
+/// preference and the live system state disagree until retried. Empty on a
+/// fully applied save.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSettingsOutcome {
+    apply_warnings: Vec<&'static str>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
@@ -52,20 +63,29 @@ pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: AppSettings,
-) -> CmdResult<()> {
+) -> CmdResult<SaveSettingsOutcome> {
     // Serialize against other concurrent config mutations, which each write to
     // the database and then rebuild the engines from it.
     let _config = state.lock_config_mutation();
     let previous = state.settings.lock_safe().clone();
 
+    // Persisting is the hard requirement: a failure here rejects so the UI knows
+    // nothing was saved. The side effects below are applied on a best-effort
+    // basis and reported as warnings — the preference is stored either way.
     state.db.save_settings(&settings)?;
 
-    // Reflect the side-effecting toggles, but only when they actually change.
-    if previous.launch_at_login != settings.launch_at_login {
-        apply_launch_at_login(&app, settings.launch_at_login);
+    // Reconcile the side-effecting toggles every save — not only when they
+    // change — so a prior unresolved failure keeps warning until it is actually
+    // fixed, rather than the banner vanishing on the next unrelated save. Both
+    // are idempotent: `apply_launch_at_login` writes only on a real difference,
+    // and re-setting the tray to its current visibility is a no-op. So a warning
+    // here reflects the live mismatch, not merely this save's attempt.
+    let mut apply_warnings: Vec<&'static str> = Vec::new();
+    if !apply_launch_at_login(&app, settings.launch_at_login) {
+        apply_warnings.push("launchAtLogin");
     }
-    if previous.show_in_menu_bar != settings.show_in_menu_bar {
-        crate::tray::set_visible(&app, settings.show_in_menu_bar);
+    if !crate::tray::set_visible(&app, settings.show_in_menu_bar) {
+        apply_warnings.push("menuBar");
     }
 
     let keyboard_toggled = previous.keyboard_enabled != settings.keyboard_enabled;
@@ -118,22 +138,34 @@ pub fn save_settings(
         let _ = (keyboard_toggled, drag_changed, move_changed);
     }
 
-    Ok(())
+    Ok(SaveSettingsOutcome { apply_warnings })
 }
 
-/// Register or deregister Tomari as a macOS login item to match the
-/// "Launch at login" setting. Failures are logged rather than surfaced, since
-/// the preference is still saved and can be retried.
-pub(crate) fn apply_launch_at_login(app: &AppHandle, enabled: bool) {
+/// Reconcile the macOS login item with the "Launch at login" preference.
+/// Returns whether the live state matches `enabled` afterward; a failure is
+/// logged and reported as `false` (the preference is still saved and can be
+/// retried), rather than surfaced as a hard error. Safe to call on every save:
+/// it writes only when the live state actually differs, so repeated
+/// reconciliation neither duplicates the login item nor errors on a redundant
+/// disable, and the returned bool reflects a real, still-unresolved mismatch.
+pub(crate) fn apply_launch_at_login(app: &AppHandle, enabled: bool) -> bool {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
+    // Already in the desired state: nothing to write, no mismatch to report.
+    if manager.is_enabled().is_ok_and(|current| current == enabled) {
+        return true;
+    }
     let result = if enabled {
         manager.enable()
     } else {
         manager.disable()
     };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "failed to update launch-at-login");
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to update launch-at-login");
+            false
+        }
     }
 }
 

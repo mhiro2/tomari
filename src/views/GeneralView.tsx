@@ -32,7 +32,7 @@ export function GeneralView({
   onAutoCheckHandled?: () => void;
 }) {
   const t = useT();
-  const { settings, update } = useSettings();
+  const { settings, applyWarnings, update } = useSettings();
   const [version, setVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateState>({ phase: 'idle' });
   // Turning the menu bar icon off hides the only visible affordance of an
@@ -125,6 +125,17 @@ export function GeneralView({
         </div>
       </Group>
 
+      {applyWarnings.length > 0 && (
+        <Banner tone="warn">
+          <div className="banner__body">
+            <strong>{t('settings.applyWarningTitle')}</strong>
+            {applyWarnings.map((code) => (
+              <p key={code}>{applyWarningText(code, t)}</p>
+            ))}
+          </div>
+        </Banner>
+      )}
+
       {confirmHideTray && (
         <Banner tone="warn">
           <div className="banner__body">
@@ -200,6 +211,19 @@ export function GeneralView({
       </Group>
     </div>
   );
+}
+
+// Map a save_settings apply-warning code to its localized message, falling back
+// to a generic line for any code this build doesn't recognize.
+function applyWarningText(code: string, t: Translator): string {
+  switch (code) {
+    case 'launchAtLogin':
+      return t('settings.applyWarning.launchAtLogin');
+    case 'menuBar':
+      return t('settings.applyWarning.menuBar');
+    default:
+      return t('settings.applyWarning.generic');
+  }
 }
 
 function updateDesc(state: UpdateState, t: Translator): string | null {

@@ -147,6 +147,13 @@ const en = {
   'settings.checking': 'Checking…',
   'settings.saveFailed': 'Could not save settings: {error}',
   'settings.working': 'Working…',
+
+  'settings.applyWarningTitle': 'Saved, but not fully applied',
+  'settings.applyWarning.launchAtLogin':
+    'Launch at login was saved but could not be applied to the system. Toggle it off and on to try again.',
+  'settings.applyWarning.menuBar':
+    'The menu bar setting was saved but could not be applied. Toggle it off and on to try again.',
+  'settings.applyWarning.generic': 'A setting was saved but could not be applied to the system.',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -293,6 +300,13 @@ const ja: Record<MessageKey, string> = {
   'settings.checking': '確認中…',
   'settings.saveFailed': '設定を保存できませんでした: {error}',
   'settings.working': '処理中…',
+
+  'settings.applyWarningTitle': '保存しましたが、適用しきれませんでした',
+  'settings.applyWarning.launchAtLogin':
+    'ログイン時に起動の設定は保存しましたが、システムに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
+  'settings.applyWarning.menuBar':
+    'メニューバーの設定は保存しましたが、適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
+  'settings.applyWarning.generic': '設定は保存しましたが、システムに適用できませんでした。',
 };
 
 export type Lang = 'en' | 'ja';

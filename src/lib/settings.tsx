@@ -29,6 +29,9 @@ type SettingsContextValue = {
   // Raw rejection from the last failed save (format with `formatCmdError` at
   // display time so this stays independent of the i18n provider).
   saveError: unknown;
+  // Codes for side effects that saved but could not be applied (see
+  // `SaveSettingsOutcome`). Empty after a clean save.
+  applyWarnings: string[];
   update: (patch: Partial<AppSettings>) => void;
 };
 
@@ -43,6 +46,7 @@ export function useSettings(): SettingsContextValue {
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saveError, setSaveError] = useState<unknown>(null);
+  const [applyWarnings, setApplyWarnings] = useState<string[]>([]);
   // Latest settings, so an in-flight save reads the current state even before
   // React commits.
   const settingsRef = useRef<AppSettings | null>(null);
@@ -94,10 +98,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const current = settingsRef.current;
     try {
       if (current) {
-        await api.saveSettings(current);
+        const outcome = await api.saveSettings(current);
         setSaveError(null);
+        // The settings persisted; surface any side effect that didn't apply.
+        setApplyWarnings(outcome.applyWarnings);
       }
     } catch (e) {
+      // Leave `applyWarnings` as-is: a failed save reconciled no side effect, so
+      // the warnings from the last successful save still reflect the live
+      // mismatch and must not be cleared here.
       // The write failed; re-sync from disk to show what truly persisted —
       // unless a newer edit arrived meanwhile, which must not be clobbered (the
       // re-run below will persist it). If the disk read also fails, keep the
@@ -130,7 +139,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [applySettings, flush],
   );
 
-  const value = useMemo(() => ({ settings, saveError, update }), [settings, saveError, update]);
+  const value = useMemo(
+    () => ({ settings, saveError, applyWarnings, update }),
+    [settings, saveError, applyWarnings, update],
+  );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
 }
