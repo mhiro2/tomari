@@ -39,10 +39,9 @@ pub fn switch_ime(mode: ImeMode) -> Result<(), String> {
 /// Synthesize the keystroke described by an accelerator string (e.g. "Escape").
 pub fn send_accelerator(accel: &str) -> Result<(), String> {
     let parsed = accelerator::parse(accel).map_err(|e| e.to_string())?;
-    let keycode =
-        keycode_for(&parsed.key).ok_or_else(|| format!("no keycode for `{}`", parsed.key))?;
+    let (keycode, mut flags) =
+        key_to_event(&parsed.key).ok_or_else(|| format!("no keycode for `{}`", parsed.key))?;
 
-    let mut flags = CGEventFlags::empty();
     if parsed.cmd {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
@@ -58,8 +57,23 @@ pub fn send_accelerator(accel: &str) -> Result<(), String> {
     post(keycode, flags)
 }
 
+/// The keycode and any modifier flags implied by the key name alone. `Plus` is
+/// Shift+`=` on the ANSI layout, so it carries an implied Shift; every other key
+/// contributes no flags of its own. `None` when the key has no keycode.
+fn key_to_event(key: &str) -> Option<(u16, CGEventFlags)> {
+    let keycode = keycode_for(key)?;
+    let flags = if key == "Plus" {
+        CGEventFlags::CGEventFlagShift
+    } else {
+        CGEventFlags::empty()
+    };
+    Some((keycode, flags))
+}
+
 /// Map a normalized accelerator key (see `tomari_keyboard::accelerator`) to a
-/// macOS ANSI virtual keycode.
+/// macOS ANSI virtual keycode. The set kept here must cover every key the
+/// accelerator parser can emit, or a `SendKeystroke` would save yet fail at
+/// send time.
 pub(crate) fn keycode_for(key: &str) -> Option<u16> {
     Some(match key {
         // Named keys.
@@ -89,6 +103,23 @@ pub(crate) fn keycode_for(key: &str) -> Option<u16> {
         "F10" => 0x6D,
         "F11" => 0x67,
         "F12" => 0x6F,
+        // F13–F20. macOS defines no virtual keycodes past F20, so F21–F24 (which
+        // the parser still accepts) have no mapping and remain unsendable.
+        "F13" => 0x69,
+        "F14" => 0x6B,
+        "F15" => 0x71,
+        "F16" => 0x6A,
+        "F17" => 0x40,
+        "F18" => 0x4F,
+        "F19" => 0x50,
+        "F20" => 0x5A,
+        // Punctuation (US ANSI). `Plus` shares the `=` key; `key_to_event` adds
+        // its implied Shift.
+        "Minus" => 0x1B,
+        "Equal" | "Plus" => 0x18,
+        "Comma" => 0x2B,
+        "Period" => 0x2F,
+        "Slash" => 0x2C,
         // Letters (US ANSI layout).
         "A" => 0x00,
         "B" => 0x0B,
@@ -129,4 +160,38 @@ pub(crate) fn keycode_for(key: &str) -> Option<u16> {
         "9" => 0x19,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tomari_keyboard::accelerator;
+
+    /// Every key the accelerator parser can produce — and that Tomari can store
+    /// in a `SendKeystroke` — must resolve to a keycode here, or the action would
+    /// parse and save yet fail at send time. macOS defines virtual keycodes only
+    /// through F20, so F21–F24 are the sole accepted gap.
+    #[test]
+    fn keysend_covers_parser_punctuation_and_function_keys() {
+        for key in [
+            "Plus", "Minus", "Equal", "Comma", "Period", "Slash", "F13", "F14", "F15", "F16",
+            "F17", "F18", "F19", "F20",
+        ] {
+            let parsed = accelerator::parse(key).unwrap();
+            assert!(
+                key_to_event(&parsed.key).is_some(),
+                "no keycode for parser-accepted key `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn plus_is_shift_equal() {
+        let (equal, equal_flags) = key_to_event("Equal").unwrap();
+        let (plus, plus_flags) = key_to_event("Plus").unwrap();
+        // Same physical key; `Plus` differs only by the implied Shift.
+        assert_eq!(plus, equal);
+        assert!(equal_flags.is_empty());
+        assert!(plus_flags.contains(CGEventFlags::CGEventFlagShift));
+    }
 }
