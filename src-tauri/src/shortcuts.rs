@@ -7,6 +7,7 @@ use std::str::FromStr;
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 /// A hotkey that could not be registered (invalid accelerator, or a conflict
@@ -35,7 +36,7 @@ pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<Registratio
         ));
     }
 
-    let mut map = state.shortcuts.lock().unwrap();
+    let mut map = state.shortcuts.lock_safe();
     map.clear();
 
     let hotkeys = state.db.list_hotkeys().map_err(|e| e.to_string())?;

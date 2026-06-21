@@ -18,6 +18,7 @@ mod keepawake;
 mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
+mod locks;
 #[cfg(target_os = "macos")]
 mod overlay;
 mod shortcuts;
@@ -33,6 +34,7 @@ use tomari_core::{AppPaths, AppSettings, Database, defaults};
 use tomari_keyboard::ModifierEngine;
 use tomari_window::WindowManager;
 
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 fn main() {
@@ -74,7 +76,7 @@ fn main() {
                     let Some(state) = app.try_state::<AppState>() else {
                         return;
                     };
-                    let entry = state.shortcuts.lock().unwrap().get(shortcut).cloned();
+                    let entry = state.shortcuts.lock_safe().get(shortcut).cloned();
                     let Some(action) = entry else {
                         return;
                     };
@@ -145,7 +147,7 @@ fn main() {
             // Apply the persisted menu-bar and login-item preferences on launch
             // so the actual system state matches what the settings show.
             let (show_tray, launch_at_login) = {
-                let s = state.settings.lock().unwrap();
+                let s = state.settings.lock_safe();
                 (s.show_in_menu_bar, s.launch_at_login)
             };
             if !show_tray {
@@ -283,12 +285,7 @@ fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     // process cannot move the user's windows when they have opted out.
     // `toggle-panel` is exempt: it only shows/hides Tomari's own panel and is
     // the recovery route for a hidden menu bar, so it must keep working.
-    if external.is_window_placement()
-        && !state
-            .settings
-            .lock()
-            .unwrap()
-            .external_window_actions_enabled
+    if external.is_window_placement() && !state.settings.lock_safe().external_window_actions_enabled
     {
         tracing::warn!(url = %raw, "external window actions disabled; ignoring tomari:// URL");
         return;
@@ -364,17 +361,84 @@ fn build_state(paths: &AppPaths) -> AppState {
         let _ = db.save_settings(&AppSettings::default());
     }
 
-    let settings = db.get_settings().unwrap_or_default();
+    // A read failure here is a row that opened fine but no longer decodes (a
+    // corrupt JSON blob, or a value a newer build wrote) — distinct from the
+    // unreadable *file* `open_database` already handled. Falling back keeps the
+    // app running, but never silently: the loss is logged and surfaced so the
+    // user knows their saved values are not in effect, rather than discovering it
+    // only when a later save overwrites them.
+    let settings = db.get_settings().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "could not read saved settings; using defaults for this session");
+        alert(
+            "Tomari could not read your saved settings, so it is running with defaults \
+             for now. Your settings file was left in place.",
+            false,
+        );
+        AppSettings::default()
+    });
 
     // The stored modifier rules plus the built-in left/right ⌘ IME toggle,
     // which lives behind a setting rather than as an editable row.
-    let mut rules = db.list_modifier_rules().unwrap_or_default();
+    let loaded_rules = db.list_modifier_rules();
+    // `Some(n)` only when the list actually read, so the per-row drop check below
+    // is skipped on a hard read failure (already surfaced by the fallback).
+    let decoded_rule_count = loaded_rules.as_ref().ok().map(Vec::len);
+    let mut rules = loaded_rules.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "could not read saved keyboard rules; starting with none for this session");
+        alert(
+            "Tomari could not read your saved keyboard rules, so none are active for \
+             now. Your saved rules were left in place.",
+            false,
+        );
+        Vec::new()
+    });
+
+    // A *whole-list* read failure is surfaced above; an individual row whose
+    // stored JSON no longer decodes is instead skipped silently by the list
+    // queries (one bad row must not lose the whole list). Compare the raw row
+    // counts with what decoded so that silent loss is surfaced too.
+    warn_on_undecodable_rows(&db, decoded_rule_count);
+
     if settings.command_ime_switch_enabled {
         rules.extend(defaults::command_ime_rules());
     }
     let engine = ModifierEngine::new(rules);
 
     AppState::new(db, engine, make_window_manager(), settings)
+}
+
+/// Alert (once) when the database holds hotkey or rule rows that no longer
+/// decode — which the list queries skip silently — so a vanished shortcut or
+/// rule is visible rather than a mystery. `decoded_rules` is the rule count
+/// already read in [`build_state`] (reused to avoid a second query); `None` when
+/// that read failed, in which case the rule drop check is skipped because the
+/// failure was already surfaced.
+fn build_drop_count(decoded: Option<usize>, total: Result<usize, tomari_core::Error>) -> usize {
+    match (decoded, total) {
+        (Some(decoded), Ok(total)) => total.saturating_sub(decoded),
+        _ => 0,
+    }
+}
+
+fn warn_on_undecodable_rows(db: &Database, decoded_rules: Option<usize>) {
+    let rules_dropped = build_drop_count(decoded_rules, db.count_modifier_rules());
+    // Hotkeys are not otherwise loaded here, so read both counts for the check;
+    // only a successful list paired with a successful count flags a real drop.
+    let hotkeys_dropped =
+        build_drop_count(db.list_hotkeys().ok().map(|h| h.len()), db.count_hotkeys());
+    if rules_dropped == 0 && hotkeys_dropped == 0 {
+        return;
+    }
+    tracing::error!(
+        rules = rules_dropped,
+        hotkeys = hotkeys_dropped,
+        "skipping saved rows that no longer decode"
+    );
+    alert(
+        "Some of your saved keyboard rules or shortcuts could not be read and were \
+         skipped. The rest are unaffected, and nothing was deleted.",
+        false,
+    );
 }
 
 /// Open the SQLite database, surviving a damaged file: corruption is real

@@ -35,6 +35,19 @@ impl Database {
         })
     }
 
+    /// Total stored hotkey rows, whether or not they still decode. Paired with
+    /// [`Database::list_hotkeys`] (which silently skips undecodable rows) to tell
+    /// whether any rows were dropped.
+    pub fn count_hotkeys(&self) -> Result<usize> {
+        self.count_rows("hotkeys")
+    }
+
+    /// Total stored modifier-rule rows, whether or not they still decode — the
+    /// counterpart to [`Database::count_hotkeys`] for [`Database::list_modifier_rules`].
+    pub fn count_modifier_rules(&self) -> Result<usize> {
+        self.count_rows("modifier_rules")
+    }
+
     pub fn upsert_hotkey(&self, hk: &Hotkey) -> Result<()> {
         self.with_conn(|conn| write_hotkey(conn, hk))
     }
@@ -243,5 +256,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(db.list_hotkeys().unwrap(), vec![good]);
+    }
+
+    #[test]
+    fn count_exceeds_decoded_count_when_rows_are_corrupt() {
+        // The raw row count must stay ahead of what the list decodes, so a
+        // caller can tell that rows were silently skipped and surface the loss.
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_hotkey(&Hotkey {
+            id: "good".into(),
+            label: "Snap left".into(),
+            accelerator: "Cmd+Alt+Left".into(),
+            action: AppAction::SnapWindow(WindowPreset::LeftHalf),
+            enabled: true,
+        })
+        .unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO hotkeys (id, label, accelerator, action, enabled)
+                 VALUES ('corrupt', 'Corrupt', 'Cmd+1', 'not json', 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.list_hotkeys().unwrap().len(),
+            1,
+            "the corrupt row is skipped"
+        );
+        assert_eq!(db.count_hotkeys().unwrap(), 2, "but it is still counted");
     }
 }

@@ -11,6 +11,7 @@ use tomari_keyboard::ModifierEngine;
 use tomari_window::{WindowHandle, WindowManager};
 
 use crate::keepawake::KeepAwake;
+use crate::locks::MutexExt;
 
 /// How many window frames the undo history keeps before dropping the oldest.
 const WINDOW_HISTORY_CAP: usize = 50;
@@ -96,20 +97,18 @@ impl AppState {
     /// live-state sync that follows — so config mutations stay serialized and
     /// the in-memory engines never disagree with the database.
     pub fn lock_config_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.config_mutation
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.config_mutation.lock_safe()
     }
 
     /// The cached display geometry for drag-to-snap (`(full_frame, work_area)`
     /// per display, CG coordinates). Empty until first refreshed.
     pub fn screen_geometry(&self) -> Vec<(Rect, Rect)> {
-        self.screen_geometry.lock().unwrap().clone()
+        self.screen_geometry.lock_safe().clone()
     }
 
     /// Replace the cached display geometry. Called from the main thread.
     pub fn set_screen_geometry(&self, screens: Vec<(Rect, Rect)>) {
-        *self.screen_geometry.lock().unwrap() = screens;
+        *self.screen_geometry.lock_safe() = screens;
     }
 
     /// Re-read the display geometry from the window manager into the cache.
@@ -123,7 +122,7 @@ impl AppState {
 
     /// Record a window and the frame it held before a window action moved it.
     pub fn push_window_history(&self, window: Box<dyn WindowHandle>, frame: Rect) {
-        let mut history = self.window_history.lock().unwrap();
+        let mut history = self.window_history.lock_safe();
         if history.len() == WINDOW_HISTORY_CAP {
             history.remove(0);
         }
@@ -132,22 +131,22 @@ impl AppState {
 
     /// Take the most recently recorded window/frame pair, if any.
     pub fn pop_window_history(&self) -> Option<(Box<dyn WindowHandle>, Rect)> {
-        self.window_history.lock().unwrap().pop()
+        self.window_history.lock_safe().pop()
     }
 
     /// The most recent preset snap, for hotkey-repeat cycling.
     pub fn last_snap(&self) -> Option<LastSnap> {
-        *self.last_snap.lock().unwrap()
+        *self.last_snap.lock_safe()
     }
 
     pub fn set_last_snap(&self, snap: LastSnap) {
-        *self.last_snap.lock().unwrap() = Some(snap);
+        *self.last_snap.lock_safe() = Some(snap);
     }
 
     /// Forget the cycle state so the next snap starts fresh — used after an
     /// exact (non-cycling) snap, which sits outside the cycle.
     pub fn clear_last_snap(&self) {
-        *self.last_snap.lock().unwrap() = None;
+        *self.last_snap.lock_safe() = None;
     }
 
     /// Milliseconds since this state was built — the clock both the event tap
@@ -158,7 +157,7 @@ impl AppState {
 
     /// Whether keyboard customization is currently enabled.
     pub fn keyboard_enabled(&self) -> bool {
-        self.settings.lock().unwrap().keyboard_enabled
+        self.settings.lock_safe().keyboard_enabled
     }
 }
 

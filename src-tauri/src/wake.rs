@@ -17,6 +17,7 @@ use objc2_app_kit::{
 use objc2_foundation::NSNotification;
 use tauri::{AppHandle, Manager};
 
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 /// Observe wake / session-active notifications for the app's lifetime.
@@ -47,7 +48,7 @@ fn reset(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(state) = handle.try_state::<AppState>() {
-            state.engine.lock().unwrap().reset();
+            state.engine.lock_safe().reset();
         }
         // Restarting the taps replaces their thread-local caps/hyper tracking.
         crate::eventtap::restart(&handle);

@@ -10,6 +10,7 @@ use tomari_core::{DisplayDirection, Rect, WindowPreset};
 use tomari_window::{WindowHandle, adjacent_work_area, geometry};
 
 use crate::error::CmdError;
+use crate::locks::MutexExt;
 use crate::state::{AppState, LastSnap};
 
 /// Whether a snap advances the 1/2 → 1/3 → 2/3 cycle on repeat, or always
@@ -26,7 +27,7 @@ pub enum SnapBehavior {
 
 /// Whether window management is enabled; window ops silently no-op when off.
 fn enabled(state: &AppState) -> bool {
-    state.settings.lock().unwrap().window_management_enabled
+    state.settings.lock_safe().window_management_enabled
 }
 
 /// Resolve the focused window, or fail like the platform implementations do

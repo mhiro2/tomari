@@ -23,6 +23,7 @@ use tauri::{AppHandle, Manager};
 use tomari_core::{Rect, WindowPreset};
 use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, screen_at_cursor};
 
+use crate::locks::MutexExt;
 use crate::overlay;
 use crate::state::AppState;
 
@@ -51,7 +52,7 @@ impl Drop for DragTap {
 /// (Re)start the tap to match the current settings: tear down any existing tap
 /// and, if drag-to-snap is enabled, start a fresh one.
 pub fn restart(app: &AppHandle) {
-    let mut guard = DRAG_TAP.lock().unwrap();
+    let mut guard = DRAG_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
     // Any snap preview on screen belongs to the tap we just dropped; a restart
     // (settings change, wake, permission grant) must not leave it stuck.
@@ -60,7 +61,7 @@ pub fn restart(app: &AppHandle) {
     let enabled = app
         .try_state::<AppState>()
         .map(|s| {
-            let settings = s.settings.lock().unwrap();
+            let settings = s.settings.lock_safe();
             settings.window_management_enabled && settings.drag_to_snap_enabled
         })
         .unwrap_or(false);
@@ -203,7 +204,7 @@ fn handle_event(
         // While disabled we may have missed the matching mouse-up, which would
         // otherwise leave a snap preview stranded. Drop any in-flight state and
         // clear the preview before re-arming.
-        if drag.lock().unwrap().take().is_some() {
+        if drag.lock_safe().take().is_some() {
             overlay::hide(app);
         }
         let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
@@ -241,7 +242,7 @@ fn handle_drag_to_snap(
 
     if !drag_to_snap_enabled(app_state) {
         // Defensive: drop any state left over if the feature was just disabled.
-        if drag.lock().unwrap().take().is_some() {
+        if drag.lock_safe().take().is_some() {
             overlay::hide(app);
         }
         return CallbackResult::Keep;
@@ -253,7 +254,7 @@ fn handle_drag_to_snap(
             // preview still up (e.g. a mouse-up lost while the tap was off),
             // clear it before overwriting the state.
             let stale_preview = {
-                let mut guard = drag.lock().unwrap();
+                let mut guard = drag.lock_safe();
                 let stale = guard.as_ref().is_some_and(|d| d.active.is_some());
                 // A drag-to-move/resize chord (⌃⌥ / ⌃⌥⌘) is held: that gesture
                 // owns this drag and is driving the window itself, so do not also
@@ -273,7 +274,7 @@ fn handle_drag_to_snap(
         CGEventType::LeftMouseDragged => {
             let location = event.location();
             let (x, y) = (location.x, location.y);
-            let mut guard = drag.lock().unwrap();
+            let mut guard = drag.lock_safe();
             let Some(d) = guard.as_mut() else {
                 return CallbackResult::Keep;
             };
@@ -324,7 +325,7 @@ fn handle_drag_to_snap(
             }
         }
         CGEventType::LeftMouseUp => {
-            let dropped = drag.lock().unwrap().take();
+            let dropped = drag.lock_safe().take();
             if let Some(d) = dropped {
                 overlay::hide(app);
                 if d.armed
@@ -347,7 +348,7 @@ fn handle_drag_to_snap(
 /// Whether drag-to-snap should run: it shares the window-management master
 /// switch and has its own opt-in toggle.
 fn drag_to_snap_enabled(app_state: &AppState) -> bool {
-    let settings = app_state.settings.lock().unwrap();
+    let settings = app_state.settings.lock_safe();
     settings.window_management_enabled && settings.drag_to_snap_enabled
 }
 

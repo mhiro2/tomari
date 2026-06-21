@@ -8,6 +8,7 @@ use tomari_keyboard::accelerator;
 
 use crate::actions;
 use crate::error::CmdError;
+use crate::locks::MutexExt;
 use crate::shortcuts;
 use crate::state::AppState;
 
@@ -43,7 +44,7 @@ pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
     // tray and taps run from; the DB is only its persistence layer. Reading the
     // row directly would let the UI drift from runtime state if a row were
     // hand-edited, out of range, or written ahead of the live update.
-    Ok(state.settings.lock().unwrap().clone())
+    Ok(state.settings.lock_safe().clone())
 }
 
 #[tauri::command]
@@ -55,7 +56,7 @@ pub fn save_settings(
     // Serialize against other concurrent config mutations, which each write to
     // the database and then rebuild the engines from it.
     let _config = state.lock_config_mutation();
-    let previous = state.settings.lock().unwrap().clone();
+    let previous = state.settings.lock_safe().clone();
 
     state.db.save_settings(&settings)?;
 
@@ -77,7 +78,7 @@ pub fn save_settings(
     let language_changed = previous.language != settings.language;
     let command_ime_changed =
         previous.command_ime_switch_enabled != settings.command_ime_switch_enabled;
-    *state.settings.lock().unwrap() = settings.clone();
+    *state.settings.lock_safe() = settings.clone();
 
     // Broadcast the new settings so the window's provider adopts them — keeping
     // its snapshot in step with any change applied out of band (e.g. a future
@@ -154,7 +155,7 @@ pub async fn check_for_update(
         version: u.version.clone(),
         notes: u.body.clone(),
     });
-    *pending.0.lock().unwrap() = update;
+    *pending.0.lock_safe() = update;
     Ok(info)
 }
 
@@ -164,14 +165,13 @@ pub async fn check_for_update(
 pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> CmdResult<()> {
     let update = pending
         .0
-        .lock()
-        .unwrap()
+        .lock_safe()
         .take()
         .ok_or("no pending update — check for updates first")?;
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
         let message = e.to_string();
         // Put the update back so a retry doesn't need a fresh check.
-        *pending.0.lock().unwrap() = Some(update);
+        *pending.0.lock_safe() = Some(update);
         return Err(CmdError::other(message));
     }
     // `restart` does not guarantee an `ExitRequested` event, so release sleep
@@ -318,10 +318,10 @@ fn reload_engine_rules(state: &AppState) -> CmdResult<()> {
     // The stored rules plus the built-in left/right ⌘ IME toggle, which lives
     // behind a setting rather than as an editable row.
     let mut rules = state.db.list_modifier_rules()?;
-    if state.settings.lock().unwrap().command_ime_switch_enabled {
+    if state.settings.lock_safe().command_ime_switch_enabled {
         rules.extend(tomari_core::defaults::command_ime_rules());
     }
-    state.engine.lock().unwrap().set_rules(rules);
+    state.engine.lock_safe().set_rules(rules);
     // The live tap picks up the new rules straight from the engine, but the Caps
     // Lock HID remap is out-of-band and must be brought into step here — adding,
     // disabling or deleting a Caps Lock rule changes whether it should be on.
@@ -401,7 +401,7 @@ pub fn set_hotkeys_suspended(
         app.global_shortcut()
             .unregister_all()
             .map_err(|e| CmdError::other(e.to_string()))?;
-        state.shortcuts.lock().unwrap().clear();
+        state.shortcuts.lock_safe().clear();
         Ok(())
     } else {
         // Hotkeys that fail to come back are logged by `register_all`; the

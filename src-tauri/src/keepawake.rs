@@ -45,6 +45,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 /// Event emitted whenever the keep-awake state changes, so every surface (the
@@ -112,7 +113,7 @@ pub struct KeepAwakeStatus {
 
 /// The current keep-awake status.
 pub fn status(state: &AppState) -> KeepAwakeStatus {
-    let k = state.keep_awake.lock().unwrap();
+    let k = state.keep_awake.lock_safe();
     KeepAwakeStatus {
         active: k.active,
         lid_close: k.lid_close,
@@ -127,7 +128,7 @@ pub fn set(app: &AppHandle, enabled: bool) -> KeepAwakeStatus {
 /// Flip sleep prevention. Used by the tray item and the `ToggleKeepAwake`
 /// action (hotkeys/leader/taps).
 pub fn toggle(app: &AppHandle) -> KeepAwakeStatus {
-    let active = app.state::<AppState>().keep_awake.lock().unwrap().active;
+    let active = app.state::<AppState>().keep_awake.lock_safe().active;
     set(app, !active)
 }
 
@@ -144,7 +145,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
     #[cfg(target_os = "macos")]
     let engaged;
     {
-        let mut k = state.keep_awake.lock().unwrap();
+        let mut k = state.keep_awake.lock_safe();
         if k.active {
             // Already on — nothing to do. This is safe against an in-flight
             // turn-off (whose worker is driving the override toward cleared) only
@@ -217,7 +218,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
 fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     {
-        let mut k = state.keep_awake.lock().unwrap();
+        let mut k = state.keep_awake.lock_safe();
         if !k.active {
             return KeepAwakeStatus {
                 active: false,
@@ -485,7 +486,7 @@ pub fn cleanup_blocking(app: &AppHandle) {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Release);
     let state = app.state::<AppState>();
     {
-        let mut k = state.keep_awake.lock().unwrap();
+        let mut k = state.keep_awake.lock_safe();
         k.active = false;
         #[cfg(target_os = "macos")]
         {
@@ -505,13 +506,11 @@ pub fn cleanup_blocking(app: &AppHandle) {
         // briefly wait on an auth dialog the worker itself triggered; the
         // write-ahead marker is the backstop for anything that still slips past.
         // Lock order is always LID_OP_LOCK → keep_awake (never the reverse).
-        let _op = LID_OP_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let we_own = state.keep_awake.lock().unwrap().we_own_override;
+        let _op = LID_OP_LOCK.lock_safe();
+        let we_own = state.keep_awake.lock_safe().we_own_override;
         let still_own = cleanup_lid_close_with(&RealSys, we_own);
         if still_own != we_own {
-            state.keep_awake.lock().unwrap().we_own_override = still_own;
+            state.keep_awake.lock_safe().we_own_override = still_own;
         }
     }
 }
@@ -548,14 +547,14 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state = app.state::<AppState>();
     let (we_own, generation) = {
-        let k = state.keep_awake.lock().unwrap();
+        let k = state.keep_awake.lock_safe();
         (k.we_own_override, k.generation)
     };
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
     let outcome = reconcile_lid_close_with(&RealSys, desired_on, we_own);
     {
-        let mut k = state.keep_awake.lock().unwrap();
+        let mut k = state.keep_awake.lock_safe();
         // Always record ownership — even when superseded — so a later worker or
         // cleanup can clear an override this cycle set.
         k.we_own_override = outcome.we_own;

@@ -8,6 +8,7 @@ use tauri::{App, AppHandle, Emitter, Manager};
 use tomari_core::{AppAction, Language, WindowPreset};
 
 use crate::actions;
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 /// Stable id so the tray icon can be looked up again to toggle its visibility
@@ -63,7 +64,7 @@ const TEXT_JA: Text = Text {
 /// The menu text for the configured language, following the OS locale when the
 /// setting is `System`.
 fn text(app: &AppHandle) -> &'static Text {
-    let language = app.state::<AppState>().settings.lock().unwrap().language;
+    let language = app.state::<AppState>().settings.lock_safe().language;
     let japanese = match language {
         Language::Ja => true,
         Language::En => false,

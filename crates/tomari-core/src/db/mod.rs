@@ -47,9 +47,28 @@ impl Database {
     }
 
     /// Run lock-guarded work against the connection.
+    ///
+    /// Recovers the guard from a poisoned mutex rather than panicking: a panic
+    /// while a query was running poisons the lock, and under the release
+    /// profile's `panic = "abort"` propagating that would silently terminate a
+    /// resident app. The connection itself stays usable (a panicking statement
+    /// does not corrupt it), so taking the guard back lets later queries proceed.
     fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let guard = self.conn.lock().expect("database mutex poisoned");
+        let guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         f(&guard)
+    }
+
+    /// Total row count of `table`. `table` is only ever an in-crate string
+    /// literal (never user input), so interpolating it carries no injection
+    /// risk. Used to compare against a decoded list and spot silently-skipped
+    /// (undecodable) rows.
+    fn count_rows(&self, table: &str) -> Result<usize> {
+        self.with_conn(|conn| {
+            let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+            Ok(n as usize)
+        })
     }
 
     fn migrate(&self) -> Result<()> {
