@@ -1,0 +1,57 @@
+//! Reset key-tracking state when the system wakes from sleep or the user
+//! session becomes active again (fast user switching).
+//!
+//! A modifier held while the machine goes to sleep never delivers its release
+//! to the event tap, so the engines and the tap-local state would keep
+//! believing a key is down — a remap applied to nothing, a hyper combo
+//! stamped onto every keystroke. `NSWorkspace` posts wake and session
+//! notifications on its own notification center; observing them lets the
+//! app drop every transient assumption about what is held.
+
+use std::ptr::NonNull;
+
+use block2::RcBlock;
+use objc2_app_kit::{
+    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
+};
+use objc2_foundation::NSNotification;
+use tauri::{AppHandle, Manager};
+
+use crate::state::AppState;
+
+/// Observe wake / session-active notifications for the app's lifetime.
+pub fn install(app: &AppHandle) {
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let names = unsafe {
+        [
+            NSWorkspaceDidWakeNotification,
+            NSWorkspaceSessionDidBecomeActiveNotification,
+        ]
+    };
+    for name in names {
+        let handle = app.clone();
+        let block = RcBlock::new(move |_: NonNull<NSNotification>| reset(&handle));
+        // The returned token owns the observation; it is intentionally leaked
+        // because the observation must last until the process exits.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+        };
+        std::mem::forget(token);
+    }
+}
+
+/// Drop all transient key-tracking state and restart the taps, so nothing
+/// carries a "key is held" belief across a sleep or session switch.
+fn reset(app: &AppHandle) {
+    tracing::info!("woke from sleep or session became active — resetting input state");
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(state) = handle.try_state::<AppState>() {
+            state.engine.lock().unwrap().reset();
+        }
+        // Restarting the taps replaces their thread-local caps/hyper tracking.
+        crate::eventtap::restart(&handle);
+        crate::drag_to_snap::restart(&handle);
+        crate::drag_to_move::restart(&handle);
+    });
+}
