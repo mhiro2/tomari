@@ -42,12 +42,15 @@ This needs no extra setup: the remap is applied automatically while a Caps Lock
 rule is enabled and removed when Tomari quits or the rule is turned off. A few
 consequences to be aware of:
 
-- It replaces any custom `hidutil` key mapping you may have set yourself.
+- It merges with, rather than replaces, any custom `hidutil` key mappings you
+  have set yourself: Tomari adds (and later removes) only its own Caps Lock → F18
+  entry, leaving your other mappings in place.
 - While a Caps Lock rule is active, a physical **F18** key (uncommon) is treated
   as Caps Lock too — the remap makes them indistinguishable.
 - If Tomari is force-quit (rather than quit normally) the remap can persist until
-  the next launch, which removes it again; you can also clear it yourself with
-  `hidutil property --set '{"UserKeyMapping":[]}'`.
+  the next launch, which removes it again; you can also clear just Tomari's entry
+  yourself by running `hidutil property --get UserKeyMapping`, removing the
+  Caps Lock → F18 entry, and setting the rest back.
 
 ## Window management
 
@@ -106,7 +109,9 @@ machine plugged in is recommended.
 Tomari runs as a menu bar app: clicking its menu bar icon opens a menu with
 quick actions plus a Settings entry that opens the window (Keyboard, Window,
 Session, and General tabs). You can hide the icon with **Show in menu bar** in
-the General tab if you prefer a fully background app.
+the General tab if you prefer a fully background app. Because hiding it removes
+the app's only visible affordance (Tomari has no Dock icon), turning it off asks
+you to confirm first and spells out how to reopen the window.
 
 Even with the icon hidden, you can always reopen the window:
 

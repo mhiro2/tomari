@@ -119,6 +119,9 @@ the OS `UserKeyMapping` facility (`hidutil`, Apple TN2450). The remap happens
 before the lock is interpreted, so Caps never locks; F18 emits real key-down/up
 that the tap drives as the Caps Lock modifier. `eventtap::restart` reconciles the
 remap with whether an enabled rule manages Caps Lock, and quit takes it down.
+Because setting the property rewrites the whole list, `apply`/`clear` read the
+current `UserKeyMapping` first and add/remove only Tomari's Caps Lock → F18
+entry, leaving any mappings the user set themselves intact.
 
 - All decisions live in the pure engine; the tap only handles input and
   output. Timestamps are unified on `AppState::now_ms()` (an `Instant`
