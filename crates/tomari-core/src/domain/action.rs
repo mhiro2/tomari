@@ -69,3 +69,52 @@ impl AppAction {
         matches!(self, Self::NoOp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::window::{DisplayDirection, WindowPreset};
+
+    /// Pins the wire contract with the hand-written TypeScript mirror in
+    /// `src/lib/types.ts`: each variant's adjacently-tagged `type` discriminant
+    /// must match what the frontend expects. The `match` below is exhaustive, so
+    /// adding a variant fails to compile here — a prompt to mirror it in
+    /// `types.ts` (and extend this list) rather than let the two drift.
+    #[test]
+    fn variant_tags_match_typescript_mirror() {
+        fn expected_tag(action: &AppAction) -> &'static str {
+            match action {
+                AppAction::TogglePanel => "togglePanel",
+                AppAction::SnapWindow(_) => "snapWindow",
+                AppAction::SnapWindowExact(_) => "snapWindowExact",
+                AppAction::MoveWindowToDisplay(_) => "moveWindowToDisplay",
+                AppAction::UndoWindow => "undoWindow",
+                AppAction::SwitchIme(_) => "switchIme",
+                AppAction::SendKeystroke(_) => "sendKeystroke",
+                AppAction::ToggleKeepAwake => "toggleKeepAwake",
+                AppAction::NoOp => "noOp",
+            }
+        }
+
+        let samples = [
+            AppAction::TogglePanel,
+            AppAction::SnapWindow(WindowPreset::LeftHalf),
+            AppAction::SnapWindowExact(WindowPreset::LeftHalf),
+            AppAction::MoveWindowToDisplay(DisplayDirection::Next),
+            AppAction::UndoWindow,
+            AppAction::SwitchIme(ImeMode::Kana),
+            AppAction::SendKeystroke("Escape".into()),
+            AppAction::ToggleKeepAwake,
+            AppAction::NoOp,
+        ];
+
+        for action in &samples {
+            let json = serde_json::to_value(action).unwrap();
+            assert_eq!(
+                json.get("type").and_then(|t| t.as_str()),
+                Some(expected_tag(action)),
+                "unexpected serde tag for {action:?}"
+            );
+        }
+    }
+}

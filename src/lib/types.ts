@@ -29,9 +29,13 @@ export type ImeMode = 'alphanumeric' | 'kana';
 export type Language = 'system' | 'en' | 'ja';
 
 // Adjacently-tagged enum: serde `#[serde(tag = "type", content = "value")]`.
+// Mirror of the Rust `AppAction` (crates/tomari-core/src/domain/action.rs); the
+// contract test there pins each variant's `type` tag so this list stays in sync.
 export type AppAction =
   | { type: 'togglePanel' }
   | { type: 'snapWindow'; value: WindowPreset }
+  // Like snapWindow but never cycles — emitted by the tomari:// URL scheme.
+  | { type: 'snapWindowExact'; value: WindowPreset }
   | { type: 'moveWindowToDisplay'; value: DisplayDirection }
   | { type: 'undoWindow' }
   | { type: 'switchIme'; value: ImeMode }
@@ -103,4 +107,14 @@ export interface CmdError {
 export interface UpdateInfo {
   version: string;
   notes: string | null;
+}
+
+// Result of saveSettings: the settings always persist (a write failure rejects
+// the command instead), but a side effect — registering the login item, showing
+// or hiding the menu bar icon — may still fail to apply. Each code in
+// `applyWarnings` names one that did, so the UI can warn that the stored
+// preference and the live system state disagree until retried. Empty on a fully
+// applied save.
+export interface SaveSettingsOutcome {
+  applyWarnings: string[];
 }

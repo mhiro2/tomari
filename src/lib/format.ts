@@ -102,6 +102,7 @@ export function actionLabel(action: AppAction, t: Translator): string {
     case 'togglePanel':
       return t('action.togglePanel');
     case 'snapWindow':
+    case 'snapWindowExact':
       return t('action.snap', { target: presetLabel(action.value, t) });
     case 'moveWindowToDisplay':
       return t('action.moveToDisplay', { display: displayDirectionLabel(action.value, t) });
