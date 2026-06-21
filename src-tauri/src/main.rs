@@ -24,6 +24,7 @@ mod overlay;
 mod shortcuts;
 mod state;
 mod tray;
+mod validate;
 #[cfg(target_os = "macos")]
 mod wake;
 mod window_ops;

@@ -187,6 +187,10 @@ pub fn list_hotkeys(state: State<'_, AppState>) -> CmdResult<Vec<Hotkey>> {
 
 #[tauri::command]
 pub fn save_hotkey(app: AppHandle, state: State<'_, AppState>, hotkey: Hotkey) -> CmdResult<()> {
+    // Don't trust the frontend: normalize the accelerator and reject empty /
+    // overlong ids and labels and bare-letter shortcuts before anything is
+    // stored or registered.
+    let hotkey = crate::validate::sanitize_hotkey(hotkey)?;
     let _config = state.lock_config_mutation();
     // Registration can fail even for a valid accelerator (e.g. a conflict with
     // another app), so snapshot the stored row and roll back on failure — the
