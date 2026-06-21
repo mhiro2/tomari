@@ -41,6 +41,7 @@ use tomari_keyboard::HYPER_MODIFIERS;
 use tomari_keyboard::engine::KeyEvent;
 
 use crate::keycodes;
+use crate::locks::MutexExt;
 use crate::state::AppState;
 
 /// Marker written into `EVENT_SOURCE_USER_DATA` on events Tomari synthesizes
@@ -97,7 +98,7 @@ impl Drop for EventTap {
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
 /// repeatedly (e.g. when the feature is toggled).
 pub fn restart(app: &AppHandle) {
-    let mut guard = EVENT_TAP.lock().unwrap();
+    let mut guard = EVENT_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
 
     let Some(state) = app.try_state::<AppState>() else {
@@ -107,7 +108,7 @@ pub fn restart(app: &AppHandle) {
     // so drop the engine's transient "key is held" state. Otherwise a held
     // modifier would linger in `held` and the next solo tap would be misread as
     // a chord.
-    state.engine.lock().unwrap().reset();
+    state.engine.lock_safe().reset();
 
     if !state.keyboard_enabled() {
         // Feature off: take the Caps Lock HID remap down along with the tap.
@@ -123,7 +124,7 @@ pub fn restart(app: &AppHandle) {
             // and record the *actual* resulting state (not the request) so a
             // failed `hidutil` cannot leave the proxy flag out of step with the
             // real mapping — which would route F18, or a stuck Caps, wrongly.
-            let manage = state.engine.lock().unwrap().has_caps_lock_rule();
+            let manage = state.engine.lock_safe().has_caps_lock_rule();
             CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(manage), Ordering::SeqCst);
         }
         Err(e) => {
@@ -140,9 +141,9 @@ pub fn restart(app: &AppHandle) {
 /// into step. A no-op unless the tap is running, so it never remaps Caps Lock to
 /// F18 with no tap to handle it.
 pub fn reconcile_caps_mapping(state: &AppState) {
-    let manage = EVENT_TAP.lock().unwrap().is_some()
+    let manage = EVENT_TAP.lock_safe().is_some()
         && state.keyboard_enabled()
-        && state.engine.lock().unwrap().has_caps_lock_rule();
+        && state.engine.lock_safe().has_caps_lock_rule();
     CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(manage), Ordering::SeqCst);
 }
 
@@ -154,7 +155,8 @@ struct TapState {
     /// must be tracked by toggling (all other modifiers derive theirs from
     /// the event's own flags).
     caps_down: bool,
-    /// Whether a hyper key is currently held.
+    /// Whether *any* hyper key is currently held (tracked off the engine's held
+    /// set, so holding two and releasing one keeps hyper active).
     hyper_active: bool,
     /// Modifier flags to `(remove, add)` on keystrokes typed while remapped
     /// keys are held, so a chord through them carries the target modifier. Caps
@@ -339,9 +341,10 @@ fn drive_modifier(
 ) -> (Option<ModifierKey>, bool) {
     let ModifierEvent { key, side, is_down } = *ev;
 
-    // Feed the engine and read back this key's held role.
-    let (tap_action, remap, hyper, held_remap_stamp) = {
-        let mut engine = app_state.engine.lock().unwrap();
+    // Feed the engine and read back this key's held role plus the post-event
+    // held set (so the stamp tracking reflects this very up/down).
+    let (tap_action, remap, hyper, any_hyper_held, held_remap_stamp) = {
+        let mut engine = app_state.engine.lock_safe();
         let action = engine.process(if is_down {
             KeyEvent::ModifierDown {
                 key,
@@ -359,15 +362,17 @@ fn drive_modifier(
             action,
             engine.remap_for(key, side),
             engine.is_hyper(key, side),
+            engine.is_any_hyper_held(),
             engine.held_remap_stamp(),
         )
     };
 
     {
-        let mut ts = state.lock().unwrap();
-        if hyper {
-            ts.hyper_active = is_down;
-        }
+        let mut ts = state.lock_safe();
+        // Track whether *any* hyper key is still held, not just this event's
+        // direction: releasing one of two held hyper keys must not drop the
+        // ⌃⌥⇧⌘ stamp while the other is still down.
+        ts.hyper_active = any_hyper_held;
         // Refresh the flags stamped onto later keystrokes from the now-updated
         // set of held remapped keys (this event may have added or removed one).
         ts.remap_stamp = held_remap_stamp;
@@ -395,7 +400,7 @@ fn on_flags_changed(
     // Derive down/up from the event itself, not remembered state (see
     // `derive_is_down`).
     let is_down = {
-        let mut ts = state.lock().unwrap();
+        let mut ts = state.lock_safe();
         derive_is_down(keycode, modkey, event.get_flags().bits(), &mut ts.caps_down)
     };
 
@@ -474,8 +479,7 @@ fn on_key_down(
     // Any non-modifier key turns a pending modifier tap into a chord.
     app_state
         .engine
-        .lock()
-        .unwrap()
+        .lock_safe()
         .process(KeyEvent::OtherKeyDown { at_ms: now });
 
     stamp_held_modifiers(state, event);
@@ -521,7 +525,7 @@ fn on_key_up(
 /// it for Caps Lock, which as a lock key leaves it with no held-modifier state.
 fn stamp_held_modifiers(state: &Arc<Mutex<TapState>>, event: &CGEvent) {
     let (hyper_active, (remove, add)) = {
-        let ts = state.lock().unwrap();
+        let ts = state.lock_safe();
         (ts.hyper_active, ts.remap_stamp.clone())
     };
     if !hyper_active && remove.is_empty() && add.is_empty() {

@@ -161,6 +161,16 @@ impl ModifierEngine {
         self.find_rule(key, side).is_some_and(|r| r.hyper)
     }
 
+    /// Whether *any* currently-held managed modifier is a hyper key. The tap
+    /// keeps the ⌃⌥⇧⌘ stamp active for as long as this holds, so releasing one
+    /// of two simultaneously-held hyper keys does not drop hyper while the other
+    /// is still down (tracking a single `bool` off each key's own up/down would).
+    pub fn is_any_hyper_held(&self) -> bool {
+        self.held
+            .iter()
+            .any(|&(key, side)| self.is_hyper(key, side))
+    }
+
     /// Feed one event in; returns an action to perform, if a tap completed.
     pub fn process(&mut self, event: KeyEvent) -> Option<AppAction> {
         match event {
@@ -545,6 +555,66 @@ mod tests {
         let e = engine(vec![r]);
         assert!(e.is_hyper(ModifierKey::CapsLock, KeySide::Left));
         assert!(!e.is_hyper(ModifierKey::Shift, KeySide::Left));
+    }
+
+    #[test]
+    fn hyper_stays_held_while_any_hyper_key_is_down() {
+        // Two independent hyper keys. Releasing one must not drop hyper while the
+        // other is still held — the regression a single `hyper_active` bool had.
+        let mut caps = rule(ModifierKey::CapsLock, KeySide::Either, AppAction::NoOp);
+        caps.hyper = true;
+        let mut right_cmd = rule(ModifierKey::Command, KeySide::Right, AppAction::NoOp);
+        right_cmd.hyper = true;
+        let mut e = engine(vec![caps, right_cmd]);
+
+        assert!(!e.is_any_hyper_held());
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::CapsLock,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        assert!(e.is_any_hyper_held());
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Command,
+            side: KeySide::Right,
+            at_ms: 10,
+        });
+        assert!(e.is_any_hyper_held());
+
+        // Release the first: the second is still down, so hyper holds.
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::CapsLock,
+            side: KeySide::Left,
+            at_ms: 20,
+        });
+        assert!(
+            e.is_any_hyper_held(),
+            "hyper must persist while another hyper key is still held"
+        );
+
+        // Release the second: now nothing is held.
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::Command,
+            side: KeySide::Right,
+            at_ms: 30,
+        });
+        assert!(!e.is_any_hyper_held());
+    }
+
+    #[test]
+    fn non_hyper_held_key_is_not_counted_as_hyper() {
+        // A held modifier with no hyper rule must not register as hyper.
+        let mut e = engine(vec![rule(
+            ModifierKey::Shift,
+            KeySide::Left,
+            AppAction::NoOp,
+        )]);
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Shift,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        assert!(!e.is_any_hyper_held());
     }
 
     #[test]
