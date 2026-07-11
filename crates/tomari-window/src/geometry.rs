@@ -55,12 +55,21 @@ pub fn remap_frame(frame: Rect, from: Rect, to: Rect) -> Rect {
     let fy = (frame.y - from.y) / from.height;
     let fw = frame.width / from.width;
     let fh = frame.height / from.height;
-    Rect::new(
-        to.x + fx * to.width,
-        to.y + fy * to.height,
-        (fw * to.width).min(to.width),
-        (fh * to.height).min(to.height),
-    )
+    let width = (fw * to.width).min(to.width);
+    let height = (fh * to.height).min(to.height);
+    // Clamp the origin after the proportional mapping: a window that overhung
+    // its original work area (ratio > 1, or a negative offset from a display
+    // further off in a multi-monitor layout) would otherwise land partly or
+    // fully outside `to`. Clamp high first (against the far edge) so an
+    // oversized window still settles at `to`'s near edge rather than
+    // straddling both bounds.
+    let x = (to.x + fx * to.width)
+        .min(to.x + to.width - width)
+        .max(to.x);
+    let y = (to.y + fy * to.height)
+        .min(to.y + to.height - height)
+        .max(to.y);
+    Rect::new(x, y, width, height)
 }
 
 /// The presets a half-snap cycles through on repeated activation:
@@ -442,6 +451,61 @@ mod tests {
                 "{preset:?} bottom"
             );
         }
+    }
+
+    #[test]
+    fn remap_frame_scales_proportionally_between_displays() {
+        // A window filling the left half of a 1600-wide area should fill the
+        // left half of a differently sized target area too.
+        let from = Rect::new(0.0, 25.0, 1600.0, 975.0);
+        let to = Rect::new(1600.0, 0.0, 1200.0, 800.0);
+        let frame = compute_frame(WindowPreset::LeftHalf, from);
+        let remapped = remap_frame(frame, from, to);
+        assert_eq!(remapped, Rect::new(1600.0, 0.0, 600.0, 800.0));
+    }
+
+    #[test]
+    fn remap_frame_clamps_origin_when_source_frame_overhangs_its_area() {
+        // A window that overhangs its original work area (ratio > 1 on the
+        // x-axis) would, without clamping, land partly outside `to`.
+        let from = Rect::new(0.0, 0.0, 1000.0, 1000.0);
+        let to = Rect::new(2000.0, 0.0, 1000.0, 1000.0);
+        // Starts at x = 900 (ratio 0.9) with width 300 (ratio 0.3): the right
+        // edge sits at ratio 1.2, past the source area's own right edge.
+        let overhanging = Rect::new(900.0, 100.0, 300.0, 200.0);
+        let remapped = remap_frame(overhanging, from, to);
+        // Width still scales proportionally (300 * 1.0 = 300, unclamped since
+        // it fits within `to`'s width), but the origin must be pulled back so
+        // the window stays fully inside `to`.
+        assert_eq!(remapped.width, 300.0);
+        assert!(remapped.x >= to.x);
+        assert!(remapped.x + remapped.width <= to.x + to.width);
+        assert_eq!(remapped.x, to.x + to.width - remapped.width);
+    }
+
+    #[test]
+    fn remap_frame_clamps_origin_on_a_display_with_negative_offset() {
+        // A secondary display placed to the left of the main display, as
+        // macOS reports it (negative x origin).
+        let from = Rect::new(0.0, 25.0, 1600.0, 975.0);
+        let to = Rect::new(-1440.0, 25.0, 1440.0, 875.0);
+        // A window pinned to the right edge of `from` maps past `to`'s right
+        // edge before clamping (ratio 1.0 scaled onto a narrower display).
+        let frame = Rect::new(1400.0, 25.0, 400.0, 975.0);
+        let remapped = remap_frame(frame, from, to);
+        assert!(remapped.x >= to.x);
+        assert!(remapped.x + remapped.width <= to.x + to.width);
+    }
+
+    #[test]
+    fn remap_frame_shrinks_but_stays_anchored_for_an_oversized_window() {
+        // The source window is larger than the destination area entirely
+        // (e.g. moving from a large main display to a small secondary one).
+        let from = Rect::new(0.0, 25.0, 1600.0, 975.0);
+        let to = Rect::new(1600.0, 0.0, 800.0, 600.0);
+        let frame = compute_frame(WindowPreset::Maximize, from);
+        let remapped = remap_frame(frame, from, to);
+        assert_eq!(remapped, to, "a maximized window remaps to fill `to`");
     }
 
     #[test]
