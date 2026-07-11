@@ -14,11 +14,13 @@ type Tab = 'keyboard' | 'window' | 'session' | 'general';
 
 const TABS: Tab[] = ['keyboard', 'window', 'session', 'general'];
 
+// The text-presentation selector (U+FE0E) keeps these glyphs rendering as
+// plain monochrome text, not emoji, on macOS.
 const TAB_ICONS: Record<Tab, string> = {
-  keyboard: '⌨',
-  window: '▦',
-  session: '◉',
-  general: '⚙',
+  keyboard: '⌨︎',
+  window: '▦︎',
+  session: '◉︎',
+  general: '⚙︎',
 };
 
 export function App() {

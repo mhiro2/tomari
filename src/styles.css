@@ -3,8 +3,11 @@
 
    Visual language: a solid dark window carries warm-neutral surfaces; amber is
    reserved for *state* — the active path, a waiting input, the spot a window
-   lands. Keycaps live only in the Keyboard domain; the shared motif elsewhere
-   is the frame, the region that settles into place.
+   lands. Warning/attention surfaces (a feature switched off, a destructive
+   confirmation, a permission banner) use --warn instead, kept clearly apart
+   from amber in hue so state and attention never read as the same signal.
+   Keycaps live only in the Keyboard domain; the shared motif elsewhere is the
+   frame, the region that settles into place.
    ========================================================================= */
 
 /* Tomari is dark-only: one token set, no theme switch. */
@@ -25,16 +28,18 @@
   /* Amber — the state color (active / waiting / landing) */
   --amber: #f6c945;
   --amber-bright: #ffd863;
-  --amber-ink: #3a2e05;
   --amber-soft: rgba(246, 201, 69, 0.16);
   --amber-line: rgba(246, 201, 69, 0.45);
   --focus: rgba(246, 201, 69, 0.55);
 
-  /* Semantic — never mixed with amber */
+  /* Semantic — never mixed with amber. --warn sits at a distinctly more
+     orange hue than --amber (and short of --err's red) so the two are never
+     mistaken for one another at a glance. */
   --ok: #4cc97a;
   --ok-soft: rgba(76, 201, 122, 0.16);
-  --warn: #e0a93a;
-  --warn-soft: rgba(224, 169, 58, 0.16);
+  --warn: #dd873c;
+  --warn-soft: rgba(221, 135, 60, 0.16);
+  --warn-line: rgba(221, 135, 60, 0.45);
   --err: #e0795f;
   --err-soft: rgba(224, 121, 95, 0.16);
 
@@ -45,6 +50,12 @@
   --radius-sm: 9px;
   --radius-xs: 6px;
   --shadow: 0 1px 2px rgb(0 0 0 / 28%);
+
+  /* Type scale — four steps cover every size in the UI. */
+  --fs-caption: 11px;
+  --fs-small: 12px;
+  --fs-body: 13px;
+  --fs-title: 14px;
 
   color-scheme: dark;
 }
@@ -65,7 +76,7 @@ body,
 body {
   font-family:
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1.45;
   color: var(--ink);
   background: var(--solid);
@@ -114,12 +125,16 @@ body {
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--ink-dim);
-  font-size: 12px;
+  font-size: var(--fs-small);
   font-weight: 550;
   cursor: pointer;
   transition:
     color 0.12s ease,
     background 0.12s ease;
+}
+
+.tab:active {
+  filter: brightness(0.9);
 }
 
 .tab:hover:not(.tab--active) {
@@ -133,7 +148,7 @@ body {
 }
 
 .tab__icon {
-  font-size: 12px;
+  font-size: var(--fs-small);
   opacity: 0.85;
 }
 
@@ -180,7 +195,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  transition: opacity 0.15s ease;
 }
 
 /* ===== Settings group (inset list) ===================================== */
@@ -193,7 +207,7 @@ body {
 
 .group__label {
   margin: 0 4px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -209,7 +223,7 @@ body {
 
 .group__note {
   margin: 0 4px;
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   color: var(--ink-dim);
 }
 
@@ -262,7 +276,7 @@ body {
 
 .item__desc {
   color: var(--ink-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
 }
 
 .item__trail {
@@ -270,20 +284,6 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-/* Value row: label on top, full-width control beneath. */
-.item--value {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 9px;
-}
-
-.item__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
 }
 
 /* ===== Master switch (tab header) ====================================== */
@@ -306,13 +306,15 @@ body {
 
 .master__title {
   flex: 1;
-  font-size: 14px;
+  font-size: var(--fs-title);
   font-weight: 600;
 }
 
+/* Feature switched off: an attention surface, not a state one — --warn, not
+   amber. */
 .master--off {
-  background: var(--amber-soft);
-  border-color: var(--amber-line);
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
 }
 
 .master__off {
@@ -324,7 +326,7 @@ body {
 .master__off p {
   margin: 0;
   flex: 1;
-  font-size: 12px;
+  font-size: var(--fs-small);
   color: var(--ink-dim);
 }
 
@@ -374,101 +376,6 @@ body {
   transform: translateX(16px);
 }
 
-/* ===== Segmented control =============================================== */
-
-.segmented {
-  display: inline-flex;
-  padding: 2px;
-  gap: 2px;
-  background: var(--surface-sunken);
-  border-radius: var(--radius-xs);
-}
-
-.segmented__opt {
-  border: 0;
-  background: transparent;
-  color: var(--ink-dim);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 12px;
-  border-radius: 5px;
-  cursor: pointer;
-  transition: color 0.12s ease;
-}
-
-.segmented__opt:hover {
-  color: var(--ink);
-}
-
-.segmented__opt--sel {
-  background: var(--surface-strong);
-  color: var(--amber-ink);
-  box-shadow: var(--shadow);
-}
-
-:root .segmented__opt--sel {
-  color: var(--amber-bright);
-}
-
-/* ===== Slider ========================================================== */
-
-.slider {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.slider__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.slider__value {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  font-size: 12px;
-  color: var(--amber-ink);
-  background: var(--amber-soft);
-  padding: 1px 8px;
-  border-radius: 999px;
-}
-
-:root .slider__value {
-  color: var(--amber-bright);
-}
-
-.slider__scale {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10.5px;
-  color: var(--ink-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-input[type='range'] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--surface-sunken);
-  cursor: pointer;
-}
-
-input[type='range']::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  border: 1px solid var(--line-strong);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
-}
-
 /* ===== Buttons ========================================================= */
 
 .btn {
@@ -487,6 +394,10 @@ input[type='range']::-webkit-slider-thumb {
 
 .btn:hover {
   background: var(--surface-strong);
+}
+
+.btn:active {
+  filter: brightness(0.9);
 }
 
 .btn--ghost {
@@ -518,12 +429,8 @@ input[type='range']::-webkit-slider-thumb {
 .btn--amber {
   background: var(--amber-soft);
   border-color: var(--amber-line);
-  color: var(--amber-ink);
-  font-weight: 600;
-}
-
-:root .btn--amber {
   color: var(--amber-bright);
+  font-weight: 600;
 }
 
 .btn--amber:hover {
@@ -531,16 +438,18 @@ input[type='range']::-webkit-slider-thumb {
   border-color: var(--amber);
 }
 
-/* A button that is currently the selected option (gesture modifiers). */
-.btn--active {
-  background: var(--amber-soft);
-  border-color: var(--amber);
-  color: var(--amber-ink);
+/* A destructive action awaiting its confirming click — an attention state,
+   not the amber "active path". */
+.btn--warn {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+  color: var(--warn);
   font-weight: 600;
 }
 
-:root .btn--active {
-  color: var(--amber-bright);
+.btn--warn:hover {
+  background: var(--warn-soft);
+  border-color: var(--warn);
 }
 
 .btn:disabled {
@@ -554,7 +463,7 @@ input[type='range']::-webkit-slider-thumb {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   padding: 2px 9px;
   border-radius: 999px;
@@ -573,10 +482,6 @@ input[type='range']::-webkit-slider-thumb {
 
 .chip--on {
   background: var(--amber-soft);
-  color: var(--amber-ink);
-}
-
-:root .chip--on {
   color: var(--amber-bright);
 }
 
@@ -610,14 +515,6 @@ input[type='range']::-webkit-slider-thumb {
   color: var(--ink);
 }
 
-.input--error {
-  border-color: var(--err);
-}
-
-.input--num {
-  width: 56px;
-}
-
 select.input {
   cursor: pointer;
 }
@@ -627,19 +524,14 @@ select.input {
 .hint {
   margin: 0;
   color: var(--ink-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
 }
 
-.hint--ok {
-  color: var(--ok);
-}
-
+/* Used standalone (not alongside .hint) for an inline error line. */
 .hint--err {
+  margin: 0;
   color: var(--err);
-}
-
-.hint--warn {
-  color: var(--warn);
+  font-size: var(--fs-caption);
 }
 
 /* Save failures live at the shell, so they survive a tab switch. */
@@ -649,7 +541,7 @@ select.input {
   gap: 8px;
   margin: 0 12px 8px;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: var(--fs-small);
   border-radius: var(--radius-sm);
   background: var(--err-soft);
   color: var(--err);
@@ -659,17 +551,11 @@ select.input {
 .status {
   margin: 0 4px;
   color: var(--ink-dim);
-  font-size: 12px;
+  font-size: var(--fs-small);
 }
 
 .status--err {
   color: var(--err);
-}
-
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 .row {
@@ -689,7 +575,7 @@ select.input {
   border: 1px solid var(--line-strong);
   border-bottom-width: 2px;
   border-radius: var(--radius-xs);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
 }
 
@@ -700,7 +586,7 @@ select.input {
 
 kbd {
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   padding: 3px 6px;
   background: var(--field-bg);
   border: 1px solid var(--line-strong);
@@ -734,12 +620,12 @@ kbd {
 
 .recorder__placeholder {
   color: var(--ink-faint);
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
 }
 
 .recorder__err {
   color: var(--err);
-  font-size: 11px;
+  font-size: var(--fs-caption);
 }
 
 /* ===== Window presets & glyphs (frame / landing region) =============== */
@@ -761,7 +647,7 @@ kbd {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
   color: var(--ink-dim);
   transition:
     border-color 0.12s ease,
@@ -771,6 +657,10 @@ kbd {
 .preset:hover {
   border-color: var(--amber);
   color: var(--ink);
+}
+
+.preset:active {
+  filter: brightness(0.9);
 }
 
 .preset__glyph {
@@ -811,10 +701,6 @@ kbd {
   flex: 0 0 auto;
 }
 
-.add-form > .hint {
-  flex-basis: 100%;
-}
-
 /* ===== Permission banner =============================================== */
 
 .banner {
@@ -828,12 +714,12 @@ kbd {
 }
 
 .banner strong {
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
 
 .banner p {
   margin: 2px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-small);
   color: var(--ink-dim);
 }
 
