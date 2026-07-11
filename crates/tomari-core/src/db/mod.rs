@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -39,6 +40,9 @@ impl Database {
     fn from_connection(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Wait for a lock held by another connection (e.g. a concurrent writer
+        // under WAL) instead of failing immediately with `SQLITE_BUSY`.
+        conn.busy_timeout(Duration::from_secs(5))?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -74,7 +78,18 @@ impl Database {
     fn migrate(&self) -> Result<()> {
         self.with_conn(|conn| {
             let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version >= SCHEMA_VERSION {
+            if version > SCHEMA_VERSION {
+                // The database was written by a newer version of the app and
+                // uses a schema this binary does not understand. Opening it
+                // anyway risks silent data loss or corruption, so refuse
+                // outright rather than proceeding as if `version ==
+                // SCHEMA_VERSION`.
+                return Err(Error::Migration(format!(
+                    "database schema version {version} is newer than this app supports \
+                     (expected at most {SCHEMA_VERSION}); please update the app"
+                )));
+            }
+            if version == SCHEMA_VERSION {
                 return Ok(());
             }
 
@@ -160,5 +175,52 @@ mod tests {
         let db = Database::open_in_memory().expect("open");
         assert!(db.list_hotkeys().expect("hotkeys").is_empty());
         assert!(db.list_modifier_rules().expect("modifier rules").is_empty());
+    }
+
+    #[test]
+    fn refuses_to_open_a_database_from_a_newer_schema_version() {
+        // A database stamped with a `user_version` ahead of what this binary
+        // knows about was written by a newer app version. Opening it as if it
+        // matched the current schema could silently corrupt or drop data, so
+        // it must be rejected instead.
+        let db = Database::open_in_memory().expect("open");
+        db.with_conn(|conn| {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)?;
+            Ok(())
+        })
+        .expect("bump user_version");
+
+        let err = db.migrate().expect_err("newer schema must be rejected");
+        assert!(matches!(err, Error::Migration(_)));
+    }
+
+    #[test]
+    fn on_disk_database_survives_close_and_reopen() {
+        // In-memory tests never exercise the real file-backed path (WAL
+        // checkpointing, the file actually persisting to disk). Open a file
+        // under a temp directory, write through one connection, drop it, then
+        // reopen the same path and confirm the data is still there.
+        use crate::domain::action::AppAction;
+        use crate::domain::keyboard::Hotkey;
+        use crate::domain::window::WindowPreset;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tomari.sqlite3");
+
+        let hk = Hotkey {
+            id: "h1".into(),
+            label: "Snap left".into(),
+            accelerator: "Cmd+Alt+Left".into(),
+            action: AppAction::SnapWindow(WindowPreset::LeftHalf),
+            enabled: true,
+        };
+
+        {
+            let db = Database::open(&path).expect("open on-disk db");
+            db.upsert_hotkey(&hk).expect("write hotkey");
+        } // `db` and its connection are dropped here.
+
+        let db = Database::open(&path).expect("reopen on-disk db");
+        assert_eq!(db.list_hotkeys().expect("hotkeys"), vec![hk]);
     }
 }
