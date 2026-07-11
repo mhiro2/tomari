@@ -239,12 +239,15 @@ export function KeyboardView() {
           label={t('keyboard.modifierKeys')}
           note={
             modifierError ? (
-              <span className="hint--err">{modifierError}</span>
+              <span className="hint--err" role="alert">
+                {modifierError}
+              </span>
             ) : (
               t('keyboard.modifierHint')
             )
           }
         >
+          {rules.length === 0 && <p className="hint">{t('keyboard.noModifierRules')}</p>}
           {rules.map((rule) => (
             <ModifierRow
               key={rule.id}
@@ -269,8 +272,15 @@ export function KeyboardView() {
 
         <Group
           label={t('keyboard.globalShortcuts')}
-          note={shortcutError ? <span className="hint--err">{shortcutError}</span> : undefined}
+          note={
+            shortcutError ? (
+              <span className="hint--err" role="alert">
+                {shortcutError}
+              </span>
+            ) : undefined
+          }
         >
+          {hotkeys.length === 0 && <p className="hint">{t('keyboard.noHotkeys')}</p>}
           {hotkeys.map((hk) => (
             <HotkeyRow
               key={hk.id}
@@ -329,6 +339,20 @@ function HotkeyRow({
   onDelete: () => void;
 }) {
   const t = useT();
+  // A bare ✕ right next to the enable toggle is one misclick away from
+  // deleting a hotkey with no way back, so the first click only arms a
+  // confirmation — the actual delete needs a second, deliberate click.
+  const [confirming, setConfirming] = useState(false);
+
+  function handleDeleteClick() {
+    if (confirming) {
+      onDelete();
+      setConfirming(false);
+    } else {
+      setConfirming(true);
+    }
+  }
+
   return (
     <EntityRow
       lead={
@@ -350,12 +374,23 @@ function HotkeyRow({
         <>
           <button
             type="button"
-            className="btn btn--ghost"
-            onClick={onDelete}
+            className={`btn btn--ghost ${confirming ? 'btn--amber' : ''}`}
+            onClick={handleDeleteClick}
+            onBlur={() => setConfirming(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && confirming) {
+                e.stopPropagation();
+                setConfirming(false);
+              }
+            }}
             disabled={saving}
-            aria-label={t('common.delete')}
+            aria-label={
+              confirming
+                ? t('common.deleteConfirm', { label: hotkey.label })
+                : t('keyboard.deleteShortcut', { label: hotkey.label })
+            }
           >
-            ✕
+            {confirming ? t('common.deleteConfirmShort') : '✕'}
           </button>
           <Toggle
             checked={hotkey.enabled}

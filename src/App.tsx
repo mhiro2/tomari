@@ -84,7 +84,7 @@ function AppShell() {
             key={id}
             type="button"
             className={`tab ${tab === id ? 'tab--active' : ''}`}
-            aria-current={tab === id}
+            aria-current={tab === id ? 'true' : undefined}
             // When off, fold the state into the accessible name; the dot itself
             // is decorative.
             aria-label={

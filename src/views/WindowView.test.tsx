@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -153,6 +153,34 @@ describe('WindowView', () => {
 
     fireEvent.click(await screen.findByText('Grant Access'));
     expect(await screen.findByRole('status')).toHaveTextContent('grant failed');
+  });
+
+  it('gives an error status a distinct tone and keeps it visible', async () => {
+    mockCommands({
+      snap_window: Object.assign(new Error('snap failed'), { code: 'unknown' }),
+    });
+    renderView(<WindowView />);
+
+    fireEvent.click(await screen.findByText('Left Half'));
+
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent('snap failed');
+    expect(status).toHaveClass('status--err');
+  });
+
+  it('auto-clears a success status but not an error status', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderView(<WindowView />);
+
+      fireEvent.click(await screen.findByText('Left Half'));
+      expect(await screen.findByRole('status')).toHaveTextContent('Snapped to Left Half');
+
+      await act(() => vi.advanceTimersByTimeAsync(4000));
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hides the Accessibility banner once "tomari:permissions-changed" reports it granted', async () => {

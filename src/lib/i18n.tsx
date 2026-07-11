@@ -15,7 +15,10 @@ const en = {
 
   'common.add': 'Add',
   'common.delete': 'Delete',
+  'common.deleteConfirm': 'Delete {label}?',
+  'common.deleteConfirmShort': 'Delete?',
   'common.cancel': 'Cancel',
+  'common.empty': 'Nothing here yet.',
   'common.label': 'Label',
   'common.loading': 'Loading…',
   'common.enable': 'Enable {label}',
@@ -69,10 +72,13 @@ const en = {
   'keyboard.actionAria': 'Action',
   'keyboard.recordShortcut': 'Record Shortcut',
   'keyboard.changeShortcut': 'Change shortcut for {label}',
+  'keyboard.deleteShortcut': 'Delete {label}',
   'keyboard.offNote': "Keyboard customization is off — taps and shortcuts won't fire.",
   'keyboard.imNeeded': 'Input Monitoring access needed',
   'keyboard.imBody':
     'Tomari reads real keyboard events through macOS Input Monitoring to detect taps, holds, and the hyper key.',
+  'keyboard.noModifierRules': 'No modifier keys to configure.',
+  'keyboard.noHotkeys': 'No global shortcuts yet — add one below.',
 
   'recorder.click': 'Click to record',
   'recorder.typing': 'Type shortcut…',
@@ -181,7 +187,10 @@ const ja: Record<MessageKey, string> = {
 
   'common.add': '追加',
   'common.delete': '削除',
+  'common.deleteConfirm': '{label} を削除しますか？',
+  'common.deleteConfirmShort': '削除する？',
   'common.cancel': 'キャンセル',
+  'common.empty': 'まだ何もありません。',
   'common.label': 'ラベル',
   'common.loading': '読み込み中…',
   'common.enable': '{label} を有効化',
@@ -235,10 +244,13 @@ const ja: Record<MessageKey, string> = {
   'keyboard.actionAria': 'アクション',
   'keyboard.recordShortcut': 'ショートカットを記録',
   'keyboard.changeShortcut': '{label} のショートカットを変更',
+  'keyboard.deleteShortcut': '{label} を削除',
   'keyboard.offNote': 'キーボードカスタマイズはオフです。タップ・ショートカットは実行されません。',
   'keyboard.imNeeded': '入力監視(Input Monitoring)へのアクセスが必要です',
   'keyboard.imBody':
     'Tomari は macOS の入力監視機能でキーボードの実イベントを読み取り、押す/長押し・Hyper キーを検出します。',
+  'keyboard.noModifierRules': '設定できる修飾キーがありません。',
+  'keyboard.noHotkeys': 'グローバルショートカットはまだありません。下から追加してください。',
 
   'recorder.click': 'クリックして記録',
   'recorder.typing': 'ショートカットを入力…',

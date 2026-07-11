@@ -265,4 +265,39 @@ describe('KeyboardView', () => {
       expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
     });
   });
+
+  it('requires a second click to delete a hotkey, and the first click can be backed out of', async () => {
+    mockCommands();
+    renderView(<KeyboardView />);
+
+    const deleteButton = await screen.findByLabelText('Delete Toggle panel');
+    fireEvent.click(deleteButton);
+
+    // Armed, but not yet deleted.
+    expect(mockInvoke.mock.calls.filter((c) => c[0] === 'delete_hotkey')).toHaveLength(0);
+    const confirmButton = await screen.findByLabelText('Delete Toggle panel?');
+    expect(confirmButton).toHaveTextContent('Delete?');
+
+    // Escape backs out without deleting.
+    fireEvent.keyDown(confirmButton, { key: 'Escape' });
+    expect(await screen.findByLabelText('Delete Toggle panel')).toBeInTheDocument();
+    expect(mockInvoke.mock.calls.filter((c) => c[0] === 'delete_hotkey')).toHaveLength(0);
+
+    // Arm again, then confirm.
+    fireEvent.click(await screen.findByLabelText('Delete Toggle panel'));
+    fireEvent.click(await screen.findByLabelText('Delete Toggle panel?'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('delete_hotkey', { id: HOTKEY.id });
+    });
+  });
+
+  it('shows empty-state messages when there are no modifier rules or hotkeys', async () => {
+    mockCommands({ list_modifier_rules: [], list_hotkeys: [] });
+
+    renderView(<KeyboardView />);
+
+    expect(await screen.findByText('No modifier keys to configure.')).toBeInTheDocument();
+    expect(await screen.findByText('No global shortcuts yet — add one below.')).toBeInTheDocument();
+  });
 });

@@ -9,27 +9,55 @@ import { useT } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
 import type { PermissionsChanged, WindowPreset } from '../lib/types';
 
+// Success messages are transient confirmations, not something worth reading
+// back to later, so they clear themselves; errors need attention and stay
+// until the next action replaces them.
+const STATUS_CLEAR_MS = 4000;
+
+type Status = { message: string; isError: boolean };
+
 export function WindowView() {
   const t = useT();
   const { settings, update } = useSettings();
   const [presets, setPresets] = useState<WindowPreset[]>([]);
   const [granted, setGranted] = useState(true);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
   // Mirrors `t` so the mount-only effect below can format a load failure
   // without depending on `t` itself — `useT()` returns a new closure on every
   // render, so adding it to the effect's deps would re-run the fetch each time.
   const tRef = useRef(t);
   tRef.current = t;
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showStatus(message: string, isError: boolean) {
+    if (clearTimerRef.current !== null) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+    setStatus({ message, isError });
+    if (!isError) {
+      clearTimerRef.current = setTimeout(() => {
+        setStatus(null);
+        clearTimerRef.current = null;
+      }, STATUS_CLEAR_MS);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     void api
       .listWindowPresets()
       .then(setPresets)
-      .catch((e: unknown) => setStatus(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => showStatus(formatCmdError(e, tRef.current), true));
     void api
       .accessibilityStatus()
       .then(setGranted)
-      .catch((e: unknown) => setStatus(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => showStatus(formatCmdError(e, tRef.current), true));
     // Accessibility is granted in System Settings, outside the app, so follow
     // the backend's poll rather than requiring a reopen.
     const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
@@ -42,20 +70,21 @@ export function WindowView() {
     try {
       // Repeated half-snaps cycle 1/2 → 1/3 → 2/3, so show what was applied.
       const applied = await api.snapWindow(preset);
-      setStatus(
+      showStatus(
         applied ? t('window.snappedTo', { label: presetLabel(applied, t) }) : t('window.disabled'),
+        false,
       );
     } catch (err) {
-      setStatus(formatCmdError(err, t));
+      showStatus(formatCmdError(err, t), true);
     }
   }
 
   async function run(label: string, op: () => Promise<void>) {
     try {
       await op();
-      setStatus(label);
+      showStatus(label, false);
     } catch (err) {
-      setStatus(formatCmdError(err, t));
+      showStatus(formatCmdError(err, t), true);
     }
   }
 
@@ -64,7 +93,7 @@ export function WindowView() {
       const ok = await api.requestAccessibility();
       setGranted(ok);
     } catch (err) {
-      setStatus(formatCmdError(err, t));
+      showStatus(formatCmdError(err, t), true);
     }
   }
 
@@ -165,7 +194,11 @@ export function WindowView() {
         </Group>
       </div>
 
-      {status && <output className="status">{status}</output>}
+      {status && (
+        <output className={`status ${status.isError ? 'status--err' : ''}`}>
+          {status.message}
+        </output>
+      )}
     </div>
   );
 }

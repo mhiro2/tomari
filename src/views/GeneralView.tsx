@@ -42,10 +42,18 @@ export function GeneralView({
   // Guards against overlapping checks: the tray entry (via StrictMode's double
   // mount, or rapid clicks) and the manual button share one in-flight check.
   const checking = useRef(false);
+  const hideTrayConfirmRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     void getVersion().then(setVersion);
   }, []);
+
+  // Move focus to the banner's primary action as soon as it appears, so a
+  // keyboard user lands directly on the confirm/cancel controls instead of
+  // having to hunt for them; Escape below gives a matching way to back out.
+  useEffect(() => {
+    if (confirmHideTray) hideTrayConfirmRef.current?.focus();
+  }, [confirmHideTray]);
 
   // The tray's "Check for Updates" entry opens this panel and asks it to run
   // the check, so the result shows up here.
@@ -143,11 +151,15 @@ export function GeneralView({
             <p>{t('settings.hideTrayConfirmBody')}</p>
             <div className="banner__actions">
               <button
+                ref={hideTrayConfirmRef}
                 type="button"
                 className="btn btn--amber"
                 onClick={() => {
                   update({ showInMenuBar: false });
                   setConfirmHideTray(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setConfirmHideTray(false);
                 }}
               >
                 {t('settings.hideTrayConfirmAction')}
@@ -156,6 +168,9 @@ export function GeneralView({
                 type="button"
                 className="btn btn--ghost"
                 onClick={() => setConfirmHideTray(false)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setConfirmHideTray(false);
+                }}
               >
                 {t('common.cancel')}
               </button>
