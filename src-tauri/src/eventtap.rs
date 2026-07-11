@@ -83,6 +83,13 @@ pub fn restart(app: &AppHandle) {
 /// setting: `true` when the feature is off (nothing to start) or the tap
 /// started successfully, `false` when it is on but failed to start (typically
 /// a missing Input Monitoring grant).
+///
+/// The Caps Lock HID remap is reconciled alongside the tap — it must never
+/// outlive a tap that handles F18 — but its outcome is deliberately *not*
+/// part of the return value: `save_settings` checks the remap once, after
+/// every side effect has run, via [`reconcile_caps_mapping`], so only the
+/// final live state (not an intermediate reconcile here) decides whether a
+/// `capsLockRemap` warning is raised.
 pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = EVENT_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
@@ -96,9 +103,18 @@ pub fn restart_result(app: &AppHandle) -> bool {
     // a chord.
     state.engine.lock_safe().reset();
 
+    // Reconcile the Caps Lock HID remap toward `manage` and record the *actual*
+    // resulting state (not the request) in the proxy flag, so a failed
+    // `hidutil` cannot leave the flag out of step with the real mapping — which
+    // would route F18, or a stuck Caps, wrongly.
+    let reconcile_caps = |manage: bool| {
+        let active = crate::capsmap::reconcile(manage);
+        CAPS_PROXY_ACTIVE.store(active, Ordering::SeqCst);
+    };
+
     if !state.keyboard_enabled() {
         // Feature off: take the Caps Lock HID remap down along with the tap.
-        CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(false), Ordering::SeqCst);
+        reconcile_caps(false);
         return true;
     }
 
@@ -106,35 +122,43 @@ pub fn restart_result(app: &AppHandle) -> bool {
         Ok(tap) => {
             *guard = Some(tap);
             tracing::info!("keyboard event tap started");
-            // Remap Caps Lock to F18 only now the tap that handles F18 is live,
-            // and record the *actual* resulting state (not the request) so a
-            // failed `hidutil` cannot leave the proxy flag out of step with the
-            // real mapping — which would route F18, or a stuck Caps, wrongly.
+            // Remap Caps Lock to F18 only now the tap that handles F18 is live.
             let manage = state.engine.lock_safe().has_caps_lock_rule();
-            CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(manage), Ordering::SeqCst);
+            reconcile_caps(manage);
             true
         }
         Err(e) => {
-            // No tap to handle F18 — keep Caps Lock native.
-            CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(false), Ordering::SeqCst);
             tracing::warn!(error = %e, "keyboard event tap not started (grant Input Monitoring?)");
+            // No tap to handle F18 — keep Caps Lock native.
+            reconcile_caps(false);
             false
         }
     }
 }
 
+/// Whether the keyboard tap is currently running. A cheap lock-and-check so
+/// `save_settings` can verify on *every* save that an enabled feature actually
+/// has its tap alive — a warning must reflect the live state, not just the
+/// last restart attempt, or it would vanish from the UI on the next unrelated
+/// save while the tap is still dead.
+pub fn is_running() -> bool {
+    EVENT_TAP.lock_safe().is_some()
+}
+
 /// Reconcile the Caps Lock HID remap (and the F18 proxy flag) with the current
-/// rules *without* restarting the tap — for use after a live rule edit, where
-/// the tap reads the engine directly but the HID remap must still be brought
-/// into step. A no-op unless the tap is running, so it never remaps Caps Lock to
-/// F18 with no tap to handle it.
+/// rules *without* restarting the tap — after a live rule edit, where the tap
+/// reads the engine directly but the HID remap must still be brought into
+/// step, and once at the end of every `save_settings`, as the authoritative
+/// live check behind the `capsLockRemap` warning. A no-op unless the tap is
+/// running, so it never remaps Caps Lock to F18 with no tap to handle it.
 ///
-/// Returns whether the live remap now matches what the rules ask for — `false`
-/// means a `hidutil` failure left the proxy flag (and thus Caps Lock's actual
-/// behavior) out of step with the saved rule, which [`commands`] surfaces as an
-/// `apply_warnings` entry.
-///
-/// [`commands`]: crate::commands
+/// Returns whether the live remap now matches what the settings and rules ask
+/// for — `false` means a `hidutil` failure left the proxy flag (and thus Caps
+/// Lock's actual behavior) out of step with the saved configuration. Because
+/// `capsmap::reconcile` reads the real system state first and retries the
+/// transition, calling this on every save both keeps a still-unresolved
+/// mismatch warning (it does not silently vanish on an unrelated save) and
+/// heals it as soon as `hidutil` cooperates again.
 pub fn reconcile_caps_mapping(state: &AppState) -> bool {
     let manage = EVENT_TAP.lock_safe().is_some()
         && state.keyboard_enabled()

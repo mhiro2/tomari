@@ -122,23 +122,22 @@ pub async fn save_settings(
     // Broadcast the new settings so the window's provider adopts them — keeping
     // its snapshot in step with any change applied out of band (e.g. a future
     // tray-driven toggle) rather than only the optimistic update it just made.
-    let _ = app.emit("tomari:settings-changed", settings);
+    let _ = app.emit("tomari:settings-changed", settings.clone());
+
+    // Whether each restartable tap should be running per the just-saved
+    // settings, independent of whether this save actually restarted it — the
+    // baseline `compose_apply_warnings` falls back to when no restart ran.
+    let keyboard_should_run = settings.keyboard_enabled;
+    let drag_should_run = settings.window_management_enabled && settings.drag_to_snap_enabled;
+    let move_should_run = settings.window_management_enabled && settings.drag_to_move_enabled;
 
     // The left/right ⌘ IME toggle is not a stored rule, so flipping it has to
-    // reassemble the engine's rule set from the new setting. A `hidutil`
-    // failure while reconciling the Caps Lock remap (`Ok(false)`) is reported
-    // the same way as the other side effects above — the setting is saved and
-    // the engine did reload, but the live Caps Lock behavior may disagree with
-    // it until a retry succeeds.
-    if command_ime_changed {
-        match reload_engine_rules(&state) {
-            Ok(true) => {}
-            Ok(false) => apply_warnings.push("capsLockRemap"),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
-                apply_warnings.push("capsLockRemap");
-            }
-        }
+    // reassemble the engine's rule set from the new setting. Its Caps Lock
+    // reconcile outcome is deliberately ignored here (only logged inside
+    // `reload_engine_rules` callees): the authoritative `capsLockRemap` check
+    // runs once below, after every side effect, against the final live state.
+    if command_ime_changed && let Err(e) = reload_engine_rules(&state) {
+        tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
     }
 
     // The tray menu renders in the configured language, so rebuild it (on the
@@ -148,31 +147,128 @@ pub async fn save_settings(
         let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
     }
 
-    // Only (re)start the event tap when keyboard customization is actually
-    // toggled. Flipping unrelated preferences must not tear the tap down and
-    // rebuild it, which would briefly drop key monitoring. Each restart's
-    // outcome is folded into `apply_warnings`, exactly like `launchAtLogin` /
-    // `menuBar` above — a failure here (typically a missing Input Monitoring
-    // grant) leaves the saved preference and the live tap disagreeing until a
-    // retry succeeds.
+    // Only (re)start a tap when its own toggle (or the window-management
+    // master switch) actually changed. Flipping unrelated preferences must not
+    // tear a tap down and rebuild it, which would briefly drop input
+    // monitoring. Whether or not a restart ran this save, `compose_apply_warnings`
+    // below checks every enabled tap's live state, so a warning never
+    // disappears just because the next save was unrelated (see its doc
+    // comment).
     #[cfg(target_os = "macos")]
     {
-        if keyboard_toggled && !crate::eventtap::restart_result(&app) {
-            apply_warnings.push("keyboardTap");
-        }
-        if drag_changed && !crate::drag_to_snap::restart_result(&app) {
-            apply_warnings.push("dragToSnapTap");
-        }
-        if move_changed && !crate::drag_to_move::restart_result(&app) {
-            apply_warnings.push("dragToMoveTap");
-        }
+        let keyboard_restart = keyboard_toggled.then(|| crate::eventtap::restart_result(&app));
+        let drag_restart = drag_changed.then(|| crate::drag_to_snap::restart_result(&app));
+        let move_restart = move_changed.then(|| crate::drag_to_move::restart_result(&app));
+
+        // The one authoritative Caps Lock remap check, after every side effect
+        // that can touch it (rule reload, tap restart) has run: reconcile the
+        // live HID state against what the just-saved settings and rules ask
+        // for. An intermediate failure earlier in this save that the final
+        // reconcile fixed raises no warning; a mismatch left over from an
+        // *earlier* save keeps warning (and is retried) even when this save
+        // touched nothing keyboard-related.
+        let caps_remap_ok = crate::eventtap::reconcile_caps_mapping(&state);
+
+        apply_warnings.extend(compose_apply_warnings(&ApplyWarningInputs {
+            keyboard: TapCheck {
+                should_run: keyboard_should_run,
+                restarted_ok: keyboard_restart,
+                running: crate::eventtap::is_running(),
+            },
+            drag_to_snap: TapCheck {
+                should_run: drag_should_run,
+                restarted_ok: drag_restart,
+                running: crate::drag_to_snap::is_running(),
+            },
+            drag_to_move: TapCheck {
+                should_run: move_should_run,
+                restarted_ok: move_restart,
+                running: crate::drag_to_move::is_running(),
+            },
+            caps_remap_ok,
+        }));
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (keyboard_toggled, drag_changed, move_changed);
+        let _ = (
+            keyboard_toggled,
+            drag_changed,
+            move_changed,
+            keyboard_should_run,
+            drag_should_run,
+            move_should_run,
+        );
     }
 
     Ok(SaveSettingsOutcome { apply_warnings })
+}
+
+/// Live-state inputs for one restartable tap's `apply_warnings` check (see
+/// [`compose_apply_warnings`]).
+struct TapCheck {
+    /// Whether the just-saved settings say this tap should be running.
+    should_run: bool,
+    /// This save's restart outcome, if its toggle actually changed this save:
+    /// `Some(tap_ok)` (already means "matches `should_run`"). `None` when
+    /// nothing toggled and no restart ran.
+    restarted_ok: Option<bool>,
+    /// Whether the tap is live right now, checked regardless of whether a
+    /// restart ran this save.
+    running: bool,
+}
+
+/// Inputs to [`compose_apply_warnings`]: each tap's live state plus the Caps
+/// Lock remap's final live check.
+struct ApplyWarningInputs {
+    keyboard: TapCheck,
+    drag_to_snap: TapCheck,
+    drag_to_move: TapCheck,
+    /// Whether the Caps Lock HID remap matches what the just-saved settings
+    /// and rules ask for, checked once against the live system state after
+    /// every side effect of the save has run
+    /// (`eventtap::reconcile_caps_mapping`) — never an accumulation of
+    /// intermediate reconcile results, which could contradict the final state
+    /// in both directions.
+    caps_remap_ok: bool,
+}
+
+/// Turn a save's tap/remap live state into the `apply_warnings` codes the
+/// frontend renders. Pure, and built on *final live state* rather than what
+/// this particular save happened to touch: each tap is checked live
+/// (`running`), not only against this save's restart outcome, and
+/// `caps_remap_ok` is the post-save live check — so a warning from an earlier
+/// save keeps showing until the mismatch is actually gone (flipping some
+/// unrelated preference must not make it silently disappear), and an
+/// intermediate failure this save recovered from raises none. A tap that
+/// *did* restart this save instead uses the restart's own outcome
+/// (`restarted_ok`), which already reflects whether it now matches the
+/// setting.
+///
+/// Each warning code is pushed at most once — restart outcome and live check
+/// for the same tap fold into a single flag before being turned into a code,
+/// so callers never need to deduplicate the result themselves.
+fn compose_apply_warnings(inputs: &ApplyWarningInputs) -> Vec<&'static str> {
+    fn tap_ok(check: &TapCheck) -> bool {
+        match check.restarted_ok {
+            Some(ok) => ok,
+            None => !check.should_run || check.running,
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if !tap_ok(&inputs.keyboard) {
+        warnings.push("keyboardTap");
+    }
+    if !tap_ok(&inputs.drag_to_snap) {
+        warnings.push("dragToSnapTap");
+    }
+    if !tap_ok(&inputs.drag_to_move) {
+        warnings.push("dragToMoveTap");
+    }
+    if !inputs.caps_remap_ok {
+        warnings.push("capsLockRemap");
+    }
+    warnings
 }
 
 /// Reconcile the macOS login item with the "Launch at login" preference.
@@ -414,10 +510,10 @@ pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> Cmd
 /// Lock HID remap ended up matching it. `Err` is reserved for the DB read
 /// failing outright; a `hidutil` failure while reconciling the remap is instead
 /// reported as `Ok(false)`, since the engine itself did reload successfully —
-/// only the out-of-band remap is left out of step. Callers with an
-/// `apply_warnings` outcome to report to (`save_settings`) surface a `false`
-/// there; callers without one (`save_modifier_rule` / `delete_modifier_rule`)
-/// simply log it, same as before this returned anything.
+/// only the out-of-band remap is left out of step. `save_modifier_rule` /
+/// `delete_modifier_rule` log a `false`; `save_settings` ignores it outright,
+/// because its `capsLockRemap` warning comes from one authoritative live
+/// check after all of the save's side effects, not from intermediate results.
 fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     // The stored rules plus the built-in left/right ⌘ IME toggle, which lives
     // behind a setting rather than as an editable row.
@@ -577,4 +673,136 @@ pub fn get_keep_awake(state: State<'_, AppState>) -> crate::keepawake::KeepAwake
 #[tauri::command]
 pub fn set_keep_awake(app: AppHandle, enabled: bool) -> crate::keepawake::KeepAwakeStatus {
     crate::keepawake::set(&app, enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `TapCheck` that was not touched this save: only the live state
+    /// matters.
+    fn not_restarted(should_run: bool, running: bool) -> TapCheck {
+        TapCheck {
+            should_run,
+            restarted_ok: None,
+            running,
+        }
+    }
+
+    /// A `TapCheck` whose toggle changed this save, so its restart outcome is
+    /// authoritative regardless of `running` (a real restart already reads the
+    /// live state itself).
+    fn restarted(should_run: bool, restart_ok: bool) -> TapCheck {
+        TapCheck {
+            should_run,
+            restarted_ok: Some(restart_ok),
+            running: restart_ok,
+        }
+    }
+
+    fn inputs(
+        keyboard: TapCheck,
+        drag_to_snap: TapCheck,
+        drag_to_move: TapCheck,
+    ) -> ApplyWarningInputs {
+        ApplyWarningInputs {
+            keyboard,
+            drag_to_snap,
+            drag_to_move,
+            caps_remap_ok: true,
+        }
+    }
+
+    #[test]
+    fn a_fully_healthy_save_warns_about_nothing() {
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(true, true),
+            not_restarted(false, false),
+            not_restarted(false, false),
+        ));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_feature_never_warns_even_if_not_running() {
+        // Not running is expected when the feature is off — no warning.
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(false, false),
+            not_restarted(false, false),
+            not_restarted(false, false),
+        ));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn an_enabled_but_dead_tap_warns_even_without_a_restart_this_save() {
+        // Regression guard: a keyboard tap that died on an earlier save must
+        // keep warning on a later save that only changed an unrelated
+        // preference (e.g. language) and so never touched the tap.
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(true, false),
+            not_restarted(false, false),
+            not_restarted(false, false),
+        ));
+        assert_eq!(warnings, vec!["keyboardTap"]);
+    }
+
+    #[test]
+    fn a_failed_restart_warns_regardless_of_the_stale_running_flag() {
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(false, false),
+            restarted(true, false),
+            not_restarted(false, false),
+        ));
+        assert_eq!(warnings, vec!["dragToSnapTap"]);
+    }
+
+    #[test]
+    fn a_successful_restart_clears_any_prior_warning() {
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(false, false),
+            not_restarted(false, false),
+            restarted(true, true),
+        ));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn independent_taps_each_report_their_own_code() {
+        let warnings = compose_apply_warnings(&inputs(
+            not_restarted(true, false),
+            restarted(true, false),
+            restarted(true, true),
+        ));
+        assert_eq!(warnings, vec!["keyboardTap", "dragToSnapTap"]);
+    }
+
+    #[test]
+    fn a_live_caps_remap_mismatch_warns_even_on_an_unrelated_save() {
+        // `caps_remap_ok` is the post-save live check, run on every save —
+        // so a mismatch left by an earlier save's `hidutil` failure keeps
+        // warning here even though this save touched nothing
+        // keyboard-related and the healthy taps raise nothing themselves.
+        let mut all_inputs = inputs(
+            not_restarted(true, true),
+            not_restarted(false, false),
+            not_restarted(false, false),
+        );
+        all_inputs.caps_remap_ok = false;
+        let warnings = compose_apply_warnings(&all_inputs);
+        assert_eq!(warnings, vec!["capsLockRemap"]);
+    }
+
+    #[test]
+    fn a_matching_final_caps_state_warns_nothing_whatever_happened_mid_save() {
+        // The final live check is the only caps input: a mid-save reconcile
+        // failure that the last reconcile recovered from is invisible here by
+        // construction, so a matching final state must yield no warning.
+        let all_inputs = inputs(
+            restarted(true, true),
+            not_restarted(false, false),
+            not_restarted(false, false),
+        );
+        assert!(compose_apply_warnings(&all_inputs).is_empty());
+    }
 }
