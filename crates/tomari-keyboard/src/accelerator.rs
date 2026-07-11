@@ -94,6 +94,15 @@ fn normalize_key(token: &str) -> Option<String> {
         "comma" => "Comma",
         "period" => "Period",
         "slash" => "Slash",
+        // Punctuation/symbol keys. Names match what global-hotkey's accelerator
+        // parser (`global_hotkey::hotkey::parse_key`) accepts, since that is
+        // the crate `shortcuts::register_all` hands the canonical string to.
+        "semicolon" => "Semicolon",
+        "quote" => "Quote",
+        "bracketleft" => "BracketLeft",
+        "bracketright" => "BracketRight",
+        "backslash" => "Backslash",
+        "backquote" => "Backquote",
         _ => return None,
     };
     Some(named.to_string())
@@ -203,5 +212,24 @@ mod tests {
     fn bare_key_is_valid() {
         assert!(is_valid("F1"));
         assert!(is_valid("A"));
+    }
+
+    #[test]
+    fn symbol_keys() {
+        assert_eq!(normalize("cmd+semicolon").unwrap(), "Cmd+Semicolon");
+        assert_eq!(normalize("cmd+quote").unwrap(), "Cmd+Quote");
+        assert_eq!(normalize("cmd+bracketleft").unwrap(), "Cmd+BracketLeft");
+        assert_eq!(normalize("cmd+bracketright").unwrap(), "Cmd+BracketRight");
+        assert_eq!(normalize("cmd+backslash").unwrap(), "Cmd+Backslash");
+        assert_eq!(normalize("cmd+backquote").unwrap(), "Cmd+Backquote");
+    }
+
+    #[test]
+    fn jis_intl_keys_are_not_supported() {
+        // global-hotkey's accelerator parser (`global_hotkey::hotkey::parse_key`)
+        // has no `IntlYen`/`IntlRo` variants, so accepting them here would save a
+        // hotkey that fails to register.
+        assert!(!is_valid("Cmd+IntlYen"));
+        assert!(!is_valid("Cmd+IntlRo"));
     }
 }

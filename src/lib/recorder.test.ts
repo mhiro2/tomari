@@ -44,15 +44,52 @@ describe('captureAccelerator', () => {
     });
   });
 
-  it('ignores modifier-only and unsupported keys', () => {
+  it('ignores modifier-only presses while a chord is still being built', () => {
     expect(captureAccelerator(event('MetaLeft', { metaKey: true }))).toEqual({
       status: 'ignored',
     });
     expect(captureAccelerator(event('CapsLock'))).toEqual({ status: 'ignored' });
-    expect(captureAccelerator(event('F25'))).toEqual({ status: 'ignored' });
+  });
+
+  it('reports physical keys with no backend mapping as unsupported', () => {
+    expect(captureAccelerator(event('F25'))).toEqual({ status: 'unsupported' });
     expect(captureAccelerator(event('IntlYen', { metaKey: true }))).toEqual({
-      status: 'ignored',
+      status: 'unsupported',
     });
+    expect(captureAccelerator(event('IntlRo', { metaKey: true }))).toEqual({
+      status: 'unsupported',
+    });
+  });
+
+  it('captures symbol keys with a modifier', () => {
+    expect(captureAccelerator(event('Semicolon', { metaKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Cmd+Semicolon',
+    });
+    expect(captureAccelerator(event('Quote', { ctrlKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Ctrl+Quote',
+    });
+    expect(captureAccelerator(event('BracketLeft', { altKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Alt+BracketLeft',
+    });
+    expect(captureAccelerator(event('BracketRight', { metaKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Cmd+BracketRight',
+    });
+    expect(captureAccelerator(event('Backslash', { metaKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Cmd+Backslash',
+    });
+    expect(captureAccelerator(event('Backquote', { metaKey: true }))).toEqual({
+      status: 'captured',
+      accelerator: 'Cmd+Backquote',
+    });
+  });
+
+  it('requires a modifier for symbol keys too', () => {
+    expect(captureAccelerator(event('Semicolon'))).toEqual({ status: 'needModifier' });
   });
 });
 

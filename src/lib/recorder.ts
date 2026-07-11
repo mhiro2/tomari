@@ -16,8 +16,10 @@ export type CaptureResult =
   | { status: 'captured'; accelerator: string }
   /** A bare key that would shadow normal typing if registered globally. */
   | { status: 'needModifier' }
-  /** A modifier-only press or a key Tomari cannot register. */
-  | { status: 'ignored' };
+  /** A modifier-only press (nothing to capture yet). */
+  | { status: 'ignored' }
+  /** A physical key Tomari cannot register as a shortcut. */
+  | { status: 'unsupported' };
 
 // KeyboardEvent.code → backend key token, for keys whose names differ.
 const CODE_KEYS: Record<string, string> = {
@@ -41,12 +43,34 @@ const CODE_KEYS: Record<string, string> = {
   Comma: 'Comma',
   Period: 'Period',
   Slash: 'Slash',
+  Semicolon: 'Semicolon',
+  Quote: 'Quote',
+  BracketLeft: 'BracketLeft',
+  BracketRight: 'BracketRight',
+  Backslash: 'Backslash',
+  Backquote: 'Backquote',
 };
+
+// Codes that are themselves modifier keys — a lone press of these is a normal
+// part of recording (the user is still building a chord), never an
+// unsupported key.
+const MODIFIER_CODES = new Set([
+  'MetaLeft',
+  'MetaRight',
+  'ControlLeft',
+  'ControlRight',
+  'AltLeft',
+  'AltRight',
+  'ShiftLeft',
+  'ShiftRight',
+  'CapsLock',
+  'Fn',
+]);
 
 /**
  * The accelerator key token for a physical key, or `null` for modifiers and
- * unsupported keys. Uses `code` (not `key`) so the chord is IME- and
- * layout-independent.
+ * keys with no backend mapping. Uses `code` (not `key`) so the chord is IME-
+ * and layout-independent.
  */
 function keyToken(code: string): string | null {
   if (/^Key[A-Z]$/u.test(code)) return code.slice(3);
@@ -61,7 +85,11 @@ function keyToken(code: string): string | null {
  */
 export function captureAccelerator(event: RecorderKeyEvent): CaptureResult {
   const key = keyToken(event.code);
-  if (key === null) return { status: 'ignored' };
+  if (key === null) {
+    // A held modifier alone is just the chord still being built; any other
+    // physical key with no backend mapping is genuinely unsupported.
+    return MODIFIER_CODES.has(event.code) ? { status: 'ignored' } : { status: 'unsupported' };
+  }
 
   const isFunctionKey = /^F\d+$/u.test(key);
   if (!event.metaKey && !event.ctrlKey && !event.altKey && !isFunctionKey) {

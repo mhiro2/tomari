@@ -75,3 +75,36 @@ pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<Registratio
 
     Ok(failures)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use tauri_plugin_global_shortcut::Shortcut;
+    use tomari_keyboard::accelerator;
+
+    /// `accelerator::normalize` accepts these symbol-key names (see
+    /// `tomari_keyboard::accelerator`), and the whole point of matching
+    /// global-hotkey's own spelling is that its accelerator parser
+    /// (`Shortcut::from_str`, the same one `register_all` hands the
+    /// canonical string to) accepts them too — otherwise a hotkey would pass
+    /// `validate_accelerator` at save time yet fail to register.
+    #[test]
+    fn symbol_key_accelerators_are_accepted_by_global_hotkey() {
+        for input in [
+            "Cmd+Semicolon",
+            "Cmd+Quote",
+            "Cmd+BracketLeft",
+            "Cmd+BracketRight",
+            "Cmd+Backslash",
+            "Cmd+Backquote",
+        ] {
+            let normalized = accelerator::normalize(input).unwrap_or_else(|e| {
+                panic!("tomari accelerator parser rejected `{input}`: {e}");
+            });
+            Shortcut::from_str(&normalized).unwrap_or_else(|e| {
+                panic!("global-hotkey rejected normalized accelerator `{normalized}`: {e}");
+            });
+        }
+    }
+}

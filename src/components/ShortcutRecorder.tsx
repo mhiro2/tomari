@@ -104,6 +104,10 @@ export function ShortcutRecorder({
       setHeld(heldModifierGlyphs(event));
       return;
     }
+    if (result.status === 'unsupported') {
+      setError(t('recorder.unsupported'));
+      return;
+    }
     if (result.status === 'needModifier') {
       setError(t('recorder.needModifier'));
       return;

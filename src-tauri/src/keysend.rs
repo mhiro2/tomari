@@ -120,6 +120,12 @@ pub(crate) fn keycode_for(key: &str) -> Option<u16> {
         "Comma" => 0x2B,
         "Period" => 0x2F,
         "Slash" => 0x2C,
+        "Semicolon" => 0x29,
+        "Quote" => 0x27,
+        "BracketLeft" => 0x21,
+        "BracketRight" => 0x1E,
+        "Backslash" => 0x2A,
+        "Backquote" => 0x32,
         // Letters (US ANSI layout).
         "A" => 0x00,
         "B" => 0x0B,
@@ -174,8 +180,26 @@ mod tests {
     #[test]
     fn keysend_covers_parser_punctuation_and_function_keys() {
         for key in [
-            "Plus", "Minus", "Equal", "Comma", "Period", "Slash", "F13", "F14", "F15", "F16",
-            "F17", "F18", "F19", "F20",
+            "Plus",
+            "Minus",
+            "Equal",
+            "Comma",
+            "Period",
+            "Slash",
+            "Semicolon",
+            "Quote",
+            "BracketLeft",
+            "BracketRight",
+            "Backslash",
+            "Backquote",
+            "F13",
+            "F14",
+            "F15",
+            "F16",
+            "F17",
+            "F18",
+            "F19",
+            "F20",
         ] {
             let parsed = accelerator::parse(key).unwrap();
             assert!(
