@@ -9,6 +9,7 @@
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult};
 use tauri::{AppHandle, Manager};
@@ -24,8 +25,20 @@ use crate::tap::{self, RunningTap};
 static DRAG_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
 /// (Re)start the tap to match the current settings: tear down any existing tap
-/// and, if drag-to-snap is enabled, start a fresh one.
+/// and, if drag-to-snap is enabled, start a fresh one. Callers that do not need
+/// the outcome (permission polling, wake/session reset) use this; [`commands`]
+/// uses [`restart_result`] to surface a failure as an `apply_warnings` entry.
+///
+/// [`commands`]: crate::commands
 pub fn restart(app: &AppHandle) {
+    let _ = restart_result(app);
+}
+
+/// Same as [`restart`], but reports whether the tap ended up matching the
+/// setting: `true` when the feature is off (nothing to start) or the tap
+/// started successfully, `false` when it is on but failed to start (typically
+/// a missing Input Monitoring grant).
+pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = DRAG_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
     // Any snap preview on screen belongs to the tap we just dropped; a restart
@@ -40,16 +53,18 @@ pub fn restart(app: &AppHandle) {
         })
         .unwrap_or(false);
     if !enabled {
-        return;
+        return true;
     }
 
     match start(app.clone()) {
         Ok(tap) => {
             *guard = Some(tap);
             tracing::info!("drag-to-snap event tap started");
+            true
         }
         Err(e) => {
-            tracing::warn!(error = %e, "drag-to-snap event tap not started (grant Input Monitoring?)")
+            tracing::warn!(error = %e, "drag-to-snap event tap not started (grant Input Monitoring?)");
+            false
         }
     }
 }
@@ -64,6 +79,16 @@ struct DragSnap {
     /// (a title-bar drag) before arming — text selection and other drags leave
     /// the frame put and never arm.
     start_frame: Rect,
+    /// The cursor location at mouse-down, so later drag events can tell whether
+    /// the cursor itself has moved far enough to be worth an AX frame read at
+    /// all — cheap and lock-free, unlike the frame read it gates.
+    start_cursor: (f64, f64),
+    /// When `start_frame` was last confirmed against a fresh AX read while
+    /// unarmed, so repeated drag events (60-120 Hz) throttle to at most one AX
+    /// call per [`FRAME_CHECK_INTERVAL`] instead of one per event — a slow
+    /// or wedged target app must not be hammered with AX IPC just because the
+    /// user is dragging a text selection over it.
+    last_frame_check: Instant,
     armed: bool,
     /// Every display's `(full_frame, work_area)` (CG), snapshotted once on arm
     /// so edge detection on later moves stays a pure, lock-free computation.
@@ -80,6 +105,22 @@ struct DragSnap {
 /// How far (points) the dragged window's origin must move from its mouse-down
 /// frame before a drag counts as a real window move and arms drag-to-snap.
 const MOVE_EPSILON: f64 = 1.0;
+
+/// How far (points) the cursor must move from its mouse-down location before an
+/// unarmed drag is even worth an AX frame read. Below this, the pointer is
+/// essentially where it was pressed (a click, a tiny jitter) and the window
+/// could not plausibly have moved past `MOVE_EPSILON` yet — skip the AX call
+/// entirely rather than confirm a foregone conclusion.
+const CURSOR_MOVE_EPSILON: f64 = 2.0;
+
+/// Minimum time between AX frame reads while a drag is unarmed. Mouse-dragged
+/// events arrive at 60-120 Hz; without this an unarmed drag (e.g. a text
+/// selection over another app) would perform an AX IPC round trip on every
+/// single one of them, which can trip that app's own responsiveness and, if it
+/// is slow to answer, risk the tap's own timeout-disable. Once armed this no
+/// longer applies — armed drags resolve purely from the cached cursor/screen
+/// geometry and never read the window's frame again.
+const FRAME_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 fn start(app: AppHandle) -> Result<RunningTap, String> {
     tap::spawn(
@@ -198,6 +239,31 @@ fn handle_drag_to_snap(
                     *guard = None;
                     return CallbackResult::Keep;
                 }
+
+                // Cheap, lock-free prefilter: the cursor itself must have moved
+                // before the window could plausibly have moved past
+                // `MOVE_EPSILON`. Most drag-tap traffic while unarmed is a text
+                // selection or a control drag whose cursor still wanders even
+                // though nothing about the window changes, so this alone does
+                // not replace the AX check below — it only skips it when the
+                // cursor has barely moved from mouse-down at all.
+                let cursor_moved = (x - d.start_cursor.0).abs() > CURSOR_MOVE_EPSILON
+                    || (y - d.start_cursor.1).abs() > CURSOR_MOVE_EPSILON;
+                if !cursor_moved {
+                    return CallbackResult::Keep;
+                }
+
+                // Time-throttle the AX round trip itself: even with the cursor
+                // moving, do not read the frame more than once per
+                // `FRAME_CHECK_INTERVAL` so a heavy run of drag events never
+                // turns into a matching run of AX IPC calls against whatever app
+                // is under the cursor.
+                let now_instant = Instant::now();
+                if now_instant.duration_since(d.last_frame_check) < FRAME_CHECK_INTERVAL {
+                    return CallbackResult::Keep;
+                }
+                d.last_frame_check = now_instant;
+
                 match d.window.frame() {
                     Ok(now) => {
                         let moved = (now.x - d.start_frame.x).abs() > MOVE_EPSILON
@@ -276,6 +342,11 @@ fn grab_drag_candidate(app_state: &AppState, x: f64, y: f64) -> Option<DragSnap>
     Some(DragSnap {
         window,
         start_frame,
+        start_cursor: (x, y),
+        // `Instant::now()`, not some zero/epoch value: the first drag event's
+        // throttle check must measure from mouse-down, not read as already
+        // overdue and perform an AX call on the very first move.
+        last_frame_check: Instant::now(),
         armed: false,
         screens: Vec::new(),
         active: None,
