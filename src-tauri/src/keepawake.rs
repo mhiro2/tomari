@@ -343,6 +343,15 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
         };
     }
     // If we already own the override it is on by definition; otherwise read it.
+    //
+    // Known, accepted TOCTOU window: nothing locks `disablesleep` between this
+    // read and the `set_disablesleep(true)` call below (`Some(false)` arm), so
+    // a concurrent `pmset disablesleep 1` from the user or another process in
+    // that gap would be silently overwritten by ours, and we would (wrongly,
+    // but harmlessly) record ourselves as the owner instead of them. There is
+    // no macOS API to set `SleepDisabled` conditionally on its prior value, and
+    // the race requires another process to touch this exact, rarely-toggled
+    // flag in the same instant we do — accepted rather than engineered around.
     let sleep_disabled = if we_own {
         Some(true)
     } else {

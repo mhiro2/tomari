@@ -27,6 +27,13 @@ pub struct RegistrationFailure {
 /// the hotkey list at all.
 pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<RegistrationFailure>, String> {
     let gs = app.global_shortcut();
+
+    // Read the hotkey list *before* unregistering anything: if the DB cannot
+    // be read, bailing out here leaves the current, working registrations (and
+    // `state.shortcuts`) completely untouched, rather than having already
+    // cleared them and losing every live hotkey to a transient read failure.
+    let hotkeys = state.db.list_hotkeys().map_err(|e| e.to_string())?;
+
     // If the previous set cannot be cleared, re-registering would fail with
     // "already registered" for every hotkey while the dispatch map is gone —
     // keep the current, working registrations instead and report it.
@@ -39,7 +46,6 @@ pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<Registratio
     let mut map = state.shortcuts.lock_safe();
     map.clear();
 
-    let hotkeys = state.db.list_hotkeys().map_err(|e| e.to_string())?;
     let mut failures = Vec::new();
     for hk in hotkeys.into_iter().filter(|h| h.enabled) {
         match Shortcut::from_str(&hk.accelerator) {

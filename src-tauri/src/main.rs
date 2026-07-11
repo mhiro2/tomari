@@ -269,7 +269,12 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Tomari")
+        // Startup must not panic (see `build_state`'s doc comment): `.expect`
+        // here would be exactly that, an invisible crash loop for a login-item
+        // Accessory with no Dock icon or terminal. Route a build failure
+        // through the same native-alert-and-exit path as every other
+        // unrecoverable startup error instead.
+        .unwrap_or_else(|e| fatal_startup_error(&format!("Tomari could not start: {e}")))
         // Release sleep prevention before the process exits — including the
         // lid-close override, which would otherwise outlive Tomari and keep the
         // Mac awake. This catches the tray Quit (`app.exit`) and a normal
@@ -278,10 +283,15 @@ fn main() {
         // backstop for any exit path that slips past both.
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                keepawake::cleanup_blocking(app);
-                // Restore Caps Lock's native behavior — the HID remap persists
-                // until reboot or removal, so a quit must take it back down.
+                // Restore Caps Lock's native behavior first: the HID remap
+                // persists until reboot or removal, so a quit must take it
+                // back down, and `hidutil` needs no permission and returns
+                // quickly. Doing this *before* `cleanup_blocking` — which can
+                // sit behind the admin-auth dialog for the lid-close veto —
+                // means Caps Lock is never left remapped for however long that
+                // dialog is up (or declined).
                 let _ = capsmap::reconcile(false);
+                keepawake::cleanup_blocking(app);
             }
         });
 }
@@ -532,13 +542,37 @@ fn move_database_aside(paths: &AppPaths) -> bool {
 fn alert(message: &str, blocking: bool) {
     #[cfg(target_os = "macos")]
     {
-        let script = format!("display alert \"Tomari\" message {message:?} as critical");
-        let mut cmd = std::process::Command::new("osascript");
-        cmd.arg("-e").arg(script);
+        // The message text is not under our control end-to-end (it can carry a
+        // DB error's `Display` text), so it must not be interpolated into the
+        // AppleScript source itself — Rust's `{:?}` Debug escaping is not
+        // AppleScript string-literal escaping and is not a safety boundary.
+        // Instead the script reads it from `argv`: everything after `--` is
+        // passed through to the script unmodified as its `argv`, so
+        // `item 1 of argv` is always exactly this string, whatever it
+        // contains — no quoting/escaping step for it to defeat. Uses
+        // `/usr/bin/osascript` (an absolute path), matching every other
+        // `osascript` call in the app (see `keepawake.rs`).
+        let script =
+            "on run argv\n  display alert \"Tomari\" message (item 1 of argv) as critical\nend run";
+        let mut cmd = std::process::Command::new("/usr/bin/osascript");
+        cmd.arg("-e").arg(script).arg("--").arg(message);
         if blocking {
             let _ = cmd.status();
         } else {
-            let _ = cmd.spawn();
+            // Fire-and-forget from the caller's point of view, but the child
+            // must still be `wait`ed eventually or it lingers as a zombie
+            // until Tomari exits. Reap it on a worker thread so `alert` itself
+            // stays non-blocking.
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    let _ = std::thread::Builder::new()
+                        .name("tomari-alert-reap".into())
+                        .spawn(move || {
+                            let _ = child.wait();
+                        });
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to spawn osascript for alert"),
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
