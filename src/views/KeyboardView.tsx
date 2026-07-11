@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ShortcutRecorder } from '../components/ShortcutRecorder';
 import { EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
@@ -62,6 +62,19 @@ function modifierDesc(rule: ModifierRule, t: Translator): string {
   return hasTap ? t('keyboard.tapFor', { action: actionLabel(rule.tap, t) }) : '';
 }
 
+// Removes a single id from a "saving" set — shared by the save functions
+// below so a save (successful, failed, or skipped) always clears its flag.
+function clearSaving(
+  setIds: (fn: (s: ReadonlySet<string>) => ReadonlySet<string>) => void,
+  id: string,
+) {
+  setIds((s) => {
+    const rest = new Set(s);
+    rest.delete(id);
+    return rest;
+  });
+}
+
 export function KeyboardView() {
   const t = useT();
   const { settings, update } = useSettings();
@@ -69,34 +82,82 @@ export function KeyboardView() {
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [modifierError, setModifierError] = useState<string | null>(null);
+  // Ids with a save in flight, so their row's controls can be disabled — this
+  // both prevents a second click racing the first save and, since the base
+  // for a patch is always read from these refs (not a render-captured prop),
+  // ensures a queued edit is applied on top of the latest persisted value
+  // rather than clobbering it.
+  const [savingRuleIds, setSavingRuleIds] = useState<ReadonlySet<string>>(new Set());
+  const [savingHotkeyIds, setSavingHotkeyIds] = useState<ReadonlySet<string>>(new Set());
+  const rulesRef = useRef(rules);
+  const hotkeysRef = useRef(hotkeys);
+  rulesRef.current = rules;
+  hotkeysRef.current = hotkeys;
+  // Mirrors `t` so the mount-only effect below can format a load failure
+  // without depending on `t` itself — `useT()` returns a new closure on every
+  // render, so adding it to the effect's deps would re-run the fetch each time.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
-    void api.listModifierRules().then(setRules);
-    void api.listHotkeys().then(setHotkeys);
+    void api
+      .listModifierRules()
+      .then(setRules)
+      .catch((e: unknown) => setModifierError(formatCmdError(e, tRef.current)));
+    void api
+      .listHotkeys()
+      .then(setHotkeys)
+      .catch((e: unknown) => setShortcutError(formatCmdError(e, tRef.current)));
   }, []);
 
-  async function toggleRule(rule: ModifierRule) {
-    const next = { ...rule, enabled: !rule.enabled };
+  async function toggleRule(id: string) {
+    // A second click while the first save is still in flight must not fire
+    // another save — the row is disabled while saving, but guard here too
+    // against any event queued just before that took effect.
+    if (savingRuleIds.has(id)) return;
+    setSavingRuleIds((s) => new Set(s).add(id));
+    // Read the base from the latest state, not a value captured by the
+    // caller's render, so this can't undo an edit that landed in between.
+    const current = rulesRef.current.find((r) => r.id === id);
+    if (!current) {
+      clearSaving(setSavingRuleIds, id);
+      return;
+    }
+    const next = { ...current, enabled: !current.enabled };
     // Only reflect the toggle in the UI once the backend has persisted it and
     // reloaded the engine — a save failure must surface rather than leave the
     // row showing a state the runtime never adopted.
     try {
       await api.saveModifierRule(next);
-      setRules((rs) => rs.map((r) => (r.id === rule.id ? next : r)));
+      setRules((rs) => rs.map((r) => (r.id === id ? next : r)));
       setModifierError(null);
     } catch (e) {
       setModifierError(formatCmdError(e, t));
+    } finally {
+      clearSaving(setSavingRuleIds, id);
     }
   }
 
-  async function saveHotkeyPatch(hk: Hotkey, patch: Partial<Hotkey>) {
-    const next = { ...hk, ...patch };
+  async function saveHotkeyPatch(id: string, patch: Partial<Hotkey>) {
+    if (savingHotkeyIds.has(id)) return;
+    setSavingHotkeyIds((s) => new Set(s).add(id));
+    // Read the base from the latest state, not a value captured by the
+    // caller's render, so an accelerator saved while an enabled-toggle is
+    // still in flight (or vice versa) is applied on top of it, not over it.
+    const current = hotkeysRef.current.find((h) => h.id === id);
+    if (!current) {
+      clearSaving(setSavingHotkeyIds, id);
+      return;
+    }
+    const next = { ...current, ...patch };
     try {
       await api.saveHotkey(next);
-      setHotkeys((hs) => hs.map((h) => (h.id === hk.id ? next : h)));
+      setHotkeys((hs) => hs.map((h) => (h.id === id ? next : h)));
       setShortcutError(null);
     } catch (e) {
       setShortcutError(formatCmdError(e, t));
+    } finally {
+      clearSaving(setSavingHotkeyIds, id);
     }
   }
 
@@ -142,7 +203,12 @@ export function KeyboardView() {
           }
         >
           {rules.map((rule) => (
-            <ModifierRow key={rule.id} rule={rule} onToggle={() => void toggleRule(rule)} />
+            <ModifierRow
+              key={rule.id}
+              rule={rule}
+              saving={savingRuleIds.has(rule.id)}
+              onToggle={() => void toggleRule(rule.id)}
+            />
           ))}
           <EntityRow
             lead={<div className="kbd-chip">⌘</div>}
@@ -166,8 +232,9 @@ export function KeyboardView() {
             <HotkeyRow
               key={hk.id}
               hotkey={hk}
-              onAccelerator={(accel) => void saveHotkeyPatch(hk, { accelerator: accel })}
-              onToggle={() => void saveHotkeyPatch(hk, { enabled: !hk.enabled })}
+              saving={savingHotkeyIds.has(hk.id)}
+              onAccelerator={(accel) => void saveHotkeyPatch(hk.id, { accelerator: accel })}
+              onToggle={() => void saveHotkeyPatch(hk.id, { enabled: !hk.enabled })}
               onDelete={() => void removeHotkey(hk.id)}
             />
           ))}
@@ -178,7 +245,15 @@ export function KeyboardView() {
   );
 }
 
-function ModifierRow({ rule, onToggle }: { rule: ModifierRule; onToggle: () => void }) {
+function ModifierRow({
+  rule,
+  saving,
+  onToggle,
+}: {
+  rule: ModifierRule;
+  saving: boolean;
+  onToggle: () => void;
+}) {
   const t = useT();
   return (
     <EntityRow
@@ -189,6 +264,7 @@ function ModifierRow({ rule, onToggle }: { rule: ModifierRule; onToggle: () => v
         <Toggle
           checked={rule.enabled}
           onChange={onToggle}
+          disabled={saving}
           label={t('common.enable', { label: modifierLabel(rule.modifier) })}
         />
       }
@@ -198,11 +274,13 @@ function ModifierRow({ rule, onToggle }: { rule: ModifierRule; onToggle: () => v
 
 function HotkeyRow({
   hotkey,
+  saving,
   onAccelerator,
   onToggle,
   onDelete,
 }: {
   hotkey: Hotkey;
+  saving: boolean;
   onAccelerator: (accelerator: string) => void;
   onToggle: () => void;
   onDelete: () => void;
@@ -211,11 +289,17 @@ function HotkeyRow({
   return (
     <EntityRow
       lead={
-        <ShortcutRecorder
-          value={hotkey.accelerator}
-          onCapture={onAccelerator}
-          ariaLabel={t('keyboard.changeShortcut', { label: hotkey.label })}
-        />
+        // ShortcutRecorder has no disabled prop of its own; `inert` keeps it
+        // out of the tab order and blocks pointer/keyboard input while a save
+        // for this row is in flight, the same technique used for the gated
+        // master-switch content above.
+        <span inert={saving}>
+          <ShortcutRecorder
+            value={hotkey.accelerator}
+            onCapture={onAccelerator}
+            ariaLabel={t('keyboard.changeShortcut', { label: hotkey.label })}
+          />
+        </span>
       }
       title={hotkey.label}
       sub={actionLabel(hotkey.action, t)}
@@ -225,6 +309,7 @@ function HotkeyRow({
             type="button"
             className="btn btn--ghost"
             onClick={onDelete}
+            disabled={saving}
             aria-label={t('common.delete')}
           >
             ✕
@@ -232,6 +317,7 @@ function HotkeyRow({
           <Toggle
             checked={hotkey.enabled}
             onChange={onToggle}
+            disabled={saving}
             label={t('common.enable', { label: hotkey.label })}
           />
         </>
