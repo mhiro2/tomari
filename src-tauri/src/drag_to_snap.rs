@@ -69,6 +69,15 @@ pub fn restart_result(app: &AppHandle) -> bool {
     }
 }
 
+/// Whether the drag-to-snap tap is currently running. A cheap lock-and-check
+/// so `save_settings` can verify on *every* save that an enabled feature
+/// actually has its tap alive — a warning must reflect the live state, not
+/// just the last restart attempt, or it would vanish from the UI on the next
+/// unrelated save while the tap is still dead.
+pub fn is_running() -> bool {
+    DRAG_TAP.lock_safe().is_some()
+}
+
 /// An in-flight drag-to-snap: the window grabbed on mouse-down plus the live
 /// preview state. The window is not snapped until release; until then this only
 /// reads the cursor and shows the preview.
@@ -343,10 +352,14 @@ fn grab_drag_candidate(app_state: &AppState, x: f64, y: f64) -> Option<DragSnap>
         window,
         start_frame,
         start_cursor: (x, y),
-        // `Instant::now()`, not some zero/epoch value: the first drag event's
-        // throttle check must measure from mouse-down, not read as already
-        // overdue and perform an AX call on the very first move.
-        last_frame_check: Instant::now(),
+        // Backdated by a full interval, not `Instant::now()`: the first drag
+        // event whose cursor has already cleared `CURSOR_MOVE_EPSILON` must be
+        // allowed an immediate AX read. A `now()` baseline would instead make
+        // that very first check appear recent and throttle it away, so a quick
+        // drag (grab, move past the edge, release, all within
+        // `FRAME_CHECK_INTERVAL`) could complete without ever reading the frame
+        // once and would never arm.
+        last_frame_check: Instant::now() - FRAME_CHECK_INTERVAL,
         armed: false,
         screens: Vec::new(),
         active: None,

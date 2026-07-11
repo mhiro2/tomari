@@ -11,6 +11,13 @@
 //!
 //! Listening requires *Input Monitoring*; moving the window requires
 //! *Accessibility*.
+//!
+//! Invariant: no worker thread from a torn-down tap can still be applying AX
+//! writes once the next tap is live. `DragToMoveState`'s `Drop` (run when the
+//! callback closure drops, i.e. as part of the tap thread shutting down)
+//! joins any in-flight and parked worker before that thread join completes —
+//! see its doc comment for why this closes a race a plain `restart` would
+//! otherwise leave open.
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Receiver, Sender};
@@ -89,6 +96,15 @@ pub fn restart_result(app: &AppHandle) -> bool {
             false
         }
     }
+}
+
+/// Whether the drag-to-move tap is currently running. A cheap lock-and-check
+/// so `save_settings` can verify on *every* save that an enabled feature
+/// actually has its tap alive — a warning must reflect the live state, not
+/// just the last restart attempt, or it would vanish from the UI on the next
+/// unrelated save while the tap is still dead.
+pub fn is_running() -> bool {
+    MOVE_TAP.lock_safe().is_some()
 }
 
 fn drag_to_move_enabled_for(app: &AppHandle) -> bool {
@@ -267,6 +283,39 @@ impl DragToMoveState {
         if let Some(handle) = self.pending_join.lock_safe().take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for DragToMoveState {
+    /// Join any still-running worker before the tap callback itself is torn
+    /// down, closing a join-order gap a bare `restart` would otherwise open:
+    /// `restart_result` drops the previous `RunningTap` (which joins the tap
+    /// *thread*, i.e. `CFRunLoopRun` returning) before starting the next tap.
+    /// But without this `Drop`, that thread join says nothing about the
+    /// *worker* thread `MoveWorker::spawn` — the callback only ever parks its
+    /// `JoinHandle` in `pending_join` to be reaped by a later mouse-down (see
+    /// `reap_pending`), and detaches it otherwise. A restart landing between a
+    /// gesture's end and its next mouse-down would then let the new tap start,
+    /// and a fresh gesture begin, while the old worker's last AX write is
+    /// still in flight — racing the new gesture's own writes to the same
+    /// window.
+    ///
+    /// This runs when the callback closure is dropped, which happens on the
+    /// tap thread right after `CFRunLoopRun` returns (see `tap::run_tap`) —
+    /// strictly *before* `RunningTap::drop`'s `handle.join()` on that thread
+    /// returns. So by the time `restart_result` can start the next tap, both
+    /// any in-flight drag and whatever was already parked are guaranteed
+    /// joined: the invariant that "no worker from the old tap can still be
+    /// writing once the new tap is live" holds across a restart, not just
+    /// within a single tap's lifetime.
+    ///
+    /// Bounded the same way `reap_pending` is: the worker's last write is
+    /// timeout-bounded by the AX messaging timeout on the window element, so
+    /// this cannot hang — it only holds up the restart (and thus the tap
+    /// join) for at most that long.
+    fn drop(&mut self) {
+        self.end_drag();
+        self.reap_pending();
     }
 }
 
