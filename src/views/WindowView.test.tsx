@@ -30,7 +30,10 @@ function renderView(ui: ReactElement) {
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
   mockInvoke.mockImplementation((cmd: string) => {
-    if (cmd in overrides) return Promise.resolve(overrides[cmd]);
+    if (cmd in overrides) {
+      const value = overrides[cmd];
+      return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+    }
     switch (cmd) {
       case 'list_window_presets':
         return Promise.resolve(['leftHalf', 'maximize']);
@@ -102,5 +105,33 @@ describe('WindowView', () => {
         settings: expect.objectContaining({ dragToSnapEnabled: true }),
       });
     });
+  });
+
+  it('shows an error instead of crashing when the initial preset/accessibility fetch fails', async () => {
+    mockCommands({
+      list_window_presets: Object.assign(new Error('presets unavailable'), { code: 'unknown' }),
+      accessibility_status: Object.assign(new Error('status unavailable'), { code: 'unknown' }),
+    });
+
+    renderView(<WindowView />);
+
+    // Both failures land on the same `status` output; whichever settles last wins,
+    // so accept either message as evidence the rejection was caught, not thrown.
+    const status = await screen.findByRole('status');
+    expect(
+      status.textContent === 'presets unavailable' || status.textContent === 'status unavailable',
+    ).toBe(true);
+  });
+
+  it('shows an error instead of crashing when requesting accessibility access fails', async () => {
+    mockCommands({
+      accessibility_status: false,
+      request_accessibility: Object.assign(new Error('grant failed'), { code: 'unknown' }),
+    });
+
+    renderView(<WindowView />);
+
+    fireEvent.click(await screen.findByText('Grant access'));
+    expect(await screen.findByRole('status')).toHaveTextContent('grant failed');
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Banner, Group, MasterSwitchHeader, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
@@ -14,10 +14,21 @@ export function WindowView() {
   const [presets, setPresets] = useState<WindowPreset[]>([]);
   const [granted, setGranted] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
+  // Mirrors `t` so the mount-only effect below can format a load failure
+  // without depending on `t` itself — `useT()` returns a new closure on every
+  // render, so adding it to the effect's deps would re-run the fetch each time.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
-    void api.listWindowPresets().then(setPresets);
-    void api.accessibilityStatus().then(setGranted);
+    void api
+      .listWindowPresets()
+      .then(setPresets)
+      .catch((e: unknown) => setStatus(formatCmdError(e, tRef.current)));
+    void api
+      .accessibilityStatus()
+      .then(setGranted)
+      .catch((e: unknown) => setStatus(formatCmdError(e, tRef.current)));
   }, []);
 
   async function snap(preset: WindowPreset) {
@@ -42,8 +53,12 @@ export function WindowView() {
   }
 
   async function grant() {
-    const ok = await api.requestAccessibility();
-    setGranted(ok);
+    try {
+      const ok = await api.requestAccessibility();
+      setGranted(ok);
+    } catch (err) {
+      setStatus(formatCmdError(err, t));
+    }
   }
 
   if (!settings) return <div className="view">{t('common.loading')}</div>;
