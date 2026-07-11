@@ -1,8 +1,9 @@
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
 
-import { Chip, Group, SwitchRow } from '../components/ui';
+import { Chip, Group, Toggle } from '../components/ui';
 import * as api from '../lib/api';
+import { formatCmdError } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
 import type { KeepAwakeStatus, LidCloseState } from '../lib/types';
 
@@ -23,6 +24,7 @@ export function SessionView() {
   const t = useT();
   const [status, setStatus] = useState<KeepAwakeStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void api.getKeepAwake().then(setStatus);
@@ -33,12 +35,21 @@ export function SessionView() {
   }, []);
 
   async function toggle(next: boolean) {
+    // Turning keep-awake on prompts for the admin password, so a second call
+    // while one is in flight must be ignored rather than queued.
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       setStatus(await api.setKeepAwake(next));
-    } catch {
-      // Re-sync from the backend if the toggle could not be applied.
-      setStatus(await api.getKeepAwake());
+    } catch (e) {
+      setError(formatCmdError(e, t));
+      try {
+        // Re-sync from the backend if the toggle could not be applied.
+        setStatus(await api.getKeepAwake());
+      } catch {
+        // Keep the last known status if the re-sync itself fails.
+      }
     } finally {
       setBusy(false);
     }
@@ -51,13 +62,30 @@ export function SessionView() {
   return (
     <div className="view">
       <Group>
-        <SwitchRow
-          title={t('settings.keepAwakeToggle')}
-          desc={t('settings.keepAwakeHint')}
-          checked={active}
-          onChange={(v) => void toggle(v)}
-          toggleLabel={busy ? t('settings.working') : undefined}
-        />
+        {/* SwitchRow has no `disabled` prop, so this row is inlined here to pass
+            `disabled` straight to Toggle and keep the busy guard from being
+            bypassed by a stray click while the admin prompt is in flight. */}
+        <div className="item">
+          <div className="item__body">
+            <span className="item__title">{t('settings.keepAwakeToggle')}</span>
+            <span className="item__desc">{t('settings.keepAwakeHint')}</span>
+          </div>
+          <div className="item__trail">
+            <Toggle
+              checked={active}
+              onChange={(v) => void toggle(v)}
+              disabled={busy}
+              label={busy ? t('settings.working') : t('settings.keepAwakeToggle')}
+            />
+          </div>
+        </div>
+        {error && (
+          <div className="item">
+            <span className="hint--err" role="alert">
+              {error}
+            </span>
+          </div>
+        )}
         {active && (
           <div className="item">
             <div className="item__body">
