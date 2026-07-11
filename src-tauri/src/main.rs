@@ -23,6 +23,8 @@ mod locks;
 mod overlay;
 mod shortcuts;
 mod state;
+#[cfg(target_os = "macos")]
+mod tap;
 mod tray;
 mod validate;
 #[cfg(target_os = "macos")]

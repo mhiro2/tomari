@@ -7,18 +7,10 @@
 //! Listening requires *Input Monitoring*; moving the window requires
 //! *Accessibility*.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
-use core_foundation::base::TCFType;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-use core_foundation_sys::mach_port::CFMachPortRef;
-use core_graphics::event::{
-    CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-    CallbackResult,
-};
+use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult};
 use tauri::{AppHandle, Manager};
 use tomari_core::{Rect, WindowPreset};
 use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, screen_at_cursor};
@@ -26,28 +18,10 @@ use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, s
 use crate::locks::MutexExt;
 use crate::overlay;
 use crate::state::AppState;
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
-}
+use crate::tap::{self, RunningTap};
 
 /// The single live drag-to-snap tap, owned globally like the keyboard tap.
-static DRAG_TAP: Mutex<Option<DragTap>> = Mutex::new(None);
-
-pub struct DragTap {
-    run_loop: CFRunLoop,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for DragTap {
-    fn drop(&mut self) {
-        self.run_loop.stop();
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
-        }
-    }
-}
+static DRAG_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
 /// (Re)start the tap to match the current settings: tear down any existing tap
 /// and, if drag-to-snap is enabled, start a fresh one.
@@ -107,85 +81,25 @@ struct DragSnap {
 /// frame before a drag counts as a real window move and arms drag-to-snap.
 const MOVE_EPSILON: f64 = 1.0;
 
-fn start(app: AppHandle) -> Result<DragTap, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("tomari-dragtosnap".into())
-        .spawn(move || run_tap(app, tx))
-        .map_err(|e| e.to_string())?;
-
-    match rx.recv() {
-        Ok(Ok(run_loop)) => Ok(DragTap {
-            run_loop,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(e)
-        }
-        Err(e) => Err(format!(
-            "drag-to-snap tap thread exited before signalling: {e}"
-        )),
-    }
-}
-
-fn run_tap(app: AppHandle, tx: Sender<Result<CFRunLoop, String>>) {
-    // The drag state never leaves this thread: the callback runs only on this
-    // run loop. The mutex only satisfies the `Fn` bound.
-    let drag: Mutex<Option<DragSnap>> = Mutex::new(None);
-    let port_holder = Arc::new(AtomicUsize::new(0));
-
-    let callback = {
-        let port_holder = port_holder.clone();
-        move |_proxy, etype, event: &CGEvent| handle_event(&app, &drag, &port_holder, etype, event)
-    };
-
-    let tap = match CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
+fn start(app: AppHandle) -> Result<RunningTap, String> {
+    tap::spawn(
+        "tomari-dragtosnap",
+        "drag-to-snap tap",
         CGEventTapOptions::ListenOnly,
         vec![
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseDragged,
             CGEventType::LeftMouseUp,
         ],
-        callback,
-    ) {
-        Ok(tap) => tap,
-        Err(()) => {
-            let _ = tx.send(Err(
-                "failed to create drag-to-snap tap — Input Monitoring permission required".into(),
-            ));
-            return;
-        }
-    };
-
-    // Publish the mach port so the callback can re-arm the tap if the system
-    // disables it (AX updates inside the callback can be slow enough).
-    port_holder.store(
-        tap.mach_port().as_concrete_TypeRef() as usize,
-        Ordering::SeqCst,
-    );
-
-    let source = match tap.mach_port().create_runloop_source(0) {
-        Ok(source) => source,
-        Err(()) => {
-            let _ = tx.send(Err(
-                "failed to create run-loop source for drag-to-snap tap".into()
-            ));
-            return;
-        }
-    };
-
-    let run_loop = CFRunLoop::get_current();
-    unsafe {
-        run_loop.add_source(&source, kCFRunLoopCommonModes);
-    }
-    tap.enable();
-
-    let _ = tx.send(Ok(run_loop));
-    CFRunLoop::run_current();
-    // Run loop stopped: returning here drops `tap`, invalidating the port.
+        move |port_holder| {
+            // The drag state never leaves this thread: the callback runs only on
+            // this run loop. The mutex only satisfies the `Fn` bound.
+            let drag: Mutex<Option<DragSnap>> = Mutex::new(None);
+            Box::new(move |_proxy, etype, event: &CGEvent| {
+                handle_event(&app, &drag, &port_holder, etype, event)
+            })
+        },
+    )
 }
 
 fn handle_event(
@@ -207,10 +121,7 @@ fn handle_event(
         if drag.lock_safe().take().is_some() {
             overlay::hide(app);
         }
-        let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
+        tap::reenable(port_holder);
         return CallbackResult::Keep;
     }
 

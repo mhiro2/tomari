@@ -12,18 +12,12 @@
 //! Listening requires *Input Monitoring*; moving the window requires
 //! *Accessibility*.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use core_foundation::base::TCFType;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-use core_foundation_sys::mach_port::CFMachPortRef;
-use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventType, CallbackResult,
-};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapOptions, CGEventType, CallbackResult};
 use tauri::{AppHandle, Manager};
 use tomari_core::Rect;
 use tomari_window::{
@@ -32,28 +26,10 @@ use tomari_window::{
 
 use crate::locks::MutexExt;
 use crate::state::AppState;
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
-}
+use crate::tap::{self, RunningTap};
 
 /// The single live drag-to-move tap, owned globally like the other taps.
-static MOVE_TAP: Mutex<Option<MoveTap>> = Mutex::new(None);
-
-pub struct MoveTap {
-    run_loop: CFRunLoop,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for MoveTap {
-    fn drop(&mut self) {
-        self.run_loop.stop();
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
-        }
-    }
-}
+static MOVE_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
 /// Which gesture a modifier chord selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,87 +195,27 @@ fn apply_loop(
     }
 }
 
-fn start(app: AppHandle) -> Result<MoveTap, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("tomari-dragtomove".into())
-        .spawn(move || run_tap(app, tx))
-        .map_err(|e| e.to_string())?;
-
-    match rx.recv() {
-        Ok(Ok(run_loop)) => Ok(MoveTap {
-            run_loop,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(e)
-        }
-        Err(e) => Err(format!(
-            "drag-to-move tap thread exited before signalling: {e}"
-        )),
-    }
-}
-
-fn run_tap(app: AppHandle, tx: Sender<Result<CFRunLoop, String>>) {
-    // The drag state never leaves this thread: the callback runs only on this
-    // run loop. The mutex only satisfies the `Fn` bound.
-    let drag: Mutex<Option<MoveDrag>> = Mutex::new(None);
-    let port_holder = Arc::new(AtomicUsize::new(0));
-
-    let callback = {
-        let port_holder = port_holder.clone();
-        move |_proxy, etype, event: &CGEvent| handle_event(&app, &drag, &port_holder, etype, event)
-    };
-
+fn start(app: AppHandle) -> Result<RunningTap, String> {
     // An active tap (not listen-only): a gesture in flight returns `Drop` to
     // swallow the mouse events so the app underneath stays inert.
-    let tap = match CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
+    tap::spawn(
+        "tomari-dragtomove",
+        "drag-to-move tap",
         CGEventTapOptions::Default,
         vec![
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseDragged,
             CGEventType::LeftMouseUp,
         ],
-        callback,
-    ) {
-        Ok(tap) => tap,
-        Err(()) => {
-            let _ = tx.send(Err(
-                "failed to create drag-to-move tap — Input Monitoring permission required".into(),
-            ));
-            return;
-        }
-    };
-
-    // Publish the mach port so the callback can re-arm the tap if the system
-    // disables it (AX updates inside the callback can be slow enough).
-    port_holder.store(
-        tap.mach_port().as_concrete_TypeRef() as usize,
-        Ordering::SeqCst,
-    );
-
-    let source = match tap.mach_port().create_runloop_source(0) {
-        Ok(source) => source,
-        Err(()) => {
-            let _ = tx.send(Err(
-                "failed to create run-loop source for drag-to-move tap".into()
-            ));
-            return;
-        }
-    };
-
-    let run_loop = CFRunLoop::get_current();
-    unsafe {
-        run_loop.add_source(&source, kCFRunLoopCommonModes);
-    }
-    tap.enable();
-
-    let _ = tx.send(Ok(run_loop));
-    CFRunLoop::run_current();
-    // Run loop stopped: returning here drops `tap`, invalidating the port.
+        move |port_holder| {
+            // The drag state never leaves this thread: the callback runs only on
+            // this run loop. The mutex only satisfies the `Fn` bound.
+            let drag: Mutex<Option<MoveDrag>> = Mutex::new(None);
+            Box::new(move |_proxy, etype, event: &CGEvent| {
+                handle_event(&app, &drag, &port_holder, etype, event)
+            })
+        },
+    )
 }
 
 fn handle_event(
@@ -321,10 +237,7 @@ fn handle_event(
         // mutex.
         let stale = drag.lock_safe().take();
         drop(stale);
-        let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
+        tap::reenable(port_holder);
         return CallbackResult::Keep;
     }
 

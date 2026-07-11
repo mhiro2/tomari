@@ -24,17 +24,9 @@
 //! list so the user can enable it).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
-use core_foundation::base::TCFType;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-use core_foundation_sys::mach_port::CFMachPortRef;
-use core_graphics::event::{
-    CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-    CallbackResult, EventField,
-};
+use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult, EventField};
 use tauri::{AppHandle, Manager};
 use tomari_core::{AppAction, KeySide, ModifierKey};
 use tomari_keyboard::HYPER_MODIFIERS;
@@ -43,6 +35,7 @@ use tomari_keyboard::engine::KeyEvent;
 use crate::keycodes;
 use crate::locks::MutexExt;
 use crate::state::AppState;
+use crate::tap::{self, RunningTap};
 
 /// Marker written into `EVENT_SOURCE_USER_DATA` on events Tomari synthesizes
 /// (see [`crate::keysend`]), so the tap ignores its own injected keystrokes.
@@ -50,7 +43,6 @@ pub const SYNTHETIC_MARKER: i64 = 0x746f_6d72; // "tomr"
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGPreflightListenEventAccess() -> bool;
     fn CGRequestListenEventAccess() -> bool;
 }
@@ -68,31 +60,13 @@ pub fn request_input_monitoring() -> bool {
 
 /// The single live event tap, owned globally so its lifecycle is independent of
 /// the cross-platform [`AppState`] struct.
-static EVENT_TAP: Mutex<Option<EventTap>> = Mutex::new(None);
+static EVENT_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
 /// Whether Caps Lock is currently remapped to F18 (see [`crate::capsmap`]), so
 /// F18 key events are the Caps Lock modifier rather than a real F18 key. Kept in
 /// step with the remap by [`restart`]; read on the tap thread for every
 /// keystroke, so it is an atomic rather than behind a lock.
 static CAPS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// A running event tap: the run loop it is attached to (so it can be stopped)
-/// and the thread driving it.
-pub struct EventTap {
-    run_loop: CFRunLoop,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for EventTap {
-    fn drop(&mut self) {
-        // Stopping the run loop makes `CFRunLoopRun` return; the thread then
-        // drops the tap (invalidating it) and exits.
-        self.run_loop.stop();
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
-        }
-    }
-}
 
 /// (Re)start the tap to match the current settings: tears down any existing tap
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
@@ -167,81 +141,23 @@ struct TapState {
     remap_stamp: (Vec<ModifierKey>, Vec<ModifierKey>),
 }
 
-fn start(app: AppHandle) -> Result<EventTap, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("tomari-eventtap".into())
-        .spawn(move || run_tap(app, tx))
-        .map_err(|e| e.to_string())?;
-
-    match rx.recv() {
-        Ok(Ok(run_loop)) => Ok(EventTap {
-            run_loop,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(e)
-        }
-        Err(e) => Err(format!("event tap thread exited before signalling: {e}")),
-    }
-}
-
-fn run_tap(app: AppHandle, tx: Sender<Result<CFRunLoop, String>>) {
-    let state = Arc::new(Mutex::new(TapState::default()));
-    let port_holder = Arc::new(AtomicUsize::new(0));
-
-    let callback = {
-        let app = app.clone();
-        let state = state.clone();
-        let port_holder = port_holder.clone();
-        move |_proxy, etype, event: &CGEvent| handle_event(&app, &state, &port_holder, etype, event)
-    };
-
-    let tap = match CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
+fn start(app: AppHandle) -> Result<RunningTap, String> {
+    tap::spawn(
+        "tomari-eventtap",
+        "event tap",
         CGEventTapOptions::Default,
         vec![
             CGEventType::KeyDown,
             CGEventType::KeyUp,
             CGEventType::FlagsChanged,
         ],
-        callback,
-    ) {
-        Ok(tap) => tap,
-        Err(()) => {
-            let _ = tx.send(Err(
-                "failed to create event tap — Input Monitoring permission required".into(),
-            ));
-            return;
-        }
-    };
-
-    // Publish the mach port so the callback can re-arm the tap if the system
-    // disables it after a slow callback or heavy input.
-    port_holder.store(
-        tap.mach_port().as_concrete_TypeRef() as usize,
-        Ordering::SeqCst,
-    );
-
-    let source = match tap.mach_port().create_runloop_source(0) {
-        Ok(source) => source,
-        Err(()) => {
-            let _ = tx.send(Err("failed to create run-loop source for event tap".into()));
-            return;
-        }
-    };
-
-    let run_loop = CFRunLoop::get_current();
-    unsafe {
-        run_loop.add_source(&source, kCFRunLoopCommonModes);
-    }
-    tap.enable();
-
-    let _ = tx.send(Ok(run_loop));
-    CFRunLoop::run_current();
-    // Run loop stopped: returning here drops `tap`, invalidating the port.
+        move |port_holder| {
+            let state = Arc::new(Mutex::new(TapState::default()));
+            Box::new(move |_proxy, etype, event: &CGEvent| {
+                handle_event(&app, &state, &port_holder, etype, event)
+            })
+        },
+    )
 }
 
 fn handle_event(
@@ -256,10 +172,7 @@ fn handle_event(
         etype,
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
-        let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
+        tap::reenable(port_holder);
         return CallbackResult::Keep;
     }
 

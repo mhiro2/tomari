@@ -131,7 +131,13 @@ entry, leaving any mappings the user set themselves intact.
   stamped with a marker in `EVENT_SOURCE_USER_DATA` so Tomari's own tap never
   enters a feedback loop.
 - (Re)starting the tap is centralized in `eventtap::restart`, called when the
-  feature is toggled or the permission is granted.
+  feature is toggled or the permission is granted. The scaffolding underneath
+  all three CGEventTaps (this one, drag-to-snap, drag-to-move) — spawn a
+  dedicated thread, create the tap, attach its run-loop source, and hand the
+  running `CFRunLoop` back so `Drop` can stop and join it, plus re-arming after
+  `TapDisabledByTimeout`/`TapDisabledByUserInput` — is itself centralized in
+  `tap::spawn`/`tap::reenable` (`src-tauri/src/tap.rs`); only the tap name,
+  `CGEventTapOptions`, watched event types, and the callback differ per tap.
 
 Global shortcuts are a separate channel registered with Tauri's
 `global-shortcut` plugin (`shortcuts::register_all`). On fire, the handler
