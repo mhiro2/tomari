@@ -105,19 +105,47 @@ impl Drop for CFOwned {
     }
 }
 
+/// `kAXErrorNoValue`: the requested attribute or element does not exist (as
+/// opposed to the messaging round-trip itself failing).
+const kAXErrorNoValue: AXError = -25212;
+
 /// Read a +1-retained attribute value off an element.
+///
+/// Returns the raw `AXError` on failure rather than collapsing it, so callers
+/// can tell a transient messaging failure (`kAXErrorCannotComplete`, e.g. the
+/// bounded timeout in [`AX_MESSAGING_TIMEOUT_SECS`] tripping on a hung app)
+/// from the attribute genuinely not existing (`kAXErrorNoValue`) or the
+/// element genuinely being gone (`kAXErrorInvalidUIElement`).
 ///
 /// # Safety
 /// `element` must be a valid `AXUIElementRef`.
-unsafe fn copy_attr(element: CFTypeRef, name: &str) -> Option<CFOwned> {
+unsafe fn copy_attr(element: CFTypeRef, name: &str) -> std::result::Result<CFOwned, AXError> {
     let attr = CFString::new(name);
     let mut value: CFTypeRef = std::ptr::null();
     let err =
         unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
-    if err == kAXErrorSuccess && !value.is_null() {
-        Some(CFOwned(value))
+    if err == kAXErrorSuccess {
+        if value.is_null() {
+            // Successful call, but nothing came back: treat like "no value".
+            Err(kAXErrorNoValue)
+        } else {
+            Ok(CFOwned(value))
+        }
     } else {
-        None
+        Err(err)
+    }
+}
+
+/// Map an `AXError` from [`copy_attr`] to this crate's [`Error`]. `kAXErrorNoValue`
+/// keeps the existing "nothing to act on" behavior (`NoFocusedWindow`); every
+/// other code — including transient failures like `kAXErrorCannotComplete` —
+/// is preserved as [`Error::Ax`] so [`Error::window_gone`] can tell a hung app
+/// apart from one that has truly gone away.
+fn map_attr_err(err: AXError) -> Error {
+    if err == kAXErrorNoValue {
+        Error::NoFocusedWindow
+    } else {
+        Error::Ax(err)
     }
 }
 
@@ -205,8 +233,7 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
         return Err(Error::NoFocusedWindow);
     }
     let system = CFOwned(system);
-    let app =
-        unsafe { copy_attr(system.0, "AXFocusedApplication") }.ok_or(Error::NoFocusedWindow)?;
+    let app = unsafe { copy_attr(system.0, "AXFocusedApplication") }.map_err(map_attr_err)?;
 
     let own_pid = std::process::id() as pid_t;
     if unsafe { element_pid(app.0) } == Some(own_pid) {
@@ -217,12 +244,11 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
         }
         let other_app = CFOwned(other_app);
         unsafe { set_messaging_timeout(other_app.0) };
-        let window =
-            unsafe { copy_attr(other_app.0, "AXFocusedWindow") }.ok_or(Error::NoFocusedWindow)?;
+        let window = unsafe { copy_attr(other_app.0, "AXFocusedWindow") }.map_err(map_attr_err)?;
         return Ok((system, other_app, window));
     }
 
-    let window = unsafe { copy_attr(app.0, "AXFocusedWindow") }.ok_or(Error::NoFocusedWindow)?;
+    let window = unsafe { copy_attr(app.0, "AXFocusedWindow") }.map_err(map_attr_err)?;
     Ok((system, app, window))
 }
 
@@ -232,8 +258,8 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
 /// # Safety
 /// `window` must be a valid `AXUIElementRef`.
 unsafe fn window_rect(window: CFTypeRef) -> Result<Rect> {
-    let pos = unsafe { copy_attr(window, "AXPosition") }.ok_or(Error::NoFocusedWindow)?;
-    let size = unsafe { copy_attr(window, "AXSize") }.ok_or(Error::NoFocusedWindow)?;
+    let pos = unsafe { copy_attr(window, "AXPosition") }.map_err(map_attr_err)?;
+    let size = unsafe { copy_attr(window, "AXSize") }.map_err(map_attr_err)?;
     let mut point = CGPoint { x: 0.0, y: 0.0 };
     let mut sz = CGSize {
         width: 0.0,
@@ -546,7 +572,7 @@ impl WindowHandle for DragWindow {
 /// # Safety
 /// `element` must be a valid `AXUIElementRef`.
 unsafe fn element_role(element: CFTypeRef) -> Option<String> {
-    let role = unsafe { copy_attr(element, "AXRole") }?;
+    let role = unsafe { copy_attr(element, "AXRole") }.ok()?;
     let s = unsafe { CFString::wrap_under_get_rule(role.0 as CFStringRef) };
     Some(s.to_string())
 }
@@ -579,12 +605,12 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
             if element_role(element.0).as_deref() == Some("AXWindow") {
                 return Ok(DragWindow::new(element));
             }
-            if let Some(window) = copy_attr(element.0, "AXWindow") {
+            if let Ok(window) = copy_attr(element.0, "AXWindow") {
                 return Ok(DragWindow::new(window));
             }
             match copy_attr(element.0, "AXParent") {
-                Some(parent) => element = parent,
-                None => break,
+                Ok(parent) => element = parent,
+                Err(_) => break,
             }
         }
         Err(Error::NoFocusedWindow)
