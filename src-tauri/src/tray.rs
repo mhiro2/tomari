@@ -19,7 +19,6 @@ const TRAY_ID: &str = "tomari-tray";
 struct Text {
     grant_accessibility: &'static str,
     grant_input: &'static str,
-    window: &'static str,
     left_half: &'static str,
     right_half: &'static str,
     maximize: &'static str,
@@ -34,7 +33,6 @@ struct Text {
 const TEXT_EN: Text = Text {
     grant_accessibility: "Grant Accessibility Access…",
     grant_input: "Grant Input Monitoring Access…",
-    window: "Window",
     left_half: "Left Half",
     right_half: "Right Half",
     maximize: "Maximize",
@@ -49,7 +47,6 @@ const TEXT_EN: Text = Text {
 const TEXT_JA: Text = Text {
     grant_accessibility: "アクセシビリティへのアクセスを許可…",
     grant_input: "入力監視へのアクセスを許可…",
-    window: "ウィンドウ",
     left_half: "左半分",
     right_half: "右半分",
     maximize: "最大化",
@@ -129,9 +126,6 @@ fn build_menu(
         menu = menu.separator();
     }
 
-    let window_header = MenuItemBuilder::with_id("section:window", text.window)
-        .enabled(false)
-        .build(app)?;
     let snap_left = MenuItemBuilder::with_id("snap:leftHalf", text.left_half)
         .enabled(ax_granted)
         .build(app)?;
@@ -158,8 +152,7 @@ fn build_menu(
     let check_update = MenuItemBuilder::with_id("check-update", text.check_updates).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", text.quit).build(app)?;
 
-    menu.item(&window_header)
-        .item(&snap)
+    menu.item(&snap)
         .separator()
         .item(&keep_awake)
         .separator()
