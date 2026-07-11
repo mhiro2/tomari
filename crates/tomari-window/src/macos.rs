@@ -5,7 +5,7 @@
 //! of stable HIServices C functions we need directly, and use Core Foundation /
 //! Core Graphics value types for the rest.
 
-#![allow(non_upper_case_globals)]
+#![allow(non_upper_case_globals, non_camel_case_types)]
 
 use std::ffi::c_void;
 
@@ -13,11 +13,17 @@ use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
+use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
 use core_foundation_sys::base::{CFHash, CFRelease, CFRetain, CFTypeRef};
-use core_foundation_sys::dictionary::CFDictionaryRef;
+use core_foundation_sys::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+use core_foundation_sys::number::{CFNumberGetValue, kCFNumberSInt32Type};
 use core_foundation_sys::string::CFStringRef;
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::{CGPoint, CGSize};
+use core_graphics::window::{
+    CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowLayer,
+    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
 use tomari_core::domain::window::Rect;
@@ -27,6 +33,7 @@ use crate::manager::{WindowHandle, WindowManager};
 
 type AXError = i32;
 type AXValueType = u32;
+type pid_t = i32;
 
 const kAXErrorSuccess: AXError = 0;
 const kAXValueTypeCGPoint: AXValueType = 1;
@@ -56,6 +63,8 @@ unsafe extern "C" {
         element: *mut CFTypeRef,
     ) -> AXError;
     fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout_in_seconds: f32) -> AXError;
+    fn AXUIElementGetPid(element: CFTypeRef, pid: *mut pid_t) -> AXError;
+    fn AXUIElementCreateApplication(pid: pid_t) -> CFTypeRef;
 }
 
 /// Cap on every Accessibility round-trip made through a dragged/hit-tested
@@ -112,9 +121,81 @@ unsafe fn copy_attr(element: CFTypeRef, name: &str) -> Option<CFOwned> {
     }
 }
 
+/// Read an `AXUIElement`'s owning process ID.
+///
+/// # Safety
+/// `element` must be a valid `AXUIElementRef`.
+unsafe fn element_pid(element: CFTypeRef) -> Option<pid_t> {
+    let mut pid: pid_t = 0;
+    let err = unsafe { AXUIElementGetPid(element, &mut pid) };
+    (err == kAXErrorSuccess).then_some(pid)
+}
+
+/// Read a `CFNumber` dictionary value as an `i32`, if present and numeric.
+fn dict_get_i32(dict: CFTypeRef, key: CFStringRef) -> Option<i32> {
+    let mut value: *const c_void = std::ptr::null();
+    let found =
+        unsafe { CFDictionaryGetValueIfPresent(dict as CFDictionaryRef, key.cast(), &mut value) };
+    if found == 0 || value.is_null() {
+        return None;
+    }
+    let mut out: i32 = 0;
+    let ok = unsafe {
+        CFNumberGetValue(
+            value.cast(),
+            kCFNumberSInt32Type,
+            (&mut out as *mut i32).cast(),
+        )
+    };
+    ok.then_some(out)
+}
+
+/// Find the PID owning the frontmost on-screen window that is not `exclude_pid`.
+///
+/// Walks the system's on-screen window list (front-to-back order, desktop
+/// elements excluded) and returns the owner of the first normal-level
+/// (`kCGWindowLayer == 0`) window belonging to a different process — i.e. the
+/// application actually visible behind our own frontmost window.
+fn frontmost_other_app_pid(exclude_pid: pid_t) -> Option<pid_t> {
+    let list = unsafe {
+        CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+    };
+    if list.is_null() {
+        return None;
+    }
+    let list = CFOwned(list as CFTypeRef);
+
+    let count = unsafe { CFArrayGetCount(list.0 as _) };
+    for i in 0..count {
+        let entry = unsafe { CFArrayGetValueAtIndex(list.0 as _, i) } as CFTypeRef;
+        if entry.is_null() {
+            continue;
+        }
+        let layer = dict_get_i32(entry, unsafe { kCGWindowLayer });
+        if layer != Some(0) {
+            continue;
+        }
+        let owner_pid = dict_get_i32(entry, unsafe { kCGWindowOwnerPID });
+        match owner_pid {
+            Some(pid) if pid != exclude_pid => return Some(pid),
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// Resolve the system-wide focused window, returning the owned CF handles for
 /// the system element, focused application and focused window. The caller must
 /// keep all three alive while using the window (it is owned by the others).
+///
+/// When the system-reported focused application is this very process — which
+/// happens the instant a click lands on one of Tomari's own windows, e.g. the
+/// preset grid in the settings window — fall back to the frontmost *other*
+/// application's focused window instead, so a snap never targets Tomari's own
+/// UI.
 ///
 /// # Safety
 /// Must run while the Accessibility permission is granted.
@@ -126,6 +207,21 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
     let system = CFOwned(system);
     let app =
         unsafe { copy_attr(system.0, "AXFocusedApplication") }.ok_or(Error::NoFocusedWindow)?;
+
+    let own_pid = std::process::id() as pid_t;
+    if unsafe { element_pid(app.0) } == Some(own_pid) {
+        let other_pid = frontmost_other_app_pid(own_pid).ok_or(Error::NoFocusedWindow)?;
+        let other_app = unsafe { AXUIElementCreateApplication(other_pid) };
+        if other_app.is_null() {
+            return Err(Error::NoFocusedWindow);
+        }
+        let other_app = CFOwned(other_app);
+        unsafe { set_messaging_timeout(other_app.0) };
+        let window =
+            unsafe { copy_attr(other_app.0, "AXFocusedWindow") }.ok_or(Error::NoFocusedWindow)?;
+        return Ok((system, other_app, window));
+    }
+
     let window = unsafe { copy_attr(app.0, "AXFocusedWindow") }.ok_or(Error::NoFocusedWindow)?;
     Ok((system, app, window))
 }
@@ -280,6 +376,9 @@ impl WindowManager for AxWindowManager {
             }
             // The window element is +1-retained, so it stays valid on its own
             // after the system-wide and application elements are released.
+            // This holds in the fallback path too: `_app` there is a fresh
+            // `AXUIElementCreateApplication` handle for the frontmost other
+            // process, and its `AXFocusedWindow` is copied (not borrowed) from it.
             let (_system, _app, window) = focused_window()?;
             Ok(Box::new(DragWindow::new(window)))
         }

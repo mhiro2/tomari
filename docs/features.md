@@ -57,7 +57,8 @@ consequences to be aware of:
 - Snap the focused window to one of 15 presets: left/right halves, quarters,
   thirds, maximize, centering, and more.
 - Trigger snapping from the menu bar menu, a global shortcut, or the grid in
-  the UI.
+  the UI. Triggering it from the UI always targets the window you were using
+  before you opened Tomari, never the settings window itself.
 - **Default snap shortcuts** — `⌃⌥←` / `⌃⌥→` / `⌃⌥↑` for left half, right half,
   and maximize. `⌃⌥` (Control + Option) is the Mac-native modifier pair used by
   most window managers and does not collide with macOS's own `⌃`+arrow (Spaces

@@ -154,7 +154,12 @@ Three layers:
    (`frame` / `set_frame` / `stable_hash`). A handle can re-target the same
    window even after focus has moved elsewhere — it is the unit the undo
    history stores. The macOS implementation is `AxWindowManager` (direct
-   bindings to the stable HIServices C functions).
+   bindings to the stable HIServices C functions). Focused-window resolution
+   normally reads the system-wide `AXFocusedApplication`/`AXFocusedWindow`, but
+   if that application turns out to be Tomari itself (e.g. a click landed on
+   the settings window), it falls back to the frontmost *other* app's focused
+   window via the on-screen `CGWindowList`, so a snap triggered from Tomari's
+   own UI never targets Tomari's own window.
 3. **Orchestration** (`src-tauri/src/window_ops.rs`) — every input path goes
    through here. It honors the master switch and pushes "handle + previous
    frame" onto the undo history (`AppState::window_history`, capped at 50)
