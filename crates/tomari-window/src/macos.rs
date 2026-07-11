@@ -14,10 +14,10 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
-use core_foundation_sys::base::{CFHash, CFRelease, CFRetain, CFTypeRef};
+use core_foundation_sys::base::{CFGetTypeID, CFHash, CFRelease, CFRetain, CFTypeRef};
 use core_foundation_sys::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
 use core_foundation_sys::number::{CFNumberGetValue, kCFNumberSInt32Type};
-use core_foundation_sys::string::CFStringRef;
+use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::{CGPoint, CGSize};
 use core_graphics::window::{
@@ -360,6 +360,10 @@ pub struct AxWindowManager {
 impl Default for AxWindowManager {
     fn default() -> Self {
         Self {
+            // Only used by `cg_fallback_work_area` when the real per-display
+            // visible frame cannot be read. 25pt matches a pre-notch menu bar;
+            // notched Macs' menu bar is taller (roughly 32-38pt), so this
+            // fallback is a known-imprecise approximation on those machines.
             menu_bar_inset: 25.0,
         }
     }
@@ -378,7 +382,10 @@ impl AxWindowManager {
 
     /// Fallback work area when AppKit's per-display visible frame is unavailable
     /// (e.g. called off the main thread): the main display minus a fixed
-    /// menu-bar inset.
+    /// menu-bar inset. The default inset (see [`Default`] below) is shorter
+    /// than the actual menu bar on notched Macs (roughly 32-38pt), so on those
+    /// machines this fallback can place a window's top edge under the menu
+    /// bar / notch area instead of flush below it.
     fn cg_fallback_work_area(&self) -> Rect {
         let bounds = CGDisplay::main().bounds();
         Rect::new(
@@ -569,10 +576,20 @@ impl WindowHandle for DragWindow {
 
 /// Read an element's `AXRole`, if it has one.
 ///
+/// `window_at_point` walks elements owned by whatever third-party app is under
+/// the cursor, so the returned attribute value cannot be trusted to actually be
+/// a `CFString` — a misbehaving or unusual AX implementation could hand back
+/// any CF type. Check the runtime type ID before reinterpreting the pointer as
+/// a `CFStringRef`; a mismatch returns `None` instead of reading through a
+/// wrongly-typed pointer.
+///
 /// # Safety
 /// `element` must be a valid `AXUIElementRef`.
 unsafe fn element_role(element: CFTypeRef) -> Option<String> {
     let role = unsafe { copy_attr(element, "AXRole") }.ok()?;
+    if unsafe { CFGetTypeID(role.0) } != unsafe { CFStringGetTypeID() } {
+        return None;
+    }
     let s = unsafe { CFString::wrap_under_get_rule(role.0 as CFStringRef) };
     Some(s.to_string())
 }

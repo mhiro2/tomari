@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use tomari_core::domain::window::{DisplayDirection, Rect};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// A handle to one specific window that can be read and repositioned later,
 /// even after focus has moved elsewhere — the unit the undo history stores.
@@ -166,12 +166,12 @@ impl WindowManager for MockWindowManager {
             window_frame.x + window_frame.width / 2.0,
             window_frame.y + window_frame.height / 2.0,
         );
-        Ok(self
-            .areas
+        self.areas
             .iter()
             .find(|a| cx >= a.x && cx < a.x + a.width && cy >= a.y && cy < a.y + a.height)
+            .or_else(|| self.areas.first())
             .copied()
-            .unwrap_or(self.areas[0]))
+            .ok_or(Error::Unsupported)
     }
 
     fn screen_work_areas(&self) -> Result<Vec<Rect>> {
@@ -187,6 +187,16 @@ impl WindowManager for MockWindowManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_area_with_no_displays_errors_instead_of_panicking() {
+        let mut m = MockWindowManager::new(Rect::new(0.0, 25.0, 1600.0, 975.0));
+        m.areas.clear();
+        assert!(matches!(
+            m.work_area(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            Err(Error::Unsupported)
+        ));
+    }
 
     #[test]
     fn mock_handle_moves_are_visible_to_later_reads() {
