@@ -335,6 +335,11 @@ body {
   background: var(--amber);
 }
 
+.toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .toggle__knob {
   position: absolute;
   top: 2px;

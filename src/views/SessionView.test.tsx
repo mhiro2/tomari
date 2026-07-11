@@ -95,8 +95,22 @@ describe('SessionView', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Accessibility permission is required.',
     );
-    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+    // One fetch on mount, one re-sync after the failed toggle.
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_keep_awake')).toHaveLength(2),
+    );
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
     expect(toggle).not.toBeDisabled();
+  });
+
+  it('shows an error when the initial getKeepAwake rejects', async () => {
+    mockCommands({ get_keep_awake: new Rejection(new Error('backend gone')) });
+
+    render(<SessionView />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('backend gone');
+    // The view stays usable with the default off state.
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
   it('updates from the tomari:keep-awake-changed event', async () => {
