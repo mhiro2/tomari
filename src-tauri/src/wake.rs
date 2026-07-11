@@ -45,14 +45,24 @@ pub fn install(app: &AppHandle) {
 /// carries a "key is held" belief across a sleep or session switch.
 fn reset(app: &AppHandle) {
     tracing::info!("woke from sleep or session became active — resetting input state");
+    if let Some(state) = app.try_state::<AppState>() {
+        state.engine.lock_safe().reset();
+    }
+    // Restarting a tap joins its previous thread and (for the keyboard tap)
+    // can shell out to `hidutil` while reconciling the Caps Lock remap; none
+    // of that touches AppKit UI, so it needs no main-thread hop — only run
+    // off this notification callback's own thread so a slow join/`hidutil`
+    // never delays it (and, transitively, whatever queue the notification
+    // center delivers on). `AppState::config_mutation` is not held here:
+    // these restarts do not touch the database or the shortcut map, only the
+    // tap-local caps/hyper tracking, so they cannot race a config save/delete
+    // in a way that matters.
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(state) = handle.try_state::<AppState>() {
-            state.engine.lock_safe().reset();
-        }
-        // Restarting the taps replaces their thread-local caps/hyper tracking.
-        crate::eventtap::restart(&handle);
-        crate::drag_to_snap::restart(&handle);
-        crate::drag_to_move::restart(&handle);
-    });
+    let _ = std::thread::Builder::new()
+        .name("tomari-wake-reset".into())
+        .spawn(move || {
+            crate::eventtap::restart(&handle);
+            crate::drag_to_snap::restart(&handle);
+            crate::drag_to_move::restart(&handle);
+        });
 }

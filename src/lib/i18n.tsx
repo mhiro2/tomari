@@ -158,6 +158,14 @@ const en = {
     'Launch at login was saved but could not be applied to the system. Toggle it off and on to try again.',
   'settings.applyWarning.menuBar':
     'The menu bar setting was saved but could not be applied. Toggle it off and on to try again.',
+  'settings.applyWarning.keyboardTap':
+    'Keyboard customization was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+  'settings.applyWarning.dragToSnapTap':
+    'Drag to snap was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+  'settings.applyWarning.dragToMoveTap':
+    'Drag to move was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+  'settings.applyWarning.capsLockRemap':
+    'The setting was saved, but the Caps Lock remap could not be updated. Toggle it off and on to try again.',
   'settings.applyWarning.generic': 'A setting was saved but could not be applied to the system.',
 } as const;
 
@@ -316,6 +324,14 @@ const ja: Record<MessageKey, string> = {
     'ログイン時に起動の設定は保存しましたが、システムに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.menuBar':
     'メニューバーの設定は保存しましたが、適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
+  'settings.applyWarning.keyboardTap':
+    'キーボードカスタマイズは保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+  'settings.applyWarning.dragToSnapTap':
+    'ドラッグでスナップは保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+  'settings.applyWarning.dragToMoveTap':
+    'ドラッグで移動は保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+  'settings.applyWarning.capsLockRemap':
+    '設定は保存しましたが、Caps Lock の割り当てを更新できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.generic': '設定は保存しましたが、システムに適用できませんでした。',
 };
 

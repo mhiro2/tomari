@@ -70,13 +70,25 @@ static CAPS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// (Re)start the tap to match the current settings: tears down any existing tap
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
-/// repeatedly (e.g. when the feature is toggled).
+/// repeatedly (e.g. when the feature is toggled). Callers that do not need the
+/// outcome (permission polling, wake/session reset) use this; [`commands`]
+/// uses [`restart_result`] to surface a failure as an `apply_warnings` entry.
+///
+/// [`commands`]: crate::commands
 pub fn restart(app: &AppHandle) {
+    let _ = restart_result(app);
+}
+
+/// Same as [`restart`], but reports whether the tap ended up matching the
+/// setting: `true` when the feature is off (nothing to start) or the tap
+/// started successfully, `false` when it is on but failed to start (typically
+/// a missing Input Monitoring grant).
+pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = EVENT_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
 
     let Some(state) = app.try_state::<AppState>() else {
-        return;
+        return true;
     };
     // The torn-down tap loses the release of any key held across the restart,
     // so drop the engine's transient "key is held" state. Otherwise a held
@@ -87,7 +99,7 @@ pub fn restart(app: &AppHandle) {
     if !state.keyboard_enabled() {
         // Feature off: take the Caps Lock HID remap down along with the tap.
         CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(false), Ordering::SeqCst);
-        return;
+        return true;
     }
 
     match start(app.clone()) {
@@ -100,11 +112,13 @@ pub fn restart(app: &AppHandle) {
             // real mapping — which would route F18, or a stuck Caps, wrongly.
             let manage = state.engine.lock_safe().has_caps_lock_rule();
             CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(manage), Ordering::SeqCst);
+            true
         }
         Err(e) => {
             // No tap to handle F18 — keep Caps Lock native.
             CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(false), Ordering::SeqCst);
-            tracing::warn!(error = %e, "keyboard event tap not started (grant Input Monitoring?)")
+            tracing::warn!(error = %e, "keyboard event tap not started (grant Input Monitoring?)");
+            false
         }
     }
 }
@@ -114,11 +128,20 @@ pub fn restart(app: &AppHandle) {
 /// the tap reads the engine directly but the HID remap must still be brought
 /// into step. A no-op unless the tap is running, so it never remaps Caps Lock to
 /// F18 with no tap to handle it.
-pub fn reconcile_caps_mapping(state: &AppState) {
+///
+/// Returns whether the live remap now matches what the rules ask for — `false`
+/// means a `hidutil` failure left the proxy flag (and thus Caps Lock's actual
+/// behavior) out of step with the saved rule, which [`commands`] surfaces as an
+/// `apply_warnings` entry.
+///
+/// [`commands`]: crate::commands
+pub fn reconcile_caps_mapping(state: &AppState) -> bool {
     let manage = EVENT_TAP.lock_safe().is_some()
         && state.keyboard_enabled()
         && state.engine.lock_safe().has_caps_lock_rule();
-    CAPS_PROXY_ACTIVE.store(crate::capsmap::reconcile(manage), Ordering::SeqCst);
+    let active = crate::capsmap::reconcile(manage);
+    CAPS_PROXY_ACTIVE.store(active, Ordering::SeqCst);
+    active == manage
 }
 
 /// Mutable state local to the tap thread, reached through a `Mutex` because the
@@ -370,6 +393,15 @@ fn on_key_down(
     // F18 event so no app sees a stray F18. Autorepeat keyDowns during a hold are
     // dropped without re-driving, so they neither re-fire side effects nor reach
     // the app while the matching keyUp is still dropped.
+    //
+    // Known limitation: while the Caps Lock proxy is active, this keycode is
+    // read as Caps Lock unconditionally — a genuine physical F18 press (an
+    // external keyboard with a dedicated F18 key, say) would be swallowed and
+    // driven as Caps Lock too. There is no way to tell the two apart at this
+    // layer: `capsmap`'s HID remap makes them arrive as the exact same keycode
+    // with no distinguishing bit. Accepted as a design trade-off — real F18
+    // keys are vanishingly rare, and Caps Lock's own delivery leaves no less
+    // invasive alternative.
     if keycode == crate::capsmap::F18_KEYCODE && CAPS_PROXY_ACTIVE.load(Ordering::SeqCst) {
         // Autorepeat key-downs during a hold neither re-fire side effects nor
         // reach an app; only the initial press drives the modifier down.
@@ -410,6 +442,8 @@ fn on_key_up(
 
     // The Caps Lock proxy (F18) release ends the Caps Lock modifier — its quick
     // press/release here is what fires the tap action (e.g. Esc). Drop the event.
+    // Same known limitation as `on_key_down`: a real physical F18 is
+    // indistinguishable from the proxy while it is active.
     if keycode == crate::capsmap::F18_KEYCODE && CAPS_PROXY_ACTIVE.load(Ordering::SeqCst) {
         drive_modifier(
             app,

@@ -221,6 +221,14 @@ function applyWarningText(code: string, t: Translator): string {
       return t('settings.applyWarning.launchAtLogin');
     case 'menuBar':
       return t('settings.applyWarning.menuBar');
+    case 'keyboardTap':
+      return t('settings.applyWarning.keyboardTap');
+    case 'dragToSnapTap':
+      return t('settings.applyWarning.dragToSnapTap');
+    case 'dragToMoveTap':
+      return t('settings.applyWarning.dragToMoveTap');
+    case 'capsLockRemap':
+      return t('settings.applyWarning.capsLockRemap');
     default:
       return t('settings.applyWarning.generic');
   }

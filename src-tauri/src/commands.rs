@@ -69,8 +69,16 @@ pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
     Ok(state.settings.lock_safe().clone())
 }
 
+// `async fn`: Tauri dispatches synchronous commands on the main thread, and
+// this one can join a tap thread and shell out to `hidutil` two or three times
+// (via `eventtap`/`drag_to_snap`/`drag_to_move` restarts below) — enough to
+// visibly freeze the UI. Marking it `async` moves execution onto Tauri's async
+// runtime instead; `AppState` is `Send + Sync` (every field is a `Mutex` or a
+// `Box<dyn Trait + Send + Sync>`), so holding the `State` across the function
+// body is sound. Nothing here actually awaits — the body is unchanged sync
+// code — this only changes *which thread* runs it.
 #[tauri::command]
-pub fn save_settings(
+pub async fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: AppSettings,
@@ -117,9 +125,20 @@ pub fn save_settings(
     let _ = app.emit("tomari:settings-changed", settings);
 
     // The left/right ⌘ IME toggle is not a stored rule, so flipping it has to
-    // reassemble the engine's rule set from the new setting.
-    if command_ime_changed && let Err(e) = reload_engine_rules(&state) {
-        tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
+    // reassemble the engine's rule set from the new setting. A `hidutil`
+    // failure while reconciling the Caps Lock remap (`Ok(false)`) is reported
+    // the same way as the other side effects above — the setting is saved and
+    // the engine did reload, but the live Caps Lock behavior may disagree with
+    // it until a retry succeeds.
+    if command_ime_changed {
+        match reload_engine_rules(&state) {
+            Ok(true) => {}
+            Ok(false) => apply_warnings.push("capsLockRemap"),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
+                apply_warnings.push("capsLockRemap");
+            }
+        }
     }
 
     // The tray menu renders in the configured language, so rebuild it (on the
@@ -131,17 +150,21 @@ pub fn save_settings(
 
     // Only (re)start the event tap when keyboard customization is actually
     // toggled. Flipping unrelated preferences must not tear the tap down and
-    // rebuild it, which would briefly drop key monitoring.
+    // rebuild it, which would briefly drop key monitoring. Each restart's
+    // outcome is folded into `apply_warnings`, exactly like `launchAtLogin` /
+    // `menuBar` above — a failure here (typically a missing Input Monitoring
+    // grant) leaves the saved preference and the live tap disagreeing until a
+    // retry succeeds.
     #[cfg(target_os = "macos")]
     {
-        if keyboard_toggled {
-            crate::eventtap::restart(&app);
+        if keyboard_toggled && !crate::eventtap::restart_result(&app) {
+            apply_warnings.push("keyboardTap");
         }
-        if drag_changed {
-            crate::drag_to_snap::restart(&app);
+        if drag_changed && !crate::drag_to_snap::restart_result(&app) {
+            apply_warnings.push("dragToSnapTap");
         }
-        if move_changed {
-            crate::drag_to_move::restart(&app);
+        if move_changed && !crate::drag_to_move::restart_result(&app) {
+            apply_warnings.push("dragToMoveTap");
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -306,8 +329,12 @@ pub fn list_modifier_rules(state: State<'_, AppState>) -> CmdResult<Vec<Modifier
     state.db.list_modifier_rules().map_err(CmdError::from)
 }
 
+// `async fn`: a failed reload can call `reload_engine_rules` (and thus
+// `hidutil` via `reconcile_caps_mapping`) up to twice on the rollback path,
+// synchronously. Moving it off the main thread keeps a slow `hidutil` from
+// freezing the UI, same rationale as `save_settings` above.
 #[tauri::command]
-pub fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) -> CmdResult<()> {
+pub async fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) -> CmdResult<()> {
     let _config = state.lock_config_mutation();
     // Snapshot the stored row so a failed live reload can be rolled back — the
     // DB must not keep a rule the live engine never picked up, which would
@@ -318,25 +345,38 @@ pub fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) -> Cmd
         .into_iter()
         .find(|r| r.id == rule.id);
     state.db.upsert_modifier_rule(&rule)?;
-    if let Err(error) = reload_engine_rules(&state) {
-        let restored = match &previous {
-            Some(prev) => state.db.upsert_modifier_rule(prev),
-            None => state.db.delete_modifier_rule(&rule.id),
-        };
-        if let Err(rollback) = restored {
-            tracing::warn!(error = %rollback, "failed to roll back modifier rule after reload failure");
+    match reload_engine_rules(&state) {
+        // The engine reloaded but `hidutil` left the Caps Lock remap out of
+        // step — not a reason to roll back the save (the rule *is* live in the
+        // engine), just a live mismatch to log. `save_settings` surfaces the
+        // equivalent case via `apply_warnings`; this command's return type has
+        // no room for one, so a log is the closest equivalent here.
+        Ok(false) => {
+            tracing::warn!("caps-lock HID remap did not match the reloaded rules after save")
         }
-        // Best-effort: bring the live engine back in step with the restored DB.
-        if let Err(rollback) = reload_engine_rules(&state) {
-            tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
+        Ok(true) => {}
+        Err(error) => {
+            let restored = match &previous {
+                Some(prev) => state.db.upsert_modifier_rule(prev),
+                None => state.db.delete_modifier_rule(&rule.id),
+            };
+            if let Err(rollback) = restored {
+                tracing::warn!(error = %rollback, "failed to roll back modifier rule after reload failure");
+            }
+            // Best-effort: bring the live engine back in step with the restored DB.
+            if let Err(rollback) = reload_engine_rules(&state) {
+                tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
+            }
+            return Err(error);
         }
-        return Err(error);
     }
     Ok(())
 }
 
+// `async fn`: same rationale as `save_modifier_rule` — a failed reload can
+// shell out to `hidutil` synchronously up to twice on the rollback path.
 #[tauri::command]
-pub fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let _config = state.lock_config_mutation();
     // Snapshot the row so a failed live reload can restore it — as with save, the
     // DB must not diverge from the live engine on a reload error.
@@ -346,22 +386,39 @@ pub fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> CmdResult
         .into_iter()
         .find(|r| r.id == id);
     state.db.delete_modifier_rule(&id)?;
-    if let Err(error) = reload_engine_rules(&state) {
-        if let Some(prev) = &previous
-            && let Err(rollback) = state.db.upsert_modifier_rule(prev)
-        {
-            tracing::warn!(error = %rollback, "failed to restore modifier rule after reload failure");
+    match reload_engine_rules(&state) {
+        // Same as `save_modifier_rule`: the engine reloaded but the Caps Lock
+        // remap did not follow; log it rather than roll back a delete that did
+        // take effect in the engine.
+        Ok(false) => {
+            tracing::warn!("caps-lock HID remap did not match the reloaded rules after delete")
         }
-        // Best-effort: bring the live engine back in step with the restored DB.
-        if let Err(rollback) = reload_engine_rules(&state) {
-            tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
+        Ok(true) => {}
+        Err(error) => {
+            if let Some(prev) = &previous
+                && let Err(rollback) = state.db.upsert_modifier_rule(prev)
+            {
+                tracing::warn!(error = %rollback, "failed to restore modifier rule after reload failure");
+            }
+            // Best-effort: bring the live engine back in step with the restored DB.
+            if let Err(rollback) = reload_engine_rules(&state) {
+                tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
+            }
+            return Err(error);
         }
-        return Err(error);
     }
     Ok(())
 }
 
-fn reload_engine_rules(state: &AppState) -> CmdResult<()> {
+/// Reload the engine's rule set from the database, returning whether the Caps
+/// Lock HID remap ended up matching it. `Err` is reserved for the DB read
+/// failing outright; a `hidutil` failure while reconciling the remap is instead
+/// reported as `Ok(false)`, since the engine itself did reload successfully —
+/// only the out-of-band remap is left out of step. Callers with an
+/// `apply_warnings` outcome to report to (`save_settings`) surface a `false`
+/// there; callers without one (`save_modifier_rule` / `delete_modifier_rule`)
+/// simply log it, same as before this returned anything.
+fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     // The stored rules plus the built-in left/right ⌘ IME toggle, which lives
     // behind a setting rather than as an editable row.
     let mut rules = state.db.list_modifier_rules()?;
@@ -375,8 +432,10 @@ fn reload_engine_rules(state: &AppState) -> CmdResult<()> {
     // The event tap is macOS-only, so gate the call to keep a non-macOS
     // `cargo check` building (the rest of this file already gates eventtap).
     #[cfg(target_os = "macos")]
-    crate::eventtap::reconcile_caps_mapping(state);
-    Ok(())
+    let caps_ok = crate::eventtap::reconcile_caps_mapping(state);
+    #[cfg(not(target_os = "macos"))]
+    let caps_ok = true;
+    Ok(caps_ok)
 }
 
 #[tauri::command]
