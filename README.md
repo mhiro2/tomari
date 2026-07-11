@@ -51,7 +51,9 @@ See the [feature reference](docs/features.md) for the full details.
    on first launch. Right-click the app and choose **Open**, then confirm — or
    run `xattr -dr com.apple.quarantine /Applications/Tomari.app`.
 4. Launch Tomari and grant the permissions it needs. See the
-   [permissions guide](docs/permissions.md).
+   [permissions guide](docs/permissions.md). Because Tomari is signed ad-hoc
+   for now, updating to a new version currently requires re-granting
+   Accessibility and Input Monitoring — see the guide for details.
 
 > [!WARNING]
 > Tomari is an early canary release — expect rough edges and breaking changes between versions.

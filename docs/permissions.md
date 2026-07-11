@@ -40,3 +40,16 @@ still prevented until it is cleared).
 The pure decision logic is implemented and unit-tested independently of the OS
 hooks, so behavior can be confirmed without granting any permission. Global
 shortcuts also work without Accessibility or Input Monitoring.
+
+## Re-granting permissions after an update
+
+Tomari is currently signed ad-hoc rather than with a Developer ID certificate
+(see the [README](../README.md#installation)). macOS ties Accessibility and
+Input Monitoring grants to the binary's code signature (CDHash), and an
+ad-hoc signature is regenerated on every build. As a result, **updating
+Tomari currently invalidates both grants**, and macOS silently drops the app
+from both permission lists — you will need to re-add and re-enable
+Accessibility and Input Monitoring after each update, the same way you did on
+first install. This is a known limitation until proper Developer ID signing
+and notarization are in place; it is not something you can work around from
+inside the app.
