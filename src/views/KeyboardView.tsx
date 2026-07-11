@@ -16,7 +16,7 @@ import type {
   WindowPreset,
 } from '../lib/types';
 
-const SNAP_PRESETS: WindowPreset[] = ['leftHalf', 'rightHalf', 'maximize', 'center'];
+const SNAP_PRESETS = ['leftHalf', 'rightHalf', 'maximize', 'center'] satisfies WindowPreset[];
 
 const WINDOW_ACTIONS = [
   { key: 'moveDisplayNext', action: { type: 'moveWindowToDisplay', value: 'next' } },
@@ -29,7 +29,11 @@ function actionFromKey(key: string): AppAction {
   if (key === 'toggleKeepAwake') return { type: 'toggleKeepAwake' };
   const windowAction = WINDOW_ACTIONS.find((a) => a.key === key);
   if (windowAction) return windowAction.action;
-  return { type: 'snapWindow', value: key as WindowPreset };
+  // The <select> only ever offers SNAP_PRESETS' own values for any key that
+  // isn't one of the branches above, so this lookup is exhaustive without a
+  // cast; the fallback below only guards against a value tsc can't narrow.
+  const preset = SNAP_PRESETS.find((p) => p === key);
+  return { type: 'snapWindow', value: preset ?? 'center' };
 }
 
 function ActionOptions({ t }: { t: Translator }) {
@@ -374,7 +378,7 @@ function HotkeyRow({
         <>
           <button
             type="button"
-            className={`btn btn--ghost ${confirming ? 'btn--amber' : ''}`}
+            className={`btn btn--ghost ${confirming ? 'btn--warn' : ''}`}
             onClick={handleDeleteClick}
             onBlur={() => setConfirming(false)}
             onKeyDown={(e) => {

@@ -216,8 +216,11 @@ fn frontmost_other_app_pid(exclude_pid: pid_t) -> Option<pid_t> {
 }
 
 /// Resolve the system-wide focused window, returning the owned CF handles for
-/// the system element, focused application and focused window. The caller must
-/// keep all three alive while using the window (it is owned by the others).
+/// the system element, focused application and focused window. The window
+/// handle is +1-retained and stays valid on its own once returned; the system
+/// and application handles are returned alongside it only because they too
+/// are owned and must eventually be released, not because the window
+/// borrows from them.
 ///
 /// When the system-reported focused application is this very process — which
 /// happens the instant a click lands on one of Tomari's own windows, e.g. the

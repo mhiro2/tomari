@@ -92,6 +92,8 @@ export function GeneralView({
 
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
+  const maintenanceDesc = updateDesc(updateStatus, t);
+
   return (
     <div className="view">
       <Group label={t('settings.general')}>
@@ -193,9 +195,7 @@ export function GeneralView({
             <span className="item__title">
               {t('settings.version')} {version}
             </span>
-            {updateDesc(updateStatus, t) && (
-              <span className="item__desc">{updateDesc(updateStatus, t)}</span>
-            )}
+            {maintenanceDesc && <span className="item__desc">{maintenanceDesc}</span>}
           </div>
           <div className="item__trail">
             {updateStatus.phase === 'available' || updateStatus.phase === 'installing' ? (

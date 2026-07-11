@@ -4,12 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Chip, Group, Toggle } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { useT, type Translator } from '../lib/i18n';
+import { useT, type MessageKey } from '../lib/i18n';
 import type { KeepAwakeStatus, LidCloseState } from '../lib/types';
 
 const LID_CLOSE_CHIP: Record<
   LidCloseState,
-  { tone: 'ok' | 'warn' | 'err' | 'muted'; key: string }
+  { tone: 'ok' | 'warn' | 'err' | 'muted'; key: MessageKey }
 > = {
   engaged: { tone: 'ok', key: 'settings.lidActive' },
   pending: { tone: 'warn', key: 'settings.lidPending' },
@@ -102,7 +102,7 @@ export function SessionView() {
               <span className="item__title">{t('settings.lidClose')}</span>
             </div>
             <div className="item__trail">
-              <Chip tone={chip.tone}>{t(chip.key as Parameters<Translator>[0])}</Chip>
+              <Chip tone={chip.tone}>{t(chip.key)}</Chip>
             </div>
           </div>
         )}
