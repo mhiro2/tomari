@@ -92,12 +92,29 @@ impl ModifierEngine {
         self.held.clear();
     }
 
-    /// The first enabled rule matching this key/side, if any (by stored label
-    /// order).
+    /// The matching rule for this key/side, preferring an exact `Left`/`Right`
+    /// match over an `Either` one; ties within the same specificity keep the
+    /// stored order (DB rows by label, with the built-in ⌘ IME-toggle rules
+    /// appended). Exact-side rules would otherwise be shadowed whenever an
+    /// `Either` rule for the same modifier happens to be stored first — e.g. a
+    /// user-created Command/Either rule hiding the left/right ⌘ IME toggle.
     pub fn find_rule(&self, key: ModifierKey, side: KeySide) -> Option<&ModifierRule> {
-        self.rules
-            .iter()
-            .find(|r| r.enabled && r.modifier == key && r.side.matches(side))
+        let mut fallback: Option<&ModifierRule> = None;
+        for r in &self.rules {
+            if !r.enabled || r.modifier != key || !r.side.matches(side) {
+                continue;
+            }
+            if r.side == side {
+                // Exact `Left`/`Right` match: most specific, wins outright.
+                return Some(r);
+            }
+            // An `Either` rule matching a `Left`/`Right` event side: keep the
+            // first one as a fallback, in case no exact match ever appears.
+            if fallback.is_none() {
+                fallback = Some(r);
+            }
+        }
+        fallback
     }
 
     /// The modifier this key should be remapped to, if a rule says so.
@@ -206,7 +223,12 @@ impl ModifierEngine {
             KeyEvent::ModifierUp { key, side, at_ms } => {
                 self.held.retain(|&held| held != (key, side));
                 let p = self.press?;
-                if p.key != key {
+                // Match on (key, side), not just key: with a complete event
+                // stream the pending press and its release always share both,
+                // but a dropped event (e.g. `reset()` on wake from sleep can
+                // leave a stale press behind) must not let the release of the
+                // *other* side's same-key press consume it and fire its tap.
+                if (p.key, p.side) != (key, side) {
                     return None;
                 }
                 self.press = None;
@@ -715,6 +737,101 @@ mod tests {
                 at_ms: 120,
             }),
             Some(AppAction::SwitchIme(ImeMode::Alphanumeric))
+        );
+    }
+
+    #[test]
+    fn opposite_side_release_does_not_consume_a_pending_press() {
+        // Left and right ⌘ both carry a tap rule. If an event goes missing
+        // (e.g. `reset()` on wake from sleep drops a physical key's tracked
+        // state), the release that does arrive must not be matched against a
+        // pending press for the *other* side of the same key.
+        let mut e = engine(vec![
+            rule(
+                ModifierKey::Command,
+                KeySide::Left,
+                AppAction::SwitchIme(ImeMode::Alphanumeric),
+            ),
+            rule(
+                ModifierKey::Command,
+                KeySide::Right,
+                AppAction::SwitchIme(ImeMode::Kana),
+            ),
+        ]);
+
+        // Right ⌘ was already held before the reset (its down event never
+        // reached this engine instance — simulating a dropped event), then
+        // left ⌘ presses down for real.
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Command,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+
+        // The right ⌘ release arrives. It must not match the pending left ⌘
+        // press: no tap should fire, and the left press must survive so its
+        // own later release still fires normally.
+        assert_eq!(
+            e.process(KeyEvent::ModifierUp {
+                key: ModifierKey::Command,
+                side: KeySide::Right,
+                at_ms: 10,
+            }),
+            None
+        );
+
+        // The left ⌘ press is untouched by the mismatched release above, so
+        // its own release still fires its tap.
+        assert_eq!(
+            e.process(KeyEvent::ModifierUp {
+                key: ModifierKey::Command,
+                side: KeySide::Left,
+                at_ms: 30,
+            }),
+            Some(AppAction::SwitchIme(ImeMode::Alphanumeric))
+        );
+    }
+
+    #[test]
+    fn exact_side_rule_wins_over_either_rule_regardless_of_storage_order() {
+        // A side-specific rule (e.g. the built-in left/right ⌘ IME toggle)
+        // must be found even when a same-modifier `Either` rule (e.g.
+        // user-created) is stored first — and the reverse order must give the
+        // same result, since specificity — not storage order — decides here.
+        let either = rule(
+            ModifierKey::Command,
+            KeySide::Either,
+            AppAction::TogglePanel,
+        );
+        let right = rule(
+            ModifierKey::Command,
+            KeySide::Right,
+            AppAction::SwitchIme(ImeMode::Kana),
+        );
+
+        let e_either_first = engine(vec![either.clone(), right.clone()]);
+        assert_eq!(
+            e_either_first
+                .find_rule(ModifierKey::Command, KeySide::Right)
+                .map(|r| r.tap.clone()),
+            Some(AppAction::SwitchIme(ImeMode::Kana))
+        );
+
+        let e_right_first = engine(vec![right, either]);
+        assert_eq!(
+            e_right_first
+                .find_rule(ModifierKey::Command, KeySide::Right)
+                .map(|r| r.tap.clone()),
+            Some(AppAction::SwitchIme(ImeMode::Kana))
+        );
+
+        // The left side has no exact match in either engine, so the `Either`
+        // rule is still the one that applies there.
+        assert_eq!(
+            e_either_first
+                .find_rule(ModifierKey::Command, KeySide::Left)
+                .map(|r| r.tap.clone()),
+            Some(AppAction::TogglePanel)
         );
     }
 }
