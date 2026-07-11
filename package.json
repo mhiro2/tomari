@@ -12,7 +12,7 @@
     "lint": "oxlint --type-aware",
     "fmt": "oxfmt src vite.config.ts vitest.setup.ts index.html",
     "fmt:check": "oxfmt --check src vite.config.ts vitest.setup.ts index.html",
-    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
+    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check && pnpm test",
     "tauri": "tauri"
   },
   "dependencies": {
