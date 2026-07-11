@@ -149,13 +149,31 @@ body {
 .app__main {
   flex: 1;
   overflow-y: auto;
-  /* Hide the scrollbar but keep scrolling — it crowds the narrow window. */
-  scrollbar-width: none;
+  /* A thin, unobtrusive scrollbar — a hint that content continues below
+     without the heavier look of the platform default. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
   padding: 4px 12px 18px;
 }
 
 .app__main::-webkit-scrollbar {
-  display: none;
+  width: 8px;
+}
+
+.app__main::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app__main::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.app__main::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-faint);
+  background-clip: padding-box;
 }
 
 .view {
@@ -652,6 +670,7 @@ select.input {
 
 .row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }

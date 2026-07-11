@@ -76,7 +76,7 @@ const en = {
 
   'recorder.click': 'Click to record',
   'recorder.typing': 'Type shortcut…',
-  'recorder.needModifier': 'Add ⌃, ⌥ or ⌘ — or use a function key',
+  'recorder.needModifier': 'Add a modifier key',
   'recorder.unsupported': 'Unsupported shortcut',
   'recorder.startFailed': 'Could not start recording',
 
@@ -234,7 +234,7 @@ const ja: Record<MessageKey, string> = {
 
   'recorder.click': 'クリックして記録',
   'recorder.typing': 'ショートカットを入力…',
-  'recorder.needModifier': '⌃ ⌥ ⌘ のいずれかを加えるか、ファンクションキーを使ってください',
+  'recorder.needModifier': '修飾キーを追加してください',
   'recorder.unsupported': 'このショートカットは使えません',
   'recorder.startFailed': '記録を開始できませんでした',
 
