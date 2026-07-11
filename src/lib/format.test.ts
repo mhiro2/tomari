@@ -34,7 +34,7 @@ describe('actionLabel', () => {
   it('renders in Japanese', () => {
     expect(actionLabel({ type: 'snapWindow', value: 'leftHalf' }, tJa)).toBe('スナップ: 左半分');
     expect(actionLabel({ type: 'moveWindowToDisplay', value: 'next' }, tJa)).toBe(
-      '次のディスプレイへ移動',
+      '次のディスプレイ へ移動',
     );
   });
 });

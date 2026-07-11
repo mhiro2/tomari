@@ -65,7 +65,7 @@ describe('GeneralView', () => {
     mockCommands({ check_for_update: null });
     renderView(<GeneralView />);
 
-    const button = await screen.findByText('Check for updates');
+    const button = await screen.findByText('Check for Updates');
     fireEvent.click(button);
 
     // While the check is in flight, the button reflects the checking phase.
@@ -75,7 +75,7 @@ describe('GeneralView', () => {
       expect(mockInvoke).toHaveBeenCalledWith('check_for_update');
     });
     expect(await screen.findByText('Tomari is up to date.')).toBeInTheDocument();
-    expect(await screen.findByText('Check for updates')).toBeInTheDocument();
+    expect(await screen.findByText('Check for Updates')).toBeInTheDocument();
   });
 
   it('guards against overlapping checks: a rapid re-click does not double-invoke', async () => {
@@ -87,7 +87,7 @@ describe('GeneralView', () => {
     });
     renderView(<GeneralView />);
 
-    const button = await screen.findByText('Check for updates');
+    const button = await screen.findByText('Check for Updates');
     fireEvent.click(button);
     await screen.findByText('Checking…');
 
@@ -100,7 +100,7 @@ describe('GeneralView', () => {
     expect(checkCalls()).toHaveLength(1);
 
     resolveCheck?.(null);
-    await waitFor(() => expect(screen.getByText('Check for updates')).toBeEnabled());
+    await waitFor(() => expect(screen.getByText('Check for Updates')).toBeEnabled());
     expect(checkCalls()).toHaveLength(1);
   });
 
@@ -111,10 +111,10 @@ describe('GeneralView', () => {
     });
     renderView(<GeneralView />);
 
-    fireEvent.click(await screen.findByText('Check for updates'));
+    fireEvent.click(await screen.findByText('Check for Updates'));
 
     expect(await screen.findByText('Version 9.9.9 is available. Bug fixes')).toBeInTheDocument();
-    const installButton = await screen.findByText('Install and restart');
+    const installButton = await screen.findByText('Install and Restart');
     expect(installButton).toBeInTheDocument();
 
     fireEvent.click(installButton);
@@ -130,24 +130,24 @@ describe('GeneralView', () => {
     });
     renderView(<GeneralView />);
 
-    fireEvent.click(await screen.findByText('Check for updates'));
-    fireEvent.click(await screen.findByText('Install and restart'));
+    fireEvent.click(await screen.findByText('Check for Updates'));
+    fireEvent.click(await screen.findByText('Install and Restart'));
 
     expect(
       await screen.findByText('Version 9.9.9 is available. Update failed: network unreachable'),
     ).toBeInTheDocument();
     // Install is offered again rather than leaving the panel stuck in "installing".
-    expect(screen.getByText('Install and restart')).toBeEnabled();
+    expect(screen.getByText('Install and Restart')).toBeEnabled();
   });
 
   it('shows the error message when the update check fails', async () => {
     mockCommands({ check_for_update: () => Promise.reject({ message: 'offline' }) });
     renderView(<GeneralView />);
 
-    fireEvent.click(await screen.findByText('Check for updates'));
+    fireEvent.click(await screen.findByText('Check for Updates'));
 
     expect(await screen.findByText('Could not check for updates: offline')).toBeInTheDocument();
-    expect(await screen.findByText('Check for updates')).toBeEnabled();
+    expect(await screen.findByText('Check for Updates')).toBeEnabled();
   });
 
   it('runs the update check automatically when asked to (tray "Check for Updates")', async () => {
@@ -176,7 +176,7 @@ describe('GeneralView', () => {
       settings: expect.objectContaining({ showInMenuBar: false }),
     });
 
-    fireEvent.click(screen.getByText('Hide icon'));
+    fireEvent.click(screen.getByText('Hide Icon'));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('save_settings', {

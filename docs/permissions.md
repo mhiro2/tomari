@@ -23,16 +23,16 @@ Tomari is added to the Input Monitoring list. Enable it under **System Settings
 there). After granting it, toggling the keyboard-customization switch restarts
 the listener.
 
-## Administrator password (Keep Awake)
+## Administrator password (Prevent Sleep)
 
-To keep working with the **display closed**, Keep Awake uses
+To keep working with the **display closed**, Prevent Sleep (keep awake) uses
 `pmset disablesleep`, which requires your **administrator password**. This is
 separate from Accessibility and Input Monitoring.
 
-This lid-close layer is part of Keep Awake, so the password prompt appears both
-when you **enable** it (declining cancels Keep Awake entirely — there is no
+This lid-close layer is part of Prevent Sleep, so the password prompt appears both
+when you **enable** it (declining cancels Prevent Sleep entirely — there is no
 display-open-only fallback) and when you **disable** it (clearing the override
-needs the same authorization; declining leaves Keep Awake on, since sleep is
+needs the same authorization; declining leaves Prevent Sleep on, since sleep is
 still prevented until it is cleared).
 
 ## Trying things without permissions

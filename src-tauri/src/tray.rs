@@ -52,7 +52,7 @@ const TEXT_JA: Text = Text {
     maximize: "最大化",
     center: "中央",
     snap_window: "ウィンドウをスナップ",
-    keep_awake: "スリープを防止",
+    keep_awake: "スリープ防止",
     open_settings: "設定…",
     check_updates: "アップデートを確認",
     quit: "Tomari を終了",

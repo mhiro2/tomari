@@ -92,7 +92,7 @@ describe('WindowView', () => {
     renderView(<WindowView />);
 
     fireEvent.click(await screen.findByText('Left Half'));
-    expect(await screen.findByRole('status')).toHaveTextContent('Snapped to Left Third');
+    expect(await screen.findByRole('status')).toHaveTextContent('Snapped to Left ⅓');
   });
 
   it('shows the permission banner when accessibility is not granted', async () => {
@@ -105,12 +105,12 @@ describe('WindowView', () => {
   it('moves the window between displays and undoes the last move', async () => {
     renderView(<WindowView />);
 
-    fireEvent.click(await screen.findByText('Next display →'));
+    fireEvent.click(await screen.findByText('Next Display →'));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('move_window_to_display', { direction: 'next' });
     });
 
-    fireEvent.click(screen.getByText('↩ Undo last move'));
+    fireEvent.click(screen.getByText('↩ Undo Last Move'));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('undo_window');
     });
@@ -119,7 +119,7 @@ describe('WindowView', () => {
   it('enables drag-to-snap and persists the toggle', async () => {
     renderView(<WindowView />);
 
-    fireEvent.click(await screen.findByLabelText('Enable drag to snap'));
+    fireEvent.click(await screen.findByLabelText('Enable Drag to Snap'));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('save_settings', {
         settings: expect.objectContaining({ dragToSnapEnabled: true }),
@@ -151,7 +151,7 @@ describe('WindowView', () => {
 
     renderView(<WindowView />);
 
-    fireEvent.click(await screen.findByText('Grant access'));
+    fireEvent.click(await screen.findByText('Grant Access'));
     expect(await screen.findByRole('status')).toHaveTextContent('grant failed');
   });
 

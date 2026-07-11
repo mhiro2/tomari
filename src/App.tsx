@@ -33,9 +33,16 @@ export function App() {
 // so there is no theme to apply).
 function Localized() {
   const { settings } = useSettings();
+  const lang = resolveLang(settings?.language ?? 'system');
+
+  // Keep the document's declared language in sync so assistive tech and the
+  // browser's own heuristics (e.g. find-in-page, spellcheck) match the UI.
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   return (
-    <I18nProvider lang={resolveLang(settings?.language ?? 'system')}>
+    <I18nProvider lang={lang}>
       <AppShell />
     </I18nProvider>
   );

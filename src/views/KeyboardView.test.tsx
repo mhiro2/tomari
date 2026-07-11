@@ -256,7 +256,7 @@ describe('KeyboardView', () => {
     mockCommands({ input_monitoring_status: false, request_input_monitoring: true });
 
     renderView(<KeyboardView />);
-    fireEvent.click(await screen.findByText('Grant access'));
+    fireEvent.click(await screen.findByText('Grant Access'));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('request_input_monitoring');

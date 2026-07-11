@@ -77,12 +77,12 @@ consequences to be aware of:
   sizes (for example 1/2 → 1/3 → 2/3).
 - **Undo** — restore the window's previous position.
 
-## Keep Awake
+## Prevent Sleep (keep awake)
 
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from
 being interrupted — **even when the display is closed**. You can toggle it
 manually from the menu bar tray, the toggle in the Session tab, or a global
-shortcut (the "Toggle keep awake" action). Automatic process detection is
+shortcut (the "Toggle Prevent Sleep" action). Automatic process detection is
 planned for the future.
 
 How it works, in two layers that engage together:
@@ -93,12 +93,12 @@ How it works, in two layers that engage together:
    administrator password.**
 
 Both layers are part of one switch, and turning it **on or off** needs the
-password: declining when enabling cancels Keep Awake entirely (no display-open
+password: declining when enabling cancels Prevent Sleep entirely (no display-open
 fallback), and declining when disabling leaves it on (sleep is still prevented
 until the override is cleared).
 
 The state lasts **only for the current session**: Tomari always starts with
-Keep Awake off. Even if the app crashes while it is on, a consistency check at
+Prevent Sleep off. Even if the app crashes while it is on, a consistency check at
 launch and cleanup at exit reliably clear `disablesleep`, so you are never left
 in a "won't sleep" state.
 
