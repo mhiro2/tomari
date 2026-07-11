@@ -1,7 +1,5 @@
 //! Error type shared across Tomari crates.
 
-use std::path::PathBuf;
-
 /// Result alias used throughout the core crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -28,9 +26,6 @@ pub enum Error {
 
     #[error("invalid value for {field}: {reason}")]
     Invalid { field: &'static str, reason: String },
-
-    #[error("path is not valid utf-8: {0}")]
-    NonUtf8Path(PathBuf),
 }
 
 impl Error {

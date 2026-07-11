@@ -4382,10 +4382,8 @@ dependencies = [
 name = "tomari-keyboard"
 version = "0.1.0"
 dependencies = [
- "serde",
  "thiserror 2.0.18",
  "tomari-core",
- "tracing",
 ]
 
 [[package]]
@@ -4398,7 +4396,6 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "serde",
  "thiserror 2.0.18",
  "tomari-core",
  "tracing",

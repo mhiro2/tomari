@@ -86,7 +86,7 @@ impl Database {
 }
 
 /// Insert-or-replace a single hotkey on the given connection.
-pub(super) fn write_hotkey(conn: &Connection, hk: &Hotkey) -> Result<()> {
+fn write_hotkey(conn: &Connection, hk: &Hotkey) -> Result<()> {
     let action = serde_json::to_string(&hk.action)?;
     conn.execute(
         "INSERT INTO hotkeys (id, label, accelerator, action, enabled)
@@ -101,7 +101,7 @@ pub(super) fn write_hotkey(conn: &Connection, hk: &Hotkey) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Result<()> {
+fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Result<()> {
     let modifier = serde_json::to_string(&rule.modifier)?;
     let side = serde_json::to_string(&rule.side)?;
     let remap_to = rule

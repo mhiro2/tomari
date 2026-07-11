@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 tomari-core.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
