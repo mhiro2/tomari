@@ -70,6 +70,9 @@ const en = {
   'keyboard.recordShortcut': 'Record shortcut',
   'keyboard.changeShortcut': 'Change shortcut for {label}',
   'keyboard.offNote': "Keyboard customization is off — taps and shortcuts won't fire.",
+  'keyboard.imNeeded': 'Input Monitoring access needed',
+  'keyboard.imBody':
+    'Tomari reads real keyboard events through macOS Input Monitoring to detect taps, holds, and the hyper key.',
 
   'recorder.click': 'Click to record',
   'recorder.typing': 'Type shortcut…',
@@ -225,6 +228,9 @@ const ja: Record<MessageKey, string> = {
   'keyboard.recordShortcut': 'ショートカットを記録',
   'keyboard.changeShortcut': '{label} のショートカットを変更',
   'keyboard.offNote': 'キーボードカスタマイズはオフです。タップ・ショートカットは実行されません。',
+  'keyboard.imNeeded': '入力監視(Input Monitoring)へのアクセスが必要です',
+  'keyboard.imBody':
+    'Tomari は macOS の入力監視機能でキーボードの実イベントを読み取り、押す/長押し・Hyper キーを検出します。',
 
   'recorder.click': 'クリックして記録',
   'recorder.typing': 'ショートカットを入力…',

@@ -1,3 +1,4 @@
+import { listen } from '@tauri-apps/api/event';
 import { useEffect, useRef, useState } from 'react';
 
 import { Banner, Group, MasterSwitchHeader, SwitchRow } from '../components/ui';
@@ -6,7 +7,7 @@ import { formatCmdError } from '../lib/errors';
 import { presetLabel } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { WindowPreset } from '../lib/types';
+import type { PermissionsChanged, WindowPreset } from '../lib/types';
 
 export function WindowView() {
   const t = useT();
@@ -29,6 +30,12 @@ export function WindowView() {
       .accessibilityStatus()
       .then(setGranted)
       .catch((e: unknown) => setStatus(formatCmdError(e, tRef.current)));
+    // Accessibility is granted in System Settings, outside the app, so follow
+    // the backend's poll rather than requiring a reopen.
+    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
+      setGranted(e.payload.accessibility),
+    );
+    return () => void unlisten.then((fn) => fn());
   }, []);
 
   async function snap(preset: WindowPreset) {

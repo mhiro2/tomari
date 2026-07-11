@@ -93,6 +93,13 @@ export interface AcceleratorCheck {
   error: string | null;
 }
 
+// Payload of "tomari:permissions-changed", emitted when Accessibility or Input
+// Monitoring transitions (granted in System Settings, outside the app).
+export interface PermissionsChanged {
+  accessibility: boolean;
+  inputMonitoring: boolean;
+}
+
 // Error shape a #[tauri::command] rejects with. `code` classifies the frequent,
 // localizable failures; `message` is the developer-facing English fallback for
 // everything else (`code: "other"`).

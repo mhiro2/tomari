@@ -1,13 +1,20 @@
+import { listen } from '@tauri-apps/api/event';
 import { useEffect, useRef, useState } from 'react';
 
 import { ShortcutRecorder } from '../components/ShortcutRecorder';
-import { EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
+import { Banner, EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { actionLabel, modifierLabel, modifierWithSide, presetLabel } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { AppAction, Hotkey, ModifierRule, WindowPreset } from '../lib/types';
+import type {
+  AppAction,
+  Hotkey,
+  ModifierRule,
+  PermissionsChanged,
+  WindowPreset,
+} from '../lib/types';
 
 const SNAP_PRESETS: WindowPreset[] = ['leftHalf', 'rightHalf', 'maximize', 'center'];
 
@@ -82,6 +89,7 @@ export function KeyboardView() {
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [modifierError, setModifierError] = useState<string | null>(null);
+  const [inputMonitoringGranted, setInputMonitoringGranted] = useState(true);
   // Ids with a save in flight, so their row's controls can be disabled — this
   // both prevents a second click racing the first save and, since the base
   // for a patch is always read from these refs (not a render-captured prop),
@@ -108,6 +116,16 @@ export function KeyboardView() {
       .listHotkeys()
       .then(setHotkeys)
       .catch((e: unknown) => setShortcutError(formatCmdError(e, tRef.current)));
+    void api
+      .inputMonitoringStatus()
+      .then(setInputMonitoringGranted)
+      .catch((e: unknown) => setShortcutError(formatCmdError(e, tRef.current)));
+    // Accessibility/Input Monitoring are granted in System Settings, outside
+    // the app, so follow the backend's poll rather than requiring a reopen.
+    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
+      setInputMonitoringGranted(e.payload.inputMonitoring),
+    );
+    return () => void unlisten.then((fn) => fn());
   }, []);
 
   async function toggleRule(id: string) {
@@ -176,6 +194,15 @@ export function KeyboardView() {
     setShortcutError(null);
   }
 
+  async function grantInputMonitoring() {
+    try {
+      const ok = await api.requestInputMonitoring();
+      setInputMonitoringGranted(ok);
+    } catch (e) {
+      setShortcutError(formatCmdError(e, t));
+    }
+  }
+
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
   const on = settings.keyboardEnabled;
@@ -192,6 +219,22 @@ export function KeyboardView() {
       />
 
       <div className={`view ${on ? '' : 'gated'}`} aria-disabled={!on} inert={!on}>
+        {!inputMonitoringGranted && (
+          <Banner tone="warn">
+            <div className="banner__body">
+              <strong>{t('keyboard.imNeeded')}</strong>
+              <p>{t('keyboard.imBody')}</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => void grantInputMonitoring()}
+            >
+              {t('window.grantAccess')}
+            </button>
+          </Banner>
+        )}
+
         <Group
           label={t('keyboard.modifierKeys')}
           note={

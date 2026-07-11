@@ -3,13 +3,18 @@ import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider } from '../lib/settings';
-import type { AppSettings, Hotkey, ModifierRule } from '../lib/types';
+import type { AppSettings, Hotkey, ModifierRule, PermissionsChanged } from '../lib/types';
 import { KeyboardView } from './KeyboardView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
+
+// vitest.setup.ts stubs `listen` as a permanent no-op; capture the callback
+// here so tests can drive the "tomari:permissions-changed" event directly.
+const { listen } = await import('@tauri-apps/api/event');
+const mockListen = vi.mocked(listen);
 
 const SETTINGS: AppSettings = {
   launchAtLogin: false,
@@ -64,6 +69,8 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(undefined);
       case 'get_settings':
         return Promise.resolve(SETTINGS);
+      case 'input_monitoring_status':
+        return Promise.resolve(true);
       default:
         return Promise.resolve(null);
     }
@@ -71,9 +78,24 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
 }
 
 describe('KeyboardView', () => {
+  let permissionsChanged: ((payload: PermissionsChanged) => void) | undefined;
+
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
+    permissionsChanged = undefined;
+    mockListen.mockReset();
+    mockListen.mockImplementation((event, handler) => {
+      if (event === 'tomari:permissions-changed') {
+        permissionsChanged = (payload) =>
+          (handler as (e: { event: string; id: number; payload: unknown }) => void)({
+            event,
+            id: 0,
+            payload,
+          });
+      }
+      return Promise.resolve(() => {});
+    });
   });
 
   it('shows an error when the initial modifier rules and hotkeys load fails', async () => {
@@ -197,5 +219,50 @@ describe('KeyboardView', () => {
     resolveToggleSave?.();
     await waitFor(() => expect(toggle).not.toBeDisabled());
     expect(toggle).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows the Input Monitoring banner when it is not granted', async () => {
+    mockCommands({ input_monitoring_status: false });
+
+    renderView(<KeyboardView />);
+
+    expect(await screen.findByText('Input Monitoring access needed')).toBeInTheDocument();
+  });
+
+  it('does not show the Input Monitoring banner once it is granted', async () => {
+    mockCommands({ input_monitoring_status: true });
+
+    renderView(<KeyboardView />);
+
+    // Wait for the initial load to settle before asserting the banner's absence.
+    await screen.findByText('Caps Lock');
+    expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
+  });
+
+  it('hides the Input Monitoring banner once "tomari:permissions-changed" reports it granted', async () => {
+    mockCommands({ input_monitoring_status: false });
+
+    renderView(<KeyboardView />);
+    expect(await screen.findByText('Input Monitoring access needed')).toBeInTheDocument();
+
+    permissionsChanged?.({ accessibility: true, inputMonitoring: true });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
+    });
+  });
+
+  it('requests Input Monitoring access when the grant button is clicked', async () => {
+    mockCommands({ input_monitoring_status: false, request_input_monitoring: true });
+
+    renderView(<KeyboardView />);
+    fireEvent.click(await screen.findByText('Grant access'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('request_input_monitoring');
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
+    });
   });
 });

@@ -3,13 +3,18 @@ import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider } from '../lib/settings';
-import type { AppSettings } from '../lib/types';
+import type { AppSettings, PermissionsChanged } from '../lib/types';
 import { WindowView } from './WindowView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
+
+// vitest.setup.ts stubs `listen` as a permanent no-op; capture the callback
+// here so tests can drive the "tomari:permissions-changed" event directly.
+const { listen } = await import('@tauri-apps/api/event');
+const mockListen = vi.mocked(listen);
 
 const SETTINGS: AppSettings = {
   launchAtLogin: false,
@@ -50,9 +55,24 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
 }
 
 describe('WindowView', () => {
+  let permissionsChanged: ((payload: PermissionsChanged) => void) | undefined;
+
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
+    permissionsChanged = undefined;
+    mockListen.mockReset();
+    mockListen.mockImplementation((event, handler) => {
+      if (event === 'tomari:permissions-changed') {
+        permissionsChanged = (payload) =>
+          (handler as (e: { event: string; id: number; payload: unknown }) => void)({
+            event,
+            id: 0,
+            payload,
+          });
+      }
+      return Promise.resolve(() => {});
+    });
   });
 
   it('renders presets and snaps the focused window on click', async () => {
@@ -133,5 +153,18 @@ describe('WindowView', () => {
 
     fireEvent.click(await screen.findByText('Grant access'));
     expect(await screen.findByRole('status')).toHaveTextContent('grant failed');
+  });
+
+  it('hides the Accessibility banner once "tomari:permissions-changed" reports it granted', async () => {
+    mockCommands({ accessibility_status: false });
+
+    renderView(<WindowView />);
+    expect(await screen.findByText('Accessibility access needed')).toBeInTheDocument();
+
+    permissionsChanged?.({ accessibility: true, inputMonitoring: true });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Accessibility access needed')).not.toBeInTheDocument();
+    });
   });
 });

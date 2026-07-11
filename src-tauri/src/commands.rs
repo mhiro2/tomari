@@ -38,6 +38,17 @@ pub struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// Payload of `tomari:permissions-changed`, emitted by the permission-polling
+/// thread in `main.rs` whenever Accessibility or Input Monitoring transitions.
+/// The frontend listens for this to keep permission banners in step with
+/// System Settings without a manual refresh.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsChanged {
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+}
+
 /// An update found by [`check_for_update`], held until [`install_update`]
 /// consumes it so the install does not have to hit the endpoint again.
 #[derive(Default)]
@@ -412,6 +423,30 @@ pub fn request_accessibility() -> bool {
     #[cfg(target_os = "macos")]
     {
         tomari_window::request_permission()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+pub fn input_monitoring_status() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::eventtap::input_monitoring_granted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+pub fn request_input_monitoring() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::eventtap::request_input_monitoring()
     }
     #[cfg(not(target_os = "macos"))]
     {

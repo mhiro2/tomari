@@ -246,7 +246,10 @@ skips arming whenever a gesture chord is held so the two never fight.
   Settings, outside the app, so a 2-second thread runs only the cheap status
   checks and rebuilds the tray menu on the main thread only on a change. When
   Input Monitoring is newly granted, the dead taps are restarted (a tap
-  created without the permission is null and never revives on its own).
+  created without the permission is null and never revives on its own). Every
+  transition also emits `tomari:permissions-changed` (`{ accessibility,
+  inputMonitoring }`), which the frontend's permission banners listen for so
+  they clear without the panel needing to be reopened.
 - **Tray** (`tray.rs`): setup items for missing permissions (at the very
   top), window snaps, Settings, Check for Updates (both open the single
   window; Check for Updates also emits `tomari:check-update`, which the UI

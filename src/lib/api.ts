@@ -53,6 +53,10 @@ export const accessibilityStatus = (): Promise<boolean> => invoke('accessibility
 
 export const requestAccessibility = (): Promise<boolean> => invoke('request_accessibility');
 
+export const inputMonitoringStatus = (): Promise<boolean> => invoke('input_monitoring_status');
+
+export const requestInputMonitoring = (): Promise<boolean> => invoke('request_input_monitoring');
+
 export const validateAccelerator = (accelerator: string): Promise<AcceleratorCheck> =>
   invoke('validate_accelerator', { accelerator });
 

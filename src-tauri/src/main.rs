@@ -29,7 +29,7 @@ mod validate;
 mod wake;
 mod window_ops;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 use tomari_core::{AppPaths, AppSettings, Database, defaults};
 use tomari_keyboard::ModifierEngine;
@@ -108,6 +108,8 @@ fn main() {
             commands::undo_window,
             commands::accessibility_status,
             commands::request_accessibility,
+            commands::input_monitoring_status,
+            commands::request_input_monitoring,
             commands::set_hotkeys_suspended,
             commands::validate_accelerator,
             commands::run_action,
@@ -193,12 +195,20 @@ fn main() {
             // Permissions are granted in System Settings, outside the app, so
             // poll their state and react on a transition (the native left-click
             // menu has no "about to open" hook to do this lazily). Only the
-            // cheap status syscalls run each tick; the menu rebuild — and the
-            // event-tap restart below — happen on the main thread solely on a
+            // cheap status syscalls run each tick; the menu rebuild — the
+            // event-tap restart — and the `tomari:permissions-changed` emit
+            // for the frontend all happen on the main thread solely on a
             // change.
             #[cfg(target_os = "macos")]
             {
                 let poll_handle = handle.clone();
+                // Sample the state setup already observed (accessibility_status
+                // and the tray were built above) so the first tick compares
+                // against reality instead of `None` — otherwise a permission
+                // granted within the first poll interval would read as "always
+                // was granted" rather than a transition, and the dead taps would
+                // never be revived.
+                let initial = tray::permission_state(&poll_handle);
                 std::thread::spawn(move || {
                     // Poll responsively while a permission is still missing, then
                     // ease off to a slow heartbeat once both are granted and
@@ -206,8 +216,8 @@ fn main() {
                     // revocation, so a 2 s spin would be pure waste.
                     const FAST: std::time::Duration = std::time::Duration::from_secs(2);
                     const SLOW: std::time::Duration = std::time::Duration::from_secs(30);
-                    let mut last: Option<(bool, bool)> = None;
-                    let mut interval = FAST;
+                    let mut last = Some(initial);
+                    let mut interval = if initial == (true, true) { SLOW } else { FAST };
                     loop {
                         std::thread::sleep(interval);
                         let current = tray::permission_state(&poll_handle);
@@ -232,6 +242,13 @@ fn main() {
                                 drag_to_move::restart(&refresh_handle);
                             }
                             tray::refresh(&refresh_handle);
+                            let _ = refresh_handle.emit(
+                                "tomari:permissions-changed",
+                                commands::PermissionsChanged {
+                                    accessibility: current.0,
+                                    input_monitoring: current.1,
+                                },
+                            );
                         });
                     }
                 });
