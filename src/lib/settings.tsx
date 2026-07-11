@@ -26,6 +26,13 @@ import type { AppSettings } from './types';
 
 type SettingsContextValue = {
   settings: AppSettings | null;
+  // Raw rejection from the last failed initial load (format with
+  // `formatCmdError` at display time so this stays independent of the i18n
+  // provider). `settings` stays null while this is set, so consumers can show
+  // an error + retry in place of the perpetual loading state.
+  loadError: unknown;
+  // Re-runs the initial load after `loadError` was set.
+  retryLoad: () => void;
   // Raw rejection from the last failed save (format with `formatCmdError` at
   // display time so this stays independent of the i18n provider).
   saveError: unknown;
@@ -45,6 +52,8 @@ export function useSettings(): SettingsContextValue {
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [applyWarnings, setApplyWarnings] = useState<string[]>([]);
   // Latest settings, so an in-flight save reads the current state even before
@@ -54,23 +63,49 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // saver should persist the latest state once more.
   const saving = useRef(false);
   const dirty = useRef(false);
+  // Set once any settings have been adopted (from the initial load or a
+  // broadcast event), so a slow initial load that resolves after a broadcast
+  // does not clobber the newer snapshot with a stale one.
+  const settled = useRef(false);
   // Holds the latest `flush` so it can re-run itself without making flush its
   // own dependency.
   const flushRef = useRef<() => Promise<void>>(null);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
-      const s = await api.getSettings();
-      settingsRef.current = s;
-      setSettings(s);
+      try {
+        const s = await api.getSettings();
+        if (cancelled || settled.current) return;
+        settled.current = true;
+        settingsRef.current = s;
+        setSettings(s);
+        setLoadError(null);
+      } catch (e) {
+        if (cancelled || settled.current) return;
+        setLoadError(e);
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAttempt]);
+
+  const retryLoad = useCallback(() => {
+    setLoadError(null);
+    setLoadAttempt((n) => n + 1);
   }, []);
 
   // Set state and ref together so an in-flight save reads the current settings
-  // even before React commits.
+  // even before React commits. Also marks the provider as settled (so a slow
+  // initial load that resolves afterward is discarded instead of clobbering
+  // this newer snapshot) and clears any stale `loadError`, keeping the
+  // invariant that `settings` and `loadError` are never both set.
   const applySettings = useCallback((next: AppSettings) => {
+    settled.current = true;
     settingsRef.current = next;
     setSettings(next);
+    setLoadError(null);
   }, []);
 
   // Adopt settings the backend broadcasts (e.g. a save applied out of band),
@@ -140,8 +175,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ settings, saveError, applyWarnings, update }),
-    [settings, saveError, applyWarnings, update],
+    () => ({ settings, loadError, retryLoad, saveError, applyWarnings, update }),
+    [settings, loadError, retryLoad, saveError, applyWarnings, update],
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

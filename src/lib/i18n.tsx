@@ -20,6 +20,8 @@ const en = {
   'common.loading': 'Loading…',
   'common.enable': 'Enable {label}',
   'common.turnOn': 'Turn on',
+  'common.loadFailed': 'Could not load settings: {error}',
+  'common.retry': 'Retry',
 
   'preset.leftHalf': 'Left Half',
   'preset.rightHalf': 'Right Half',
@@ -173,6 +175,8 @@ const ja: Record<MessageKey, string> = {
   'common.loading': '読み込み中…',
   'common.enable': '{label} を有効化',
   'common.turnOn': 'オンにする',
+  'common.loadFailed': '設定を読み込めませんでした: {error}',
+  'common.retry': '再試行',
 
   'preset.leftHalf': '左半分',
   'preset.rightHalf': '右半分',

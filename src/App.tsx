@@ -1,6 +1,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useState } from 'react';
 
+import { Banner } from './components/ui';
 import { formatCmdError } from './lib/errors';
 import { I18nProvider, resolveLang, useT } from './lib/i18n';
 import { SettingsProvider, useSettings } from './lib/settings';
@@ -42,7 +43,7 @@ function Localized() {
 
 function AppShell() {
   const t = useT();
-  const { settings, saveError } = useSettings();
+  const { settings, loadError, retryLoad, saveError } = useSettings();
   const [tab, setTab] = useState<Tab>('keyboard');
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
 
@@ -100,11 +101,29 @@ function AppShell() {
       )}
 
       <main className="app__main">
-        {tab === 'keyboard' && <KeyboardView />}
-        {tab === 'window' && <WindowView />}
-        {tab === 'session' && <SessionView />}
-        {tab === 'general' && (
-          <GeneralView autoCheckUpdate={autoCheckUpdate} onAutoCheckHandled={onAutoCheckHandled} />
+        {settings === null && loadError !== null ? (
+          // The initial settings load failed, so every view would sit on its
+          // loading state forever — show the error with a retry instead.
+          <Banner tone="warn">
+            <div className="banner__body" role="alert">
+              <p>{t('common.loadFailed', { error: formatCmdError(loadError, t) })}</p>
+            </div>
+            <button type="button" className="btn btn--primary" onClick={retryLoad}>
+              {t('common.retry')}
+            </button>
+          </Banner>
+        ) : (
+          <>
+            {tab === 'keyboard' && <KeyboardView />}
+            {tab === 'window' && <WindowView />}
+            {tab === 'session' && <SessionView />}
+            {tab === 'general' && (
+              <GeneralView
+                autoCheckUpdate={autoCheckUpdate}
+                onAutoCheckHandled={onAutoCheckHandled}
+              />
+            )}
+          </>
         )}
       </main>
     </div>
