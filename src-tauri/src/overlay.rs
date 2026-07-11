@@ -9,8 +9,31 @@
 //! thread. The
 //! frame arrives in CG coordinates (top-left origin) — the space the snap
 //! geometry works in — and is converted to Cocoa coordinates here.
+//!
+//! ## Generation counter (last writer wins)
+//!
+//! `show`/`hide` hop to the main thread via `run_on_main_thread`, which only
+//! queues a closure — it does not run it inline, and its delivery order
+//! against a *synchronous* action taken by the caller in between is not
+//! something to rely on. `drag_to_snap::restart` in particular can, on the
+//! main thread, join the tap thread (flushing any `show` it queued right
+//! before teardown) and then call `hide` inline — but a `show` queued just
+//! before that join can still be sitting in the main-thread queue and run
+//! *after* the inline `hide`, leaving a stale preview on screen with nothing
+//! left to clear it (the tap that would have hidden it on the next event is
+//! already gone).
+//!
+//! `GENERATION` closes that gap without assuming FIFO delivery at all: every
+//! `show` *and* `hide` claims a fresh generation when it is issued and embeds
+//! it in its queued closure, and the closure applies itself on the main
+//! thread only while its generation is still the current one. Whatever order
+//! the queued closures actually run in, only the operation issued last in
+//! program order takes effect — a stale `show` cannot resurrect a cleared
+//! preview or overwrite a newer frame, and a stale `hide` cannot take down a
+//! preview a newer `show` has since requested.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
@@ -28,21 +51,53 @@ thread_local! {
     static PANEL: RefCell<Option<Retained<NSPanel>>> = const { RefCell::new(None) };
 }
 
+/// Advanced by every `show` and `hide` as it is issued; each queued closure
+/// carries the generation it claimed and applies itself only while that is
+/// still the current one, so the operation issued last in program order wins
+/// regardless of the order the closures run in (see the module doc comment).
+/// Plain `Ordering::SeqCst` is used throughout: this is not a hot path (once
+/// per show/hide), so there is no reason to reach for a weaker ordering.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Claim a fresh generation for an operation being issued: advance the counter
+/// and return the new value, which is current until the next `show`/`hide`.
+fn claim_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Whether a queued operation's claimed generation is still the current one —
+/// i.e. no later `show`/`hide` has been issued since. A stale operation must
+/// discard itself rather than clobber the newer one's effect.
+fn is_current(generation: u64) -> bool {
+    GENERATION.load(Ordering::SeqCst) == generation
+}
+
 /// Show the snap preview at `frame_cg` (CG coordinates, top-left origin),
-/// creating the panel on first use. Hops to the main thread.
+/// creating the panel on first use. Hops to the main thread. Applied only if
+/// no later `show`/`hide` is issued before the hop lands (see the module doc
+/// comment).
 pub fn show(app: &AppHandle, frame_cg: Rect) {
+    let generation = claim_generation();
     let app = app.clone();
-    let _ = app.run_on_main_thread(move || show_on_main(frame_cg));
+    let _ = app.run_on_main_thread(move || show_on_main(frame_cg, generation));
 }
 
 /// Hide the snap preview if it is showing. Idempotent and cheap. Hops to the
-/// main thread.
+/// main thread. Applied only if no later `show`/`hide` is issued before the
+/// hop lands (see the module doc comment).
 pub fn hide(app: &AppHandle) {
+    let generation = claim_generation();
     let app = app.clone();
-    let _ = app.run_on_main_thread(hide_on_main);
+    let _ = app.run_on_main_thread(move || hide_on_main(generation));
 }
 
-fn show_on_main(frame_cg: Rect) {
+fn show_on_main(frame_cg: Rect, generation: u64) {
+    // A later `show`/`hide` has been issued since this one was queued — let it
+    // win, whether or not its closure has run yet: showing now would resurrect
+    // a cleared preview or overwrite a newer frame.
+    if !is_current(generation) {
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -55,7 +110,12 @@ fn show_on_main(frame_cg: Rect) {
     });
 }
 
-fn hide_on_main() {
+fn hide_on_main(generation: u64) {
+    // A later `show`/`hide` has been issued since this one was queued — let it
+    // win: hiding now would take down a preview a newer `show` asked for.
+    if !is_current(generation) {
+        return;
+    }
     PANEL.with(|cell| {
         if let Some(panel) = cell.borrow().as_ref() {
             panel.orderOut(None);

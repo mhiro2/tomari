@@ -190,6 +190,11 @@ AppKit windows are not `Send` — driven from the tap thread through
 `overlay::show` / `hide`, which hop to the main thread. On release the window
 snaps to the previewed zone and the move is recorded for undo. A lost mouse-up
 (tap disabled by the system) drops the drag and tears down its preview.
+`overlay` gives every issued `show`/`hide` a fresh generation and applies a
+queued operation on the main thread only while its generation is still the
+current one — last writer wins, with no assumption about delivery order — so a
+stale `show` still queued when the tap is torn down can never resurrect a
+preview after the teardown's `hide`, nor can a stale `hide` clear a newer one.
 
 **Drag-to-move & resize** (`drag_to_move.rs`) is a third CGEventTap, opt-in and
 modifier-gated. Unlike drag-to-snap it does not watch the OS move a window — it
