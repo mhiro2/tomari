@@ -374,7 +374,12 @@ without permissions too (unit tests).
   rustfmt / oxfmt for formatting, tsgo for type checking, cargo-deny for
   dependency auditing. `make check` runs the whole local suite.
 - **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macos),
-  cargo-deny, and the macOS bundle build.
+  cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
+  --debug`) that exercises the same `tauri.conf.json` bundle config a release
+  build uses, so a broken bundle setting fails on every push instead of first
+  showing up on a tag. Release tags additionally re-run the frontend and Rust
+  jobs before publishing (`.github/workflows/release.yaml`), so a release
+  build is gated on the same checks as a regular push.
 
 ## 11. Adding a feature
 

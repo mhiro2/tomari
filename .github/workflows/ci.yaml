@@ -60,7 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # rust-toolchain.toml
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
@@ -84,7 +84,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # rust-toolchain.toml
       - name: Cache cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Install cargo-deny
@@ -93,3 +93,35 @@ jobs:
           tool: cargo-deny
       - name: Run cargo-deny
         run: make deny-check
+
+  bundle:
+    name: macOS bundle build
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # rust-toolchain.toml
+      - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # Debug build, unsigned: exercises the same tauri.conf.json bundle
+      # config as a release build (targets, icons, updater artifacts) without
+      # needing signing secrets, so a broken bundle config fails here instead
+      # of first showing up on a tag push.
+      - name: Build debug bundle
+        run: pnpm tauri build --debug
