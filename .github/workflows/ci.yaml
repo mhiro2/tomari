@@ -119,9 +119,18 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      # Debug build, unsigned: exercises the same tauri.conf.json bundle
-      # config as a release build (targets, icons, updater artifacts) without
-      # needing signing secrets, so a broken bundle config fails here instead
-      # of first showing up on a tag push.
+      # `createUpdaterArtifacts` makes the bundler sign the .app.tar.gz, which
+      # needs a private key even for a debug build. Generate a throwaway key so
+      # CI exercises the exact same bundle path (targets, icons, updater
+      # signing) as a release without touching the real signing secret; the
+      # resulting signature is discarded. A pubkey-mismatch warning is expected
+      # and harmless here.
+      - name: Generate throwaway updater signing key
+        run: pnpm tauri signer generate --ci -p "" -w "${RUNNER_TEMP}/updater-key"
+      # Debug build: catches a broken bundle config here instead of on a tag push.
       - name: Build debug bundle
-        run: pnpm tauri build --debug
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "${RUNNER_TEMP}/updater-key")" \
+            pnpm tauri build --debug
