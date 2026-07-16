@@ -172,6 +172,8 @@ const en = {
     'Drag to move was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
   'settings.applyWarning.capsLockRemap':
     'The setting was saved, but the Caps Lock remap could not be updated. Toggle it off and on to try again.',
+  'settings.applyWarning.commandImeRules':
+    'The Command-key IME switch was saved but could not be applied to the live keyboard. Toggle it off and on to try again.',
   'settings.applyWarning.generic': 'A setting was saved but could not be applied to the system.',
 } as const;
 
@@ -344,6 +346,8 @@ const ja: Record<MessageKey, string> = {
     'ドラッグで移動は保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
   'settings.applyWarning.capsLockRemap':
     '設定は保存しましたが、Caps Lock の割り当てを更新できませんでした。オフにしてからもう一度オンにすると再試行します。',
+  'settings.applyWarning.commandImeRules':
+    'Command キーでの IME 切り替えは保存しましたが、動作中のキーボードに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.generic': '設定は保存しましたが、システムに適用できませんでした。',
 };
 

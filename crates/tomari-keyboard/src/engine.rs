@@ -122,6 +122,14 @@ impl ModifierEngine {
         self.find_rule(key, side).and_then(|r| r.remap_to)
     }
 
+    /// Whether the live rule set currently contains a rule with this id. Lets a
+    /// caller verify that a rule it expects to be active — e.g. the built-in ⌘
+    /// IME-toggle rules, added only when their setting is on — actually made it
+    /// into the engine, so a reload that silently failed can be detected.
+    pub fn contains_rule_id(&self, id: &str) -> bool {
+        self.rules.iter().any(|r| r.id == id)
+    }
+
     /// Whether any enabled rule manages Caps Lock. macOS gives Caps Lock no
     /// usable key-up and lets it lock, so the tap can only handle it once the OS
     /// remaps the Caps Lock HID usage to an ordinary key — the caller drives

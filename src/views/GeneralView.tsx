@@ -244,6 +244,8 @@ function applyWarningText(code: string, t: Translator): string {
       return t('settings.applyWarning.dragToMoveTap');
     case 'capsLockRemap':
       return t('settings.applyWarning.capsLockRemap');
+    case 'commandImeRules':
+      return t('settings.applyWarning.commandImeRules');
     default:
       return t('settings.applyWarning.generic');
   }

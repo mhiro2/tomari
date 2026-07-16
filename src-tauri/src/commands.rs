@@ -132,12 +132,26 @@ pub async fn save_settings(
     let move_should_run = settings.window_management_enabled && settings.drag_to_move_enabled;
 
     // The left/right ⌘ IME toggle is not a stored rule, so flipping it has to
-    // reassemble the engine's rule set from the new setting. Its Caps Lock
-    // reconcile outcome is deliberately ignored here (only logged inside
-    // `reload_engine_rules` callees): the authoritative `capsLockRemap` check
-    // runs once below, after every side effect, against the final live state.
-    if command_ime_changed && let Err(e) = reload_engine_rules(&state) {
+    // reassemble the engine's rule set from the new setting. Reconcile it every
+    // save against the live engine — like the taps and Caps Lock remap below —
+    // not only when the setting changed: an earlier save whose reload failed
+    // would otherwise leave the runtime out of step with the DB forever, since
+    // the next save sees `command_ime_changed == false` and never retries. Its
+    // Caps Lock reconcile outcome is deliberately ignored here (only logged
+    // inside `reload_engine_rules` callees): the authoritative `capsLockRemap`
+    // check runs once below, after every side effect, against the final live
+    // state.
+    if (command_ime_changed || !command_ime_rules_live(&state, settings.command_ime_switch_enabled))
+        && let Err(e) = reload_engine_rules(&state)
+    {
         tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
+    }
+    // Report a warning whenever the live engine still does not match the saved
+    // setting (a reload failed just now, or an earlier one did and this save was
+    // unrelated), so the mismatch keeps surfacing until it actually heals rather
+    // than the save reporting a clean success the runtime never honored.
+    if !command_ime_rules_live(&state, settings.command_ime_switch_enabled) {
+        apply_warnings.push("commandImeRules");
     }
 
     // The tray menu renders in the configured language, so rebuild it (on the
@@ -533,6 +547,24 @@ pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> Cmd
 /// `delete_modifier_rule` log a `false`; `save_settings` ignores it outright,
 /// because its `capsLockRemap` warning comes from one authoritative live
 /// check after all of the save's side effects, not from intermediate results.
+/// Whether the live engine's rule set is in step with `want` for the built-in
+/// ⌘ IME-toggle rules: all of them present when the setting is on, none when it
+/// is off. Used by `save_settings` to detect a rule reload that silently failed
+/// (the DB and settings say one thing, the runtime another).
+fn command_ime_rules_live(state: &AppState, want: bool) -> bool {
+    let ime_rules = tomari_core::defaults::command_ime_rules();
+    let engine = state.engine.lock_safe();
+    let present = ime_rules
+        .iter()
+        .filter(|r| engine.contains_rule_id(&r.id))
+        .count();
+    if want {
+        present == ime_rules.len()
+    } else {
+        present == 0
+    }
+}
+
 fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     // The stored rules plus the built-in left/right ⌘ IME toggle, which lives
     // behind a setting rather than as an editable row.
@@ -730,6 +762,34 @@ mod tests {
             drag_to_move,
             caps_remap_ok: true,
         }
+    }
+
+    fn test_state(engine_rules: Vec<ModifierRule>) -> AppState {
+        use tomari_core::{Database, Rect};
+        use tomari_keyboard::ModifierEngine;
+        use tomari_window::MockWindowManager;
+        AppState::new(
+            Database::open_in_memory().unwrap(),
+            ModifierEngine::new(engine_rules),
+            Box::new(MockWindowManager::new(Rect::new(0.0, 0.0, 100.0, 100.0))),
+            AppSettings::default(),
+        )
+    }
+
+    #[test]
+    fn command_ime_rules_live_tracks_whether_the_engine_matches_the_setting() {
+        let ime_rules = tomari_core::defaults::command_ime_rules();
+
+        // Engine carrying the built-in IME rules: "on" is in step, "off" is not.
+        let with_rules = test_state(ime_rules.clone());
+        assert!(command_ime_rules_live(&with_rules, true));
+        assert!(!command_ime_rules_live(&with_rules, false));
+
+        // Engine missing them (a reload that failed to add them): "on" is out of
+        // step — the case that must raise the commandImeRules warning.
+        let without_rules = test_state(vec![]);
+        assert!(!command_ime_rules_live(&without_rules, true));
+        assert!(command_ime_rules_live(&without_rules, false));
     }
 
     #[test]
