@@ -412,12 +412,31 @@ fn same_accelerator(a: &str, b: &str) -> bool {
 #[tauri::command]
 pub fn delete_hotkey(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let _config = state.lock_config_mutation();
+    // Snapshot the row before deleting so a systemic re-registration failure can
+    // be rolled back: `register_all` returns `Err` only when it left the live
+    // set untouched (the DB was unreadable, or the old registrations could not
+    // be cleared), which would strand the OS registration and dispatch map on a
+    // hotkey the DB has already dropped — the three-way desync the UI then sees.
+    let previous = state.db.list_hotkeys()?.into_iter().find(|h| h.id == id);
     state.db.delete_hotkey(&id)?;
-    // Remaining hotkeys that fail to re-register are logged by `register_all`;
-    // they are not this deletion's fault and must not make it look failed.
-    shortcuts::register_all(&app, state.inner())
-        .map(|_| ())
-        .map_err(CmdError::other)
+    // Remaining hotkeys that fail to re-register are logged by `register_all`
+    // and returned as per-hotkey failures; they are pre-existing conflicts
+    // unrelated to this deletion (removing a hotkey only frees an accelerator,
+    // never breaks another), so `Ok(_)` is a success here regardless of them.
+    if let Err(e) = shortcuts::register_all(&app, state.inner()) {
+        // Restore the deleted row so the DB matches the still-live OS set, then
+        // re-register best-effort — same rollback contract as `save_hotkey`.
+        if let Some(prev) = &previous {
+            if let Err(rollback) = state.db.upsert_hotkey(prev) {
+                tracing::warn!(error = %rollback, "failed to restore hotkey after delete re-registration failure");
+            }
+            if let Err(rollback) = shortcuts::register_all(&app, state.inner()) {
+                tracing::warn!(error = %rollback, "failed to re-register shortcuts after delete rollback");
+            }
+        }
+        return Err(CmdError::other(e));
+    }
+    Ok(())
 }
 
 #[tauri::command]
