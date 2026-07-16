@@ -42,7 +42,7 @@ impl Database {
 }
 
 /// Write the single settings row on the given connection.
-fn write_settings(conn: &Connection, settings: &AppSettings) -> Result<()> {
+pub(super) fn write_settings(conn: &Connection, settings: &AppSettings) -> Result<()> {
     let json = serde_json::to_string(settings)?;
     conn.execute(
         "INSERT INTO settings (id, data) VALUES (1, ?1)

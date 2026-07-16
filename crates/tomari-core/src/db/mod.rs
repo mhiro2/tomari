@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+use crate::domain::AppSettings;
+use crate::domain::keyboard::{Hotkey, ModifierRule};
 use crate::error::{Error, Result};
 
 mod keyboard;
@@ -72,6 +74,37 @@ impl Database {
                 row.get(0)
             })?;
             Ok(n as usize)
+        })
+    }
+
+    /// Seed the first-run defaults — hotkeys, modifier rules and the settings
+    /// row — in a single transaction, so a failure part-way through rolls back
+    /// and never leaves a half-populated database.
+    ///
+    /// Only call this once a real first run has been confirmed (i.e.
+    /// [`settings_exist`](Self::settings_exist) returned `Ok(false)`). A *read
+    /// failure* while checking must not be treated as a first run: the settings
+    /// row may exist but be momentarily unreadable, and seeding then would
+    /// overwrite a real user's configuration. Writing all rows atomically also
+    /// guarantees the settings row (the first-run marker) only appears if the
+    /// accompanying hotkeys and rules landed too.
+    pub fn seed_defaults(
+        &self,
+        hotkeys: &[Hotkey],
+        rules: &[ModifierRule],
+        settings: &AppSettings,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            for hk in hotkeys {
+                keyboard::write_hotkey(&tx, hk)?;
+            }
+            for rule in rules {
+                keyboard::write_modifier_rule(&tx, rule)?;
+            }
+            settings::write_settings(&tx, settings)?;
+            tx.commit()?;
+            Ok(())
         })
     }
 
@@ -192,6 +225,71 @@ mod tests {
 
         let err = db.migrate().expect_err("newer schema must be rejected");
         assert!(matches!(err, Error::Migration(_)));
+    }
+
+    #[test]
+    fn seed_defaults_writes_every_row_and_marks_first_run() {
+        use crate::domain::action::AppAction;
+        use crate::domain::keyboard::{KeySide, ModifierKey};
+        use crate::domain::window::WindowPreset;
+
+        let db = Database::open_in_memory().expect("open");
+        assert!(!db.settings_exist().unwrap(), "starts uninitialized");
+
+        let hotkeys = vec![Hotkey {
+            id: "h1".into(),
+            label: "Snap left".into(),
+            accelerator: "Cmd+Alt+Left".into(),
+            action: AppAction::SnapWindow(WindowPreset::LeftHalf),
+            enabled: true,
+        }];
+        let rules = vec![ModifierRule {
+            id: "m1".into(),
+            label: "Caps → Ctrl".into(),
+            modifier: ModifierKey::CapsLock,
+            side: KeySide::Either,
+            remap_to: Some(ModifierKey::Control),
+            hyper: false,
+            tap: AppAction::SendKeystroke("Escape".into()),
+            enabled: true,
+        }];
+        let settings = AppSettings::default();
+
+        db.seed_defaults(&hotkeys, &rules, &settings).expect("seed");
+
+        assert!(db.settings_exist().unwrap(), "settings row now present");
+        assert_eq!(db.list_hotkeys().unwrap(), hotkeys);
+        assert_eq!(db.list_modifier_rules().unwrap(), rules);
+        assert_eq!(db.get_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn seed_defaults_is_atomic_and_idempotent() {
+        use crate::domain::action::AppAction;
+        use crate::domain::window::WindowPreset;
+
+        let db = Database::open_in_memory().expect("open");
+        // An empty batch still writes the settings row (the first-run marker),
+        // so a later launch correctly sees the database as initialized.
+        db.seed_defaults(&[], &[], &AppSettings::default())
+            .expect("seed empty");
+        assert!(db.settings_exist().unwrap());
+        assert!(db.list_hotkeys().unwrap().is_empty());
+
+        // Re-seeding re-runs the same upserts by primary key, so it never
+        // duplicates rows — the writes are keyed, not blindly appended.
+        let hotkeys = vec![Hotkey {
+            id: "h1".into(),
+            label: "Snap left".into(),
+            accelerator: "Cmd+Alt+Left".into(),
+            action: AppAction::SnapWindow(WindowPreset::LeftHalf),
+            enabled: true,
+        }];
+        db.seed_defaults(&hotkeys, &[], &AppSettings::default())
+            .expect("re-seed");
+        db.seed_defaults(&hotkeys, &[], &AppSettings::default())
+            .expect("re-seed again");
+        assert_eq!(db.list_hotkeys().unwrap(), hotkeys);
     }
 
     #[test]

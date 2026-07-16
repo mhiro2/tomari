@@ -381,14 +381,33 @@ fn build_state(paths: &AppPaths) -> AppState {
     // Seed defaults only on the very first run, detected by the absence of the
     // settings row. Keying off empty tables would resurrect defaults whenever a
     // user deliberately clears all of their hotkeys or rules.
-    if !db.settings_exist().unwrap_or(false) {
-        for hk in defaults::default_hotkeys() {
-            let _ = db.upsert_hotkey(&hk);
+    match db.settings_exist() {
+        // Already initialized: leave the user's data alone.
+        Ok(true) => {}
+        // A genuine first run — seed every default atomically, so a mid-seed
+        // failure rolls back rather than leaving a half-populated database.
+        Ok(false) => {
+            if let Err(e) = db.seed_defaults(
+                &defaults::default_hotkeys(),
+                &defaults::default_modifier_rules(),
+                &AppSettings::default(),
+            ) {
+                tracing::error!(error = %e, "could not seed first-run defaults");
+                alert(
+                    "Tomari could not save its initial settings. It is running with \
+                     built-in defaults for now; they will be stored on your next change.",
+                    false,
+                );
+            }
         }
-        for rule in defaults::default_modifier_rules() {
-            let _ = db.upsert_modifier_rule(&rule);
+        // A read failure is *not* a first run: the settings row may well exist
+        // but be momentarily unreadable (a lock, a transient SQLite error).
+        // Seeding now would overwrite a real user's configuration, so touch
+        // nothing on disk and run this session on the fallbacks the reads below
+        // already provide (each surfaces its own alert if it, too, fails).
+        Err(e) => {
+            tracing::error!(error = %e, "could not determine first-run state; leaving the database untouched");
         }
-        let _ = db.save_settings(&AppSettings::default());
     }
 
     // A read failure here is a row that opened fine but no longer decodes (a
