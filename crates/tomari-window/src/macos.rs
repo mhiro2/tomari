@@ -236,6 +236,12 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
         return Err(Error::NoFocusedWindow);
     }
     let system = CFOwned(system);
+    // Bound every AX round-trip that follows before the first one can block on a
+    // wedged focused app. Passing the system-wide element sets the timeout
+    // process-globally (per `AXUIElementSetMessagingTimeout`), so it also covers
+    // the focused-application and focused-window reads below — and any fallback
+    // application element created afterwards — without a per-element set on each.
+    unsafe { set_messaging_timeout(system.0) };
     let app = unsafe { copy_attr(system.0, "AXFocusedApplication") }.map_err(map_attr_err)?;
 
     let own_pid = std::process::id() as pid_t;
@@ -246,7 +252,7 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
             return Err(Error::NoFocusedWindow);
         }
         let other_app = CFOwned(other_app);
-        unsafe { set_messaging_timeout(other_app.0) };
+        // Covered by the process-global timeout set on `system` above.
         let window = unsafe { copy_attr(other_app.0, "AXFocusedWindow") }.map_err(map_attr_err)?;
         return Ok((system, other_app, window));
     }
@@ -610,8 +616,11 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
             return Err(Error::NoFocusedWindow);
         }
         let system = CFOwned(system);
-        // Bound the hit-test too: it messages the app under the cursor, which
-        // could be the wedged one we are trying not to block on.
+        // Bound the hit-test and everything after it: passing the system-wide
+        // element sets the timeout process-globally, so the initial
+        // position hit-test *and* the `AXWindow`/`AXParent` walk below — each
+        // messaging the app under the cursor, possibly the wedged one we must
+        // not block on — are all covered before the first round-trip is sent.
         set_messaging_timeout(system.0);
 
         let mut hit: CFTypeRef = std::ptr::null();
