@@ -214,11 +214,23 @@ fn handle_event(
     etype: CGEventType,
     event: &CGEvent,
 ) -> CallbackResult {
-    // The system disabled the tap (timeout / heavy input): re-enable it.
+    // The system disabled the tap (timeout / heavy input): re-enable it. While
+    // disabled the tap sees no events, so a key-up released mid-outage is lost —
+    // the engine's `held`/`press` and this thread's `TapState` (caps parity,
+    // hyper-held, remap stamp) would otherwise linger, and every later keystroke
+    // would carry a stale Hyper combo or remap target while a solo tap misfired
+    // as a chord. Drop all transient hold/press state before re-arming, mirroring
+    // how the drag taps discard an in-flight gesture on disable. The Caps Lock
+    // HID remap (`CAPS_PROXY_ACTIVE`) is left untouched: it is real system state
+    // independent of the tap, not a per-hold belief.
     if matches!(
         etype,
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
+        if let Some(app_state) = app.try_state::<AppState>() {
+            app_state.engine.lock_safe().reset();
+        }
+        *state.lock_safe() = TapState::default();
         tap::reenable(port_holder);
         return CallbackResult::Keep;
     }
