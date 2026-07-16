@@ -26,14 +26,19 @@
 //! newer toggle superseded it mid-dialog, so a stale cancel never clobbers a
 //! switch the user re-toggled.
 //!
-//! Two invariants keep the lid-close override from ever stranding the Mac in a
-//! never-sleep state:
+//! Three invariants keep the lid-close override from ever stranding the Mac in
+//! a never-sleep state:
 //!
 //! * **Write-ahead marker.** A marker file under the data directory is written
-//!   *before* `disablesleep` is enabled and removed *after* it is cleared, so a
-//!   crash at any point leaves a record [`reconcile_on_launch`] can act on. An
-//!   unreadable sleep state is treated as "unknown" — the marker is kept, never
-//!   dropped.
+//!   *before* `disablesleep` is enabled and removed only once the clear is
+//!   *confirmed*, so a crash at any point leaves a record [`reconcile_on_launch`]
+//!   can act on. An unreadable sleep state is treated as "unknown" — the marker
+//!   is kept, never dropped.
+//! * **Verified against the kernel flag.** Every `pmset` is checked against the
+//!   actual `SleepDisabled` value afterwards rather than trusting its reported
+//!   exit status: `pmset` can apply the change while `osascript` still reports
+//!   failure (or, in principle, the reverse), so the marker and ownership track
+//!   the *confirmed* kernel state — never a setter result that did not take.
 //! * **Ownership.** We only ever clear a `disablesleep` we turned on ourselves
 //!   (`we_own_override`); a value already set by the user or another process is
 //!   left untouched.
@@ -338,21 +343,39 @@ struct LidCloseOutcome {
 /// resulting lid-close status and ownership. Free of state mutation beyond the
 /// `sys` calls (and a diagnostic log), so it is exercised end-to-end in tests
 /// against a fake.
+///
+/// Every `set_disablesleep` is confirmed against the *actual* kernel flag via a
+/// follow-up read rather than trusting the setter's reported result: `pmset`
+/// can apply the change and still have `osascript` report failure. The marker
+/// and ownership therefore track the verified kernel state — the failsafe is
+/// dropped only when the override is confirmed clear, and kept whenever it is
+/// still set or unreadable, so the Mac is never left unable to sleep with no
+/// record to recover from.
 fn reconcile_lid_close_with<S: LidCloseSys>(
     sys: &S,
     active: bool,
     we_own: bool,
 ) -> LidCloseOutcome {
     if !active {
-        // Toggled off: clear only an override we engaged ourselves, and only
-        // drop the marker once the clear actually succeeded. If the clear fails
-        // (auth declined on the way down) keep ownership and the marker so the
-        // next launch's reconcile / cleanup retries rather than leaking it.
-        let we_own = if we_own && sys.set_disablesleep(false) {
-            sys.remove_marker();
-            false
-        } else {
-            we_own
+        // Toggled off: only an override we engaged ourselves is ours to clear.
+        if !we_own {
+            return LidCloseOutcome {
+                lid_close: LidCloseState::Off,
+                we_own: false,
+            };
+        }
+        // Attempt the clear, then confirm against the kernel flag rather than the
+        // setter's result. Drop the marker and release ownership only once the
+        // override is *confirmed* cleared; if it is still set (auth declined) or
+        // unreadable, keep both so the next launch's reconcile / cleanup retries
+        // rather than leaking the override.
+        sys.set_disablesleep(false);
+        let we_own = match sys.read_sleep_disabled() {
+            Some(false) => {
+                sys.remove_marker();
+                false
+            }
+            Some(true) | None => true,
         };
         return LidCloseOutcome {
             lid_close: LidCloseState::Off,
@@ -384,22 +407,53 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
         },
         // Safe to enable. Persist the marker *before* enabling so a crash in
         // between leaves a record the next launch reconciles. If the marker
-        // cannot be written, don't enable — recovery couldn't be guaranteed. If
-        // the (admin-authed) `pmset` is then declined, enable nothing, drop the
-        // marker, and surface `Unavailable`. This pure step never touches
-        // `active`; the worker turns `Unavailable`-for-a-wanted-on into a full
-        // roll-back, since the veto is a required part of keep-awake.
+        // cannot be written, don't enable — recovery couldn't be guaranteed.
+        // This pure step never touches `active`; the worker turns
+        // `Unavailable`-for-a-wanted-on into a full roll-back, since the veto is
+        // a required part of keep-awake.
         Some(false) => {
-            if sys.write_marker() && sys.set_disablesleep(true) {
-                LidCloseOutcome {
-                    lid_close: LidCloseState::Engaged,
-                    we_own: true,
-                }
-            } else {
+            if !sys.write_marker() {
+                // No failsafe on disk → don't enable; there would be no record
+                // to recover from after a crash.
                 sys.remove_marker();
                 LidCloseOutcome {
                     lid_close: LidCloseState::Unavailable,
                     we_own: false,
+                }
+            } else {
+                // Enable, then confirm against the kernel flag instead of the
+                // setter's result: `osascript` can report failure after `pmset`
+                // already set `SleepDisabled`, and dropping the marker then would
+                // strand the Mac awake with no record to recover from.
+                sys.set_disablesleep(true);
+                match sys.read_sleep_disabled() {
+                    // Confirmed on: own it and keep the marker guarding it.
+                    Some(true) => LidCloseOutcome {
+                        lid_close: LidCloseState::Engaged,
+                        we_own: true,
+                    },
+                    // Confirmed still off (auth declined / `pmset` failed): the
+                    // enable really did nothing, so drop the marker.
+                    Some(false) => {
+                        sys.remove_marker();
+                        LidCloseOutcome {
+                            lid_close: LidCloseState::Unavailable,
+                            we_own: false,
+                        }
+                    }
+                    // Unreadable: the override may be in force. Keep the marker as
+                    // the failsafe (launch reconcile / cleanup will clear it) but
+                    // don't claim ownership — an unverified override must not
+                    // satisfy the `we_own ⇒ on` shortcut above.
+                    None => {
+                        tracing::warn!(
+                            "could not confirm sleep state after enabling lid-close veto; keeping the failsafe marker"
+                        );
+                        LidCloseOutcome {
+                            lid_close: LidCloseState::Unavailable,
+                            we_own: false,
+                        }
+                    }
                 }
             }
         }
@@ -471,11 +525,23 @@ fn reconcile_writeback(
 /// `disablesleep` we never touched — no ownership, no marker — is left alone, so
 /// quit / logout / updater restart never clears a foreign override.
 fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, we_own: bool) -> bool {
-    if (we_own || sys.marker_exists()) && sys.set_disablesleep(false) {
-        sys.remove_marker();
-        false
-    } else {
-        we_own
+    if !(we_own || sys.marker_exists()) {
+        // Nothing of ours to clear; never touch a foreign override.
+        return we_own;
+    }
+    // Confirm the clear against the kernel flag rather than the setter's result:
+    // trusting a reported success that did not take would drop the failsafe
+    // marker while `SleepDisabled` is still set, stranding the Mac awake with no
+    // record. Remove the marker only once the override is confirmed cleared.
+    sys.set_disablesleep(false);
+    match sys.read_sleep_disabled() {
+        Some(false) => {
+            sys.remove_marker();
+            false
+        }
+        // Still set, or unreadable: keep the marker so the next launch's
+        // reconcile clears the leftover rather than leaking the override.
+        Some(true) | None => we_own,
     }
 }
 
@@ -889,6 +955,19 @@ mod tests {
         SetDisablesleep(bool),
     }
 
+    /// How a `set_disablesleep` call affects the fake kernel flag — decoupled
+    /// from what the call *reports*, so tests can model `pmset` applying the
+    /// change while `osascript` still reports failure (and the reverse).
+    #[derive(Debug, Clone, Copy)]
+    enum PmsetEffect {
+        /// The kernel flag becomes the requested value.
+        Apply,
+        /// The kernel flag is left unchanged (a `pmset` that did nothing).
+        NoChange,
+        /// The kernel flag becomes unreadable afterwards (`read` returns `None`).
+        BecomeUnreadable,
+    }
+
     /// In-memory [`LidCloseSys`] for failure-mode tests: configurable `pmset` and
     /// marker-write behavior over an observable marker and an ordered op log, so
     /// the lid-close state machine runs end-to-end without touching the system,
@@ -898,9 +977,12 @@ mod tests {
         sleep_disabled: std::cell::Cell<Option<bool>>,
         /// Whether `write_marker` succeeds (false simulates an unwritable dir).
         marker_write_ok: bool,
-        /// Whether `set_disablesleep` succeeds (false simulates a declined auth
-        /// prompt or a failed `pmset`).
-        pmset_ok: bool,
+        /// What `set_disablesleep` *reports* (false simulates a declined auth
+        /// prompt or an `osascript` that exited non-zero).
+        pmset_reports: bool,
+        /// How `set_disablesleep` mutates the fake kernel flag, independent of
+        /// what it reports.
+        pmset_effect: PmsetEffect,
         /// Whether the failsafe marker is currently on disk.
         marker: std::cell::Cell<bool>,
         /// Every side-effecting call, in order.
@@ -913,7 +995,8 @@ mod tests {
             Self {
                 sleep_disabled: std::cell::Cell::new(sleep_disabled),
                 marker_write_ok: true,
-                pmset_ok: true,
+                pmset_reports: true,
+                pmset_effect: PmsetEffect::Apply,
                 marker: std::cell::Cell::new(false),
                 ops: std::cell::RefCell::new(Vec::new()),
             }
@@ -923,9 +1006,30 @@ mod tests {
             self.marker_write_ok = false;
             self
         }
-        /// Simulate a declined admin prompt / failed `pmset`.
+        /// Simulate a declined admin prompt / failed `pmset`: reports failure and
+        /// changes nothing.
         fn pmset_fails(mut self) -> Self {
-            self.pmset_ok = false;
+            self.pmset_reports = false;
+            self.pmset_effect = PmsetEffect::NoChange;
+            self
+        }
+        /// Simulate `pmset` applying the change while `osascript` reports failure
+        /// — the case that must not drop the failsafe marker.
+        fn pmset_applies_despite_reporting_failure(mut self) -> Self {
+            self.pmset_reports = false;
+            self.pmset_effect = PmsetEffect::Apply;
+            self
+        }
+        /// Simulate a `pmset` that reports success but does not take effect (the
+        /// kernel flag is unchanged) — the clear-side analog.
+        fn pmset_reports_success_without_effect(mut self) -> Self {
+            self.pmset_reports = true;
+            self.pmset_effect = PmsetEffect::NoChange;
+            self
+        }
+        /// Simulate the sleep state becoming unreadable after the `pmset` call.
+        fn pmset_leaves_state_unreadable(mut self) -> Self {
+            self.pmset_effect = PmsetEffect::BecomeUnreadable;
             self
         }
         /// Start with the failsafe marker already on disk.
@@ -960,12 +1064,12 @@ mod tests {
         }
         fn set_disablesleep(&self, on: bool) -> bool {
             self.ops.borrow_mut().push(Op::SetDisablesleep(on));
-            if self.pmset_ok {
-                self.sleep_disabled.set(Some(on));
-                true
-            } else {
-                false
+            match self.pmset_effect {
+                PmsetEffect::Apply => self.sleep_disabled.set(Some(on)),
+                PmsetEffect::NoChange => {}
+                PmsetEffect::BecomeUnreadable => self.sleep_disabled.set(None),
             }
+            self.pmset_reports
         }
         fn write_marker(&self) -> bool {
             self.ops.borrow_mut().push(Op::WriteMarker);
@@ -1210,6 +1314,110 @@ mod tests {
         assert!(
             sys.marker_present(),
             "the marker must survive a failed failsafe clear"
+        );
+    }
+
+    #[test]
+    fn enable_that_applied_but_reported_failure_keeps_the_marker_and_ownership() {
+        // `pmset` set `SleepDisabled` but `osascript` reported failure. Trusting
+        // the reported result would drop the marker and roll back while the Mac
+        // stays unable to sleep with no record — the reliability bug. Confirming
+        // against the kernel flag must instead own it and keep the marker.
+        let sys = FakeSys::new(Some(false)).pmset_applies_despite_reporting_failure();
+        let out = reconcile_lid_close_with(&sys, true, false);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Engaged,
+                we_own: true,
+            }
+        );
+        assert!(
+            sys.marker_present(),
+            "an override that actually took must stay guarded by its marker"
+        );
+        assert_eq!(sys.pmset_calls(), vec![true]);
+    }
+
+    #[test]
+    fn enable_with_unreadable_state_afterwards_keeps_the_failsafe_marker() {
+        // The state could not be read back after enabling: the override may be in
+        // force, so the marker must be kept as the failsafe (launch reconcile /
+        // cleanup clears it). Ownership is *not* taken — an unverified override
+        // must not satisfy the `we_own ⇒ on` shortcut on the next engage.
+        let sys = FakeSys::new(Some(false)).pmset_leaves_state_unreadable();
+        let out = reconcile_lid_close_with(&sys, true, false);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Unavailable,
+                we_own: false,
+            }
+        );
+        assert!(
+            sys.marker_present(),
+            "an unverifiable enable must keep the failsafe marker"
+        );
+        assert_eq!(sys.pmset_calls(), vec![true]);
+    }
+
+    #[test]
+    fn disable_that_reported_success_without_effect_keeps_the_marker_and_ownership() {
+        // The clear reported success but `SleepDisabled` is still set. Trusting
+        // the report would drop the marker and release ownership while the Mac
+        // stays awake with no record. Confirming against the kernel flag must
+        // keep both so launch reconcile / cleanup retries.
+        let sys = FakeSys::new(Some(true))
+            .with_marker()
+            .pmset_reports_success_without_effect();
+        let out = reconcile_lid_close_with(&sys, false, true);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Off,
+                we_own: true,
+            }
+        );
+        assert_eq!(sys.pmset_calls(), vec![false]);
+        assert!(
+            sys.marker_present(),
+            "an override that is still set must keep its marker"
+        );
+    }
+
+    #[test]
+    fn disable_with_unreadable_state_afterwards_keeps_the_marker_and_ownership() {
+        // The state could not be read back after the clear: keep the marker and
+        // ownership rather than risk dropping the failsafe over a live override.
+        let sys = FakeSys::new(Some(true))
+            .with_marker()
+            .pmset_leaves_state_unreadable();
+        let out = reconcile_lid_close_with(&sys, false, true);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Off,
+                we_own: true,
+            }
+        );
+        assert_eq!(sys.pmset_calls(), vec![false]);
+        assert!(sys.marker_present());
+    }
+
+    #[test]
+    fn cleanup_keeps_marker_when_clear_reports_success_without_effect() {
+        // Exit-time clear reported success but the override is still set: the
+        // marker must survive so the next launch's reconcile clears it rather
+        // than the Mac being stranded awake with no record.
+        let sys = FakeSys::new(Some(true))
+            .with_marker()
+            .pmset_reports_success_without_effect();
+        let still_own = cleanup_lid_close_with(&sys, true);
+        assert!(still_own, "ownership must survive an unconfirmed clear");
+        assert_eq!(sys.pmset_calls(), vec![false]);
+        assert!(
+            sys.marker_present(),
+            "the marker must survive an unconfirmed clear"
         );
     }
 }
