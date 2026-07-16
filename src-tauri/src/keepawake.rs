@@ -77,10 +77,15 @@ pub struct KeepAwake {
     /// only ever clear an override we engaged ourselves.
     we_own_override: bool,
     /// Bumped on every desired-state transition (engage / disengage / shutdown).
-    /// A background reconcile captures it before its slow admin-auth dialog and
-    /// re-checks it on writeback: if it changed, a newer toggle superseded this
-    /// cycle, so the worker must not clobber the newer cycle's `active` or
-    /// assertion (e.g. roll back an "on" the user has since re-enabled).
+    /// Each reconcile worker captures the value *at spawn time* (under the same
+    /// lock that bumped it) and carries it through its slow admin-auth dialog; on
+    /// writeback it compares that captured value against the current one. If they
+    /// differ, a newer toggle superseded this cycle, so the worker must not
+    /// clobber the newer cycle's `active` or assertion (e.g. an out-of-order ON
+    /// worker completing after the OFF it lost the lock race to must not flip the
+    /// switch back on). Capturing at spawn — rather than after acquiring
+    /// `LID_OP_LOCK` — is what makes the collapse-to-last guarantee hold when
+    /// workers finish in a different order than they were requested.
     generation: u64,
 }
 
@@ -144,6 +149,11 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
     // a live "on" worth reconciling the lid-close veto for.
     #[cfg(target_os = "macos")]
     let engaged;
+    // The generation stamped on this engage, captured under the lock that bumps
+    // it so the spawned worker reconciles against *this* request, not whatever
+    // the latest generation happens to be by the time it wins `LID_OP_LOCK`.
+    #[cfg(target_os = "macos")]
+    let request_generation;
     {
         let mut k = state.keep_awake.lock_safe();
         if k.active {
@@ -187,6 +197,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
                     k.active = true;
                     k.lid_close = LidCloseState::Pending;
                     k.generation = k.generation.wrapping_add(1);
+                    request_generation = k.generation;
                     engaged = true;
                 }
                 Err(rc) => {
@@ -194,6 +205,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
                         rc,
                         "failed to create power assertion; keep-awake not engaged"
                     );
+                    request_generation = k.generation;
                     engaged = false;
                 }
             }
@@ -210,13 +222,17 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
     notify(app);
     #[cfg(target_os = "macos")]
     if engaged {
-        spawn_reconcile(app.clone(), true);
+        spawn_reconcile(app.clone(), true, request_generation);
     }
     status(state.inner())
 }
 
 fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    // The generation stamped on this disengage, captured under the lock that
+    // bumps it (see [`engage`]).
+    #[cfg(target_os = "macos")]
+    let request_generation;
     {
         let mut k = state.keep_awake.lock_safe();
         if !k.active {
@@ -235,6 +251,7 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
             // keep-awake on rather than show it off while sleep stays blocked.
             // Bump the generation so an in-flight engage worker is superseded.
             k.generation = k.generation.wrapping_add(1);
+            request_generation = k.generation;
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -247,7 +264,7 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     {
         // The off is reflected by the worker once the override is cleared, so
         // there is nothing to notify here yet.
-        spawn_reconcile(app.clone(), false);
+        spawn_reconcile(app.clone(), false, request_generation);
     }
     #[cfg(not(target_os = "macos"))]
     notify(app);
@@ -529,10 +546,12 @@ pub fn cleanup_blocking(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 /// Reconcile the lid-close veto on a worker thread, since the admin-auth dialog
-/// blocks. `desired_on` is the direction the toggle asked for (engage / disengage).
+/// blocks. `desired_on` is the direction the toggle asked for (engage /
+/// disengage); `request_generation` is the generation stamped on that toggle,
+/// used to detect a newer toggle superseding this one.
 #[cfg(target_os = "macos")]
-fn spawn_reconcile(app: AppHandle, desired_on: bool) {
-    std::thread::spawn(move || reconcile_lid_close(&app, desired_on));
+fn spawn_reconcile(app: AppHandle, desired_on: bool, request_generation: u64) {
+    std::thread::spawn(move || reconcile_lid_close(&app, desired_on, request_generation));
 }
 
 /// Drive `pmset disablesleep` toward `desired_on` and commit the resulting
@@ -547,18 +566,17 @@ fn spawn_reconcile(app: AppHandle, desired_on: bool) {
 ///   cleared; a declined clear leaves keep-awake on (sleep is still prevented).
 ///
 /// A toggle that superseded this cycle while the admin-auth dialog was up is
-/// detected via the generation and left to its own worker, so a stale cancel
+/// detected via `request_generation` — the generation captured when *this*
+/// worker was spawned — and left to its own worker, so a stale cancel (or an
+/// out-of-order ON worker completing after the OFF that beat it to the lock)
 /// never clobbers a freshly re-toggled switch.
 #[cfg(target_os = "macos")]
-fn reconcile_lid_close(app: &AppHandle, desired_on: bool) {
+fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u64) {
     let _op = LID_OP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state = app.state::<AppState>();
-    let (we_own, generation) = {
-        let k = state.keep_awake.lock_safe();
-        (k.we_own_override, k.generation)
-    };
+    let we_own = state.keep_awake.lock_safe().we_own_override;
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
     let outcome = reconcile_lid_close_with(&RealSys, desired_on, we_own);
@@ -567,8 +585,13 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool) {
         // Always record ownership — even when superseded — so a later worker or
         // cleanup can clear an override this cycle set.
         k.we_own_override = outcome.we_own;
+        // Compare the *current* generation against the one stamped when this
+        // worker was spawned. Reading it here (after winning `LID_OP_LOCK`)
+        // instead would compare against whatever the latest toggle set, so an
+        // out-of-order worker would see its own request as current and wrongly
+        // commit it, letting a lost ON race flip the switch back on.
         match reconcile_writeback(
-            k.generation != generation,
+            k.generation != request_generation,
             desired_on,
             outcome.lid_close,
             outcome.we_own,
