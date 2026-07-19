@@ -230,7 +230,22 @@ fn handle_event(
         if let Some(app_state) = app.try_state::<AppState>() {
             app_state.engine.lock_safe().reset();
         }
-        *state.lock_safe() = TapState::default();
+        {
+            let mut ts = state.lock_safe();
+            // Clear the derived stamps: they are recomputed from the engine's
+            // held set on the next modifier event, but a keystroke arriving
+            // before that must not carry a stale Hyper combo or remap target.
+            ts.hyper_active = false;
+            ts.remap_stamp = (Vec::new(), Vec::new());
+            // `caps_down` is deliberately left intact. Unlike the stamps it is a
+            // parity tracker for the *physical* Caps Lock (its flag reflects lock
+            // state, not key state), which this reset cannot observe. Zeroing it
+            // would make the next Caps Lock event — the release of a key held
+            // across the outage — toggle to "down" and re-add the very phantom
+            // hold this reset exists to remove; leaving it makes that release a
+            // no-op instead. (Only the no-HID-proxy path drives Caps Lock through
+            // `caps_down`; with a Caps rule it arrives as F18 key-down/up.)
+        }
         tap::reenable(port_holder);
         return CallbackResult::Keep;
     }

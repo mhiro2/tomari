@@ -379,15 +379,27 @@ fn build_state(paths: &AppPaths) -> AppState {
     let db = open_database(paths);
 
     // Seed defaults only on the very first run, detected by the absence of the
-    // settings row. Keying off empty tables would resurrect defaults whenever a
-    // user deliberately clears all of their hotkeys or rules.
+    // settings row (plus an otherwise-empty database, checked below). The
+    // settings row — not empty tables — is the primary marker so that a user who
+    // deliberately clears all of their hotkeys or rules does not get them back.
     match db.settings_exist() {
         // Already initialized: leave the user's data alone.
         Ok(true) => {}
-        // A genuine first run — seed every default atomically, so a mid-seed
-        // failure rolls back rather than leaving a half-populated database.
+        // No settings row — a first run *if* the database is otherwise empty.
+        // Guard against seeding over an inconsistent database that has hotkey or
+        // rule rows but no settings row (an older build could write those before
+        // a failed settings write): `seed_defaults` upserts by primary key, so
+        // seeding would overwrite any user row whose id matches a default. Only
+        // seed a truly pristine database; on a raw-count read failure, treat the
+        // database as non-empty and skip, never risking a clobber.
         Ok(false) => {
-            if let Err(e) = db.seed_defaults(
+            let has_rows =
+                db.count_hotkeys().unwrap_or(1) > 0 || db.count_modifier_rules().unwrap_or(1) > 0;
+            if has_rows {
+                tracing::warn!(
+                    "settings row missing but hotkeys or rules exist; skipping first-run seed to avoid overwriting existing data"
+                );
+            } else if let Err(e) = db.seed_defaults(
                 &defaults::default_hotkeys(),
                 &defaults::default_modifier_rules(),
                 &AppSettings::default(),
