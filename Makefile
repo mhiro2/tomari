@@ -72,7 +72,7 @@ frontend-lint: ## Lint frontend code with oxlint.
 	pnpm lint
 
 .PHONY: typecheck
-typecheck: ## Type-check frontend code with tsgo.
+typecheck: ## Type-check frontend code with tsc.
 	pnpm typecheck
 
 ## Test ##

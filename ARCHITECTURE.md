@@ -371,7 +371,7 @@ without permissions too (unit tests).
 - **Frontend**: Vitest + Testing Library (jsdom). `vitest.setup.ts` mocks the
   Tauri API.
 - **Toolchain**: clippy (`-D warnings`) / oxlint (type-aware) for linting,
-  rustfmt / oxfmt for formatting, tsgo for type checking, cargo-deny for
+  rustfmt / oxfmt for formatting, tsc for type checking, cargo-deny for
   dependency auditing. `make check` runs the whole local suite.
 - **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macos),
   cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
