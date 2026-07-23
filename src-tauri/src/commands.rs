@@ -465,14 +465,18 @@ pub fn list_modifier_rules(state: State<'_, AppState>) -> CmdResult<Vec<Modifier
 #[tauri::command]
 pub async fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) -> CmdResult<()> {
     let _config = state.lock_config_mutation();
+    // Don't trust the frontend: reject empty / overlong / reserved ids and
+    // labels, contradictory hyper+remap rules, unsendable tap keystrokes, and
+    // rules that collide with another stored rule (or the reserved left/right ⌘
+    // IME-toggle slots) on the same modifier and side, before anything is
+    // stored. The stored set is also the snapshot used for both the collision
+    // check and the rollback below.
+    let existing = state.db.list_modifier_rules()?;
+    let rule = crate::validate::sanitize_modifier_rule(rule, &existing)?;
     // Snapshot the stored row so a failed live reload can be rolled back — the
     // DB must not keep a rule the live engine never picked up, which would
     // "save successfully" yet take no effect until the next launch.
-    let previous = state
-        .db
-        .list_modifier_rules()?
-        .into_iter()
-        .find(|r| r.id == rule.id);
+    let previous = existing.into_iter().find(|r| r.id == rule.id);
     state.db.upsert_modifier_rule(&rule)?;
     match reload_engine_rules(&state) {
         // The engine reloaded but `hidutil` left the Caps Lock remap out of
