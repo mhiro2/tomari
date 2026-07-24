@@ -86,7 +86,9 @@ function clearSaving(
   });
 }
 
-export function KeyboardView() {
+// `onOpenSetup` swaps the tabs for the permission-setup checklist; the banner
+// only offers it when the shell provides one (it renders standalone in tests).
+export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const t = useT();
   const { settings, update } = useSettings();
   const [rules, setRules] = useState<ModifierRule[]>([]);
@@ -229,6 +231,11 @@ export function KeyboardView() {
               <strong>{t('keyboard.imNeeded')}</strong>
               <p>{t('keyboard.imBody')}</p>
             </div>
+            {onOpenSetup && (
+              <button type="button" className="btn btn--ghost" onClick={onOpenSetup}>
+                {t('setup.openSetup')}
+              </button>
+            )}
             <button
               type="button"
               className="btn btn--primary"

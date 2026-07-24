@@ -623,6 +623,32 @@ pub fn undo_window(state: State<'_, AppState>) -> CmdResult<()> {
     crate::window_ops::undo(state.inner())
 }
 
+/// Everything the frontend's setup checklist needs at startup, pulled with one
+/// command once the WebView is ready. Pulled rather than pushed: an event
+/// emitted from `setup` would race the WebView load and could arrive before
+/// any listener exists.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupStatus {
+    pub first_run: bool,
+    /// Previously granted permissions are believed lost to an app update
+    /// (ad-hoc signing revokes them on every update). Always `false` until
+    /// the permission-snapshot detection is wired up.
+    pub update_regrant: bool,
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+}
+
+#[tauri::command]
+pub fn setup_status(state: State<'_, AppState>) -> SetupStatus {
+    SetupStatus {
+        first_run: state.first_run,
+        update_regrant: false,
+        accessibility: state.windows.permission_granted(),
+        input_monitoring: input_monitoring_status(),
+    }
+}
+
 #[tauri::command]
 pub fn accessibility_status(state: State<'_, AppState>) -> bool {
     state.windows.permission_granted()

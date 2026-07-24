@@ -12,6 +12,7 @@ import type {
   KeepAwakeStatus,
   ModifierRule,
   SaveSettingsOutcome,
+  SetupStatus,
   UpdateInfo,
   WindowPreset,
 } from './types';
@@ -48,6 +49,10 @@ export const moveWindowToDisplay = (direction: DisplayDirection): Promise<void> 
   invoke('move_window_to_display', { direction });
 
 export const undoWindow = (): Promise<void> => invoke('undo_window');
+
+// Startup pull for the setup checklist: whether this is a first run, whether an
+// update looks to have revoked permissions, and the current permission states.
+export const setupStatus = (): Promise<SetupStatus> => invoke('setup_status');
 
 export const accessibilityStatus = (): Promise<boolean> => invoke('accessibility_status');
 

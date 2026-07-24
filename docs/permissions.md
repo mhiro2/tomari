@@ -3,6 +3,19 @@
 Tomari asks for macOS permissions only for the features that genuinely need
 them. This page explains what each one is for and how to grant it.
 
+## The setup checklist
+
+While either permission below is missing, the settings window offers a
+one-screen **setup checklist**: each permission as a row with what it is for,
+a **Grant Access** button, and a green **Granted** mark once it is on. On a
+first launch the window opens on this checklist automatically; **Set up
+later** switches to the normal tabs, leaving a thin reminder bar under the
+tab bar until everything is granted. The per-tab permission banners stay, and
+their **Open Setup** button leads back to the checklist.
+
+The administrator password for Prevent Sleep is deliberately not on the
+checklist — it is asked for each time rather than granted once (see below).
+
 ## Accessibility
 
 Required for **moving windows**, **switching the IME**, and **sending keys**.
@@ -18,10 +31,10 @@ These rely on a resident `CGEventTap` connected to real keyboard and mouse
 events, which macOS gates behind **Input Monitoring**.
 
 If you start Tomari without granting it, creating the event tap fails and
-Tomari is added to the Input Monitoring list. Enable it under **System Settings
-→ Privacy & Security → Input Monitoring** (Tomari's tray menu also guides you
-there). After granting it, toggling the keyboard-customization switch restarts
-the listener.
+Tomari is added to the Input Monitoring list. Enable it from the setup
+checklist, or under **System Settings → Privacy & Security → Input
+Monitoring** (Tomari's tray menu also guides you there). Tomari notices the
+grant on its own and restarts the listener.
 
 ## Administrator password (Prevent Sleep)
 

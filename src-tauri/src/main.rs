@@ -108,6 +108,7 @@ fn main() {
             commands::snap_window,
             commands::move_window_to_display,
             commands::undo_window,
+            commands::setup_status,
             commands::accessibility_status,
             commands::request_accessibility,
             commands::input_monitoring_status,

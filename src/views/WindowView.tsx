@@ -16,7 +16,9 @@ const STATUS_CLEAR_MS = 4000;
 
 type Status = { message: string; isError: boolean };
 
-export function WindowView() {
+// `onOpenSetup` swaps the tabs for the permission-setup checklist; the banner
+// only offers it when the shell provides one (it renders standalone in tests).
+export function WindowView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const t = useT();
   const { settings, update } = useSettings();
   const [presets, setPresets] = useState<WindowPreset[]>([]);
@@ -119,6 +121,11 @@ export function WindowView() {
               <strong>{t('window.axNeeded')}</strong>
               <p>{t('window.axBody')}</p>
             </div>
+            {onOpenSetup && (
+              <button type="button" className="btn btn--ghost" onClick={onOpenSetup}>
+                {t('setup.openSetup')}
+              </button>
+            )}
             <button type="button" className="btn btn--primary" onClick={() => void grant()}>
               {t('window.grantAccess')}
             </button>

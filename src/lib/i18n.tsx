@@ -75,8 +75,7 @@ const en = {
   'keyboard.deleteShortcut': 'Delete {label}',
   'keyboard.offNote': "Keyboard customization is off — taps and shortcuts won't fire.",
   'keyboard.imNeeded': 'Input Monitoring access needed',
-  'keyboard.imBody':
-    'Tomari reads real keyboard events through macOS Input Monitoring to detect taps, holds, and the hyper key.',
+  'keyboard.imBody': 'Needed to detect taps, holds, and the hyper key.',
   'keyboard.noModifierRules': 'No modifier keys to configure.',
   'keyboard.noHotkeys': 'No global shortcuts yet — add one below.',
 
@@ -91,8 +90,28 @@ const en = {
   'error.shortcutConflict':
     "That shortcut couldn't be registered — it may conflict with another app.",
 
+  'setup.title': 'Set up Tomari',
+  'setup.intro':
+    'Tomari needs two macOS permissions to move windows and customize your keyboard. Grant them here to get started.',
+  'setup.accessibility': 'Accessibility',
+  'setup.accessibilityWhy': 'Needed to move windows and send keys.',
+  'setup.inputMonitoring': 'Input Monitoring',
+  'setup.inputMonitoringWhy': 'Needed to tap/hold and remap modifier keys.',
+  'setup.granted': 'Granted',
+  'setup.grant': 'Grant Access',
+  'setup.later': 'Set up later',
+  'setup.done': 'Done',
+  'setup.allSet': 'All set — Tomari is ready to use.',
+  'setup.bannerText': "Setup isn't finished yet.",
+  'setup.bannerAction': 'Continue',
+  'setup.openSetup': 'Open Setup',
+  'setup.updateRegrant':
+    'The update reset these permissions — a known limitation of Tomari for now. Please grant them again.',
+  'setup.adminNote':
+    'Prevent Sleep is separate: it asks for your administrator password each time instead of a one-time grant.',
+
   'window.axNeeded': 'Accessibility access needed',
-  'window.axBody': "Tomari moves other apps' windows through macOS Accessibility.",
+  'window.axBody': 'Needed to move and resize other apps’ windows.',
   'window.grantAccess': 'Grant Access',
   'window.offNote': "Window management is off — snapping and display moves won't work.",
   'window.snapSection': 'Snap focused window',
@@ -249,8 +268,7 @@ const ja: Record<MessageKey, string> = {
   'keyboard.deleteShortcut': '{label} を削除',
   'keyboard.offNote': 'キーボードカスタマイズはオフです。タップ・ショートカットは実行されません。',
   'keyboard.imNeeded': '入力監視(Input Monitoring)へのアクセスが必要です',
-  'keyboard.imBody':
-    'Tomari は macOS の入力監視機能でキーボードの実イベントを読み取り、押す/長押し・Hyper キーを検出します。',
+  'keyboard.imBody': '押す/長押し・Hyper キーの検出に必要です。',
   'keyboard.noModifierRules': '設定できる修飾キーがありません。',
   'keyboard.noHotkeys': 'グローバルショートカットはまだありません。下から追加してください。',
 
@@ -265,8 +283,28 @@ const ja: Record<MessageKey, string> = {
   'error.shortcutConflict':
     'このショートカットを登録できませんでした。他のアプリと競合している可能性があります。',
 
+  'setup.title': 'Tomari をセットアップ',
+  'setup.intro':
+    'ウィンドウ操作とキーボードカスタマイズには macOS の権限が 2 つ必要です。ここから許可して始めましょう。',
+  'setup.accessibility': 'アクセシビリティ',
+  'setup.accessibilityWhy': 'ウィンドウの移動やキー送信に必要です。',
+  'setup.inputMonitoring': '入力監視',
+  'setup.inputMonitoringWhy': '修飾キーの押す/長押しやリマップに必要です。',
+  'setup.granted': '付与済み',
+  'setup.grant': '許可する',
+  'setup.later': 'あとで設定する',
+  'setup.done': '完了',
+  'setup.allSet': '準備完了です。Tomari を使い始められます。',
+  'setup.bannerText': 'セットアップが完了していません',
+  'setup.bannerAction': '続ける',
+  'setup.openSetup': 'セットアップを開く',
+  'setup.updateRegrant':
+    'アップデートにより権限の再許可が必要です（現時点の Tomari の既知の制約です）。もう一度許可してください。',
+  'setup.adminNote':
+    'スリープ防止は権限とは別で、使うたびに管理者パスワードを確認します。ここでの許可は不要です。',
+
   'window.axNeeded': 'アクセシビリティへのアクセスが必要です',
-  'window.axBody': 'Tomari は macOS のアクセシビリティ機能で他のアプリのウィンドウを操作します。',
+  'window.axBody': '他のアプリのウィンドウの移動・リサイズに必要です。',
   'window.grantAccess': 'アクセスを許可',
   'window.offNote': 'ウィンドウ管理はオフです。スナップ・ディスプレイ移動は動作しません。',
   'window.snapSection': '前面ウィンドウをスナップ',

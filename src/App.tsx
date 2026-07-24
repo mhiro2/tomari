@@ -2,12 +2,15 @@ import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Banner } from './components/ui';
+import * as api from './lib/api';
 import { formatCmdError } from './lib/errors';
 import { I18nProvider, resolveLang, useT } from './lib/i18n';
 import { SettingsProvider, useSettings } from './lib/settings';
+import type { PermissionsChanged } from './lib/types';
 import { GeneralView } from './views/GeneralView';
 import { KeyboardView } from './views/KeyboardView';
 import { SessionView } from './views/SessionView';
+import { SetupView, type SetupPermissions } from './views/SetupView';
 import { WindowView } from './views/WindowView';
 
 type Tab = 'keyboard' | 'window' | 'session' | 'general';
@@ -50,11 +53,22 @@ function Localized() {
   );
 }
 
+// Where the setup checklist stands: 'unknown' until the startup pull settles,
+// 'open' while it replaces the tabs, 'dismissed' once "Set up later" swapped it
+// for the tabs plus a reminder banner, 'done' when nothing is missing.
+type SetupState = 'unknown' | 'open' | 'dismissed' | 'done';
+
 function AppShell() {
   const t = useT();
   const { settings, loadError, retryLoad, saveError } = useSettings();
   const [tab, setTab] = useState<Tab>('keyboard');
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
+  const [setup, setSetup] = useState<SetupState>('unknown');
+  const [updateRegrant, setUpdateRegrant] = useState(false);
+  const [permissions, setPermissions] = useState<SetupPermissions>({
+    accessibility: true,
+    inputMonitoring: true,
+  });
 
   // The tray "Check for Updates" entry shows this window and emits the event;
   // jump to the General tab and run the check so the result shows up there.
@@ -66,7 +80,63 @@ function AppShell() {
     return () => void unlisten.then((fn) => fn());
   }, []);
 
+  // Pull the setup status once the WebView is up (an event pushed from the
+  // backend at launch could fire before this listener exists, so it is a pull),
+  // then keep the permission pair current from the backend's poll. A failed
+  // pull falls back to 'done' — the tabs, exactly the pre-setup-view behavior.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.setupStatus();
+        setPermissions({ accessibility: s.accessibility, inputMonitoring: s.inputMonitoring });
+        setUpdateRegrant(s.updateRegrant);
+        const missing = !s.accessibility || !s.inputMonitoring;
+        setSetup(missing ? (s.firstRun || s.updateRegrant ? 'open' : 'dismissed') : 'done');
+      } catch {
+        setSetup('done');
+      }
+    })();
+    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
+      setPermissions({
+        accessibility: e.payload.accessibility,
+        inputMonitoring: e.payload.inputMonitoring,
+      }),
+    );
+    return () => void unlisten.then((fn) => fn());
+  }, []);
+
+  // Once everything is granted, retire the reminder banner on its own. The
+  // open checklist is deliberately not auto-closed — it stays to show the ✓s
+  // and let the user leave via its Done button.
+  useEffect(() => {
+    if (setup === 'dismissed' && permissions.accessibility && permissions.inputMonitoring) {
+      setSetup('done');
+    }
+  }, [setup, permissions]);
+
   const onAutoCheckHandled = useCallback(() => setAutoCheckUpdate(false), []);
+  const openSetup = useCallback(() => setSetup('open'), []);
+
+  const onGranted = useCallback(
+    (patch: Partial<SetupPermissions>) => setPermissions((p) => ({ ...p, ...patch })),
+    [],
+  );
+
+  if (setup === 'open') {
+    return (
+      <div className="app">
+        <main className="app__main">
+          <SetupView
+            permissions={permissions}
+            updateRegrant={updateRegrant}
+            onGranted={onGranted}
+            onDismiss={() => setSetup('dismissed')}
+            onDone={() => setSetup('done')}
+          />
+        </main>
+      </div>
+    );
+  }
 
   // A muted dot on a tab whose feature is switched off, so the master switch
   // (which lives inside the tab) is discoverable from the nav. The Session and
@@ -103,6 +173,15 @@ function AppShell() {
         ))}
       </nav>
 
+      {setup === 'dismissed' && (
+        <div className="setup-banner">
+          <span>{t('setup.bannerText')}</span>
+          <button type="button" className="btn btn--ghost" onClick={openSetup}>
+            {t('setup.bannerAction')}
+          </button>
+        </div>
+      )}
+
       {saveError !== null && (
         <p className="alert" role="alert">
           {t('settings.saveFailed', { error: formatCmdError(saveError, t) })}
@@ -123,8 +202,8 @@ function AppShell() {
           </Banner>
         ) : (
           <>
-            {tab === 'keyboard' && <KeyboardView />}
-            {tab === 'window' && <WindowView />}
+            {tab === 'keyboard' && <KeyboardView onOpenSetup={openSetup} />}
+            {tab === 'window' && <WindowView onOpenSetup={openSetup} />}
             {tab === 'session' && <SessionView />}
             {tab === 'general' && (
               <GeneralView

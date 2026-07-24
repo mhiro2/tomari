@@ -230,10 +230,14 @@ skips arming whenever a gesture chord is held so the two never fight.
   (`seed_first_run_defaults` in `main.rs`). Keying off empty tables would
   resurrect defaults whenever a user deliberately clears everything. A launch
   where the seed actually ran is flagged as `AppState::first_run`, which
-  `setup` uses to auto-open the settings window once. Any ambiguous detection
-  counts as _not_ a first run, so an existing database never triggers it; a
-  corruption reset that re-seeds a fresh database does, deliberately — the
-  settings are back at defaults and the window shows the user that state. Defaults live in
+  `setup` uses to auto-open the settings window once and the frontend pulls
+  via the `setup_status` command (together with the current permission states)
+  to decide whether to show the setup checklist instead of the tabs. It is a
+  pull, not an event: a push at launch would race the WebView load. Any
+  ambiguous detection counts as _not_ a first run, so an existing database
+  never triggers it; a corruption reset that re-seeds a fresh database does,
+  deliberately — the settings are back at defaults and the window shows the
+  user that state. Defaults live in
   `defaults.rs` (Caps Lock → Control — the one seeded modifier rule — plus the
   snap hotkeys). The left/right ⌘ IME toggle is _not_ a stored rule: it is
   assembled on demand from `command_ime_rules` when `command_ime_switch_enabled`

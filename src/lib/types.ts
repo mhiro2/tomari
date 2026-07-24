@@ -100,6 +100,17 @@ export interface PermissionsChanged {
   inputMonitoring: boolean;
 }
 
+// Result of the setup_status command, pulled once at startup to decide whether
+// to show the permission-setup checklist instead of the tabs.
+export interface SetupStatus {
+  // This launch seeded the database (a true first run).
+  firstRun: boolean;
+  // Previously granted permissions look lost to an app update.
+  updateRegrant: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
+}
+
 // Error shape a #[tauri::command] rejects with. `code` classifies the frequent,
 // localizable failures; `message` is the developer-facing English fallback for
 // everything else (`code: "other"`).

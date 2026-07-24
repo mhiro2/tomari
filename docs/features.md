@@ -114,7 +114,12 @@ automatically (the main features need permissions you have not granted yet);
 after that Tomari starts silently in the menu bar. The same happens on the rare
 launch where Tomari had to reset an unreadable settings database — your
 settings are back at their defaults, so the window shows you what state you
-are in. You can hide the icon with **Show in menu bar** in
+are in.
+
+While a permission is missing, the window shows a one-screen setup checklist
+in place of the tabs (see [Permissions](permissions.md)): grant Accessibility
+and Input Monitoring from there, or choose **Set up later** and come back via
+the reminder bar under the tab bar. You can hide the icon with **Show in menu bar** in
 the General tab if you prefer a fully background app. Because hiding it removes
 the app's only visible affordance (Tomari has no Dock icon), turning it off asks
 you to confirm first and spells out how to reopen the window.
