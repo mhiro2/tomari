@@ -129,15 +129,20 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
     let latest = migrations.len() as i32;
     let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < 0 || version > latest {
-        return Err(Error::Migration(format!(
-            "database schema version {version} is outside what this app supports \
-             (expected 0 to {latest}); if it is newer, please update the app"
-        )));
+        return Err(version_out_of_range(version, latest));
     }
     for next in (version + 1)..=latest {
         apply_step(conn, migrations, next)?;
     }
     Ok(())
+}
+
+/// The launch error for a stored schema version this binary cannot handle.
+fn version_out_of_range(version: i32, latest: i32) -> Error {
+    Error::Migration(format!(
+        "database schema version {version} is outside what this app supports \
+         (expected 0 to {latest}); if it is newer, please update the app"
+    ))
 }
 
 /// Apply the single migration that brings the schema to version `next`, under
@@ -150,9 +155,18 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
 /// best fail on existing DDL and at worst re-apply a non-idempotent data
 /// transformation). Skipping drops the transaction unstarted-equivalent: it
 /// rolls back having written nothing.
+///
+/// The re-read repeats the out-of-range check too: the racing instance could
+/// be a *newer* binary that advanced the version past what this one supports,
+/// and skipping silently would report a successful launch against a schema
+/// this binary does not understand.
 fn apply_step(conn: &Connection, migrations: &[&str], next: i32) -> Result<()> {
+    let latest = migrations.len() as i32;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let current: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current < 0 || current > latest {
+        return Err(version_out_of_range(current, latest));
+    }
     if current >= next {
         return Ok(());
     }
@@ -265,10 +279,36 @@ PRAGMA user_version = 1;
 "#,
     ];
 
-    /// A structural description of every user table — column names, types,
-    /// nullability, defaults and primary keys — for comparing two databases
-    /// without depending on the DDL's exact text.
+    /// A structural description of the whole schema, for comparing two
+    /// databases. Covers every object in `sqlite_master` (tables, indexes,
+    /// triggers, views) via its DDL text — normalized for whitespace and
+    /// `IF NOT EXISTS` so equivalent spellings compare equal — which pins
+    /// constraints (`CHECK`, foreign keys) that column listings alone would
+    /// miss, plus each table's `PRAGMA table_info` structure.
     fn schema_snapshot(conn: &Connection) -> Vec<String> {
+        let mut out: Vec<String> = conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                let object_type: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                // `sql` is NULL for auto-created objects; keep the entry so a
+                // missing object still shows up as a difference.
+                let ddl = row.get::<_, Option<String>>(2)?.map(|sql| {
+                    sql.replace("IF NOT EXISTS ", "")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+                Ok(format!("{object_type} {name}: {ddl:?}"))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
         let tables: Vec<String> = conn
             .prepare(
                 "SELECT name FROM sqlite_master \
@@ -279,7 +319,6 @@ PRAGMA user_version = 1;
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        let mut out = Vec::new();
         for table in tables {
             let mut stmt = conn
                 .prepare(&format!("PRAGMA table_info({table})"))
@@ -460,6 +499,63 @@ PRAGMA user_version = 1;
 
         apply_step(&conn, migrations, 1).expect("loser skips instead of re-applying");
         let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn a_version_advanced_past_this_binary_is_refused_under_the_lock() {
+        // The racing instance may be a *newer* binary that migrated beyond
+        // what this one supports. The re-check under the lock must refuse —
+        // treating "already past my target" as success would report a clean
+        // launch against a schema this binary does not understand.
+        let migrations: &[&str] = &["CREATE TABLE a (x INTEGER);"];
+        let conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "user_version", 2).unwrap();
+
+        let err = apply_step(&conn, migrations, 1).expect_err("must refuse");
+        assert!(matches!(err, Error::Migration(_)));
+    }
+
+    #[test]
+    fn a_concurrent_loser_on_its_own_connection_blocks_then_skips() {
+        // The real race: a second connection calls `apply_step` while the
+        // winner holds the write lock. The immediate transaction makes the
+        // loser wait (busy timeout) for the winner's commit and then read the
+        // stamped version; a deferred transaction would instead read a stale
+        // snapshot and try to re-apply the DDL.
+        use std::thread;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tomari.sqlite3");
+        let migrations: &[&str] = &["CREATE TABLE a (x INTEGER);"];
+
+        let winner = Connection::open(&path).expect("open winner");
+        winner.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let tx = Transaction::new_unchecked(&winner, TransactionBehavior::Immediate)
+            .expect("winner takes the write lock");
+
+        let loser_path = path.clone();
+        let loser = thread::spawn(move || {
+            let conn = Connection::open(&loser_path).expect("open loser");
+            conn.busy_timeout(Duration::from_secs(10)).unwrap();
+            apply_step(&conn, &["CREATE TABLE a (x INTEGER);"], 1)
+        });
+
+        // Give the loser time to block on the lock, then finish the step and
+        // release it. (If the loser only starts after the commit, it still
+        // exercises the skip path — the test never becomes timing-flaky.)
+        thread::sleep(Duration::from_millis(200));
+        tx.execute_batch(migrations[0]).unwrap();
+        tx.pragma_update(None, "user_version", 1).unwrap();
+        tx.commit().unwrap();
+
+        loser
+            .join()
+            .expect("loser thread")
+            .expect("loser skips cleanly");
+        let version: i32 = winner
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 1);
