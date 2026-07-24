@@ -4,7 +4,7 @@
 // it and forwards grant requests, reporting an immediate grant back up so the
 // row flips without waiting for the backend's next poll tick.
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Chip, Group } from '../components/ui';
 import * as api from '../lib/api';
@@ -33,6 +33,13 @@ export function SetupView({
   const t = useT();
   const [error, setError] = useState<string | null>(null);
   const allGranted = permissions.accessibility && permissions.inputMonitoring;
+  // The view replaces the tabs (often unmounting the very button that opened
+  // it), so move focus to the heading — otherwise keyboard and screen-reader
+  // users are left focused on nothing.
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
 
   async function request(key: keyof SetupPermissions, call: () => Promise<boolean>) {
     try {
@@ -47,7 +54,9 @@ export function SetupView({
   return (
     <div className="view setup">
       <header className="setup__intro">
-        <h1 className="setup__title">{t('setup.title')}</h1>
+        <h1 className="setup__title" tabIndex={-1} ref={titleRef}>
+          {t('setup.title')}
+        </h1>
         <p className="hint">{updateRegrant ? t('setup.updateRegrant') : t('setup.intro')}</p>
       </header>
 
@@ -113,9 +122,22 @@ function PermissionRow({
       </div>
       <div className="item__trail">
         {granted ? (
-          <Chip tone="ok">{t('setup.granted')}</Chip>
+          // <output> (implicit role "status") announces the flip to "Granted"
+          // when the backend's poll (or the request itself) reports the
+          // permission arriving.
+          <output>
+            <Chip tone="ok">{t('setup.granted')}</Chip>
+          </output>
         ) : (
-          <button type="button" className="btn btn--primary" onClick={onRequest}>
+          <button
+            type="button"
+            className="btn btn--primary"
+            // Both rows share the visible "Grant Access" label; the accessible
+            // name carries the permission so the buttons stay distinguishable
+            // out of context.
+            aria-label={t('setup.grantFor', { name: title })}
+            onClick={onRequest}
+          >
             {t('setup.grant')}
           </button>
         )}

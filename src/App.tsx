@@ -105,13 +105,15 @@ function AppShell() {
     return () => void unlisten.then((fn) => fn());
   }, []);
 
-  // Once everything is granted, retire the reminder banner on its own. The
-  // open checklist is deliberately not auto-closed — it stays to show the ✓s
-  // and let the user leave via its Done button.
+  // Once everything is granted, retire the reminder banner on its own; if a
+  // permission is later revoked (in System Settings, outside the app), bring
+  // it back so the loss is visible even on tabs that carry no permission
+  // banner of their own. The open checklist is deliberately not auto-closed —
+  // it stays to show the ✓s and let the user leave via its Done button.
   useEffect(() => {
-    if (setup === 'dismissed' && permissions.accessibility && permissions.inputMonitoring) {
-      setSetup('done');
-    }
+    const allGranted = permissions.accessibility && permissions.inputMonitoring;
+    if (setup === 'dismissed' && allGranted) setSetup('done');
+    if (setup === 'done' && !allGranted) setSetup('dismissed');
   }, [setup, permissions]);
 
   const onAutoCheckHandled = useCallback(() => setAutoCheckUpdate(false), []);
@@ -121,6 +123,19 @@ function AppShell() {
     (patch: Partial<SetupPermissions>) => setPermissions((p) => ({ ...p, ...patch })),
     [],
   );
+
+  // Hold the shell until the setup pull settles: rendering the tabs first and
+  // swapping them for the checklist a beat later would flicker and yank the
+  // DOM out from under anyone who already started reading or tabbing.
+  if (setup === 'unknown') {
+    return (
+      <div className="app">
+        <main className="app__main">
+          <div className="view">{t('common.loading')}</div>
+        </main>
+      </div>
+    );
+  }
 
   if (setup === 'open') {
     return (

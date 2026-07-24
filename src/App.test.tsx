@@ -57,21 +57,23 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
 }
 
 describe('App setup flow', () => {
-  let permissionsChanged: ((payload: PermissionsChanged) => void) | undefined;
+  // Both the shell and the mounted views subscribe to this event, so collect
+  // every handler and fan the test's synthetic event out to all of them.
+  let permissionHandlers: ((e: { event: string; id: number; payload: unknown }) => void)[] = [];
+  const permissionsChanged = (payload: PermissionsChanged) => {
+    for (const handler of permissionHandlers) {
+      handler({ event: 'tomari:permissions-changed', id: 0, payload });
+    }
+  };
 
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
-    permissionsChanged = undefined;
+    permissionHandlers = [];
     mockListen.mockReset();
     mockListen.mockImplementation((event, handler) => {
       if (event === 'tomari:permissions-changed') {
-        permissionsChanged = (payload) =>
-          (handler as (e: { event: string; id: number; payload: unknown }) => void)({
-            event,
-            id: 0,
-            payload,
-          });
+        permissionHandlers.push(handler);
       }
       return Promise.resolve(() => {});
     });
@@ -129,11 +131,21 @@ describe('App setup flow', () => {
     render(<App />);
     expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
 
-    permissionsChanged?.({ accessibility: true, inputMonitoring: true });
+    permissionsChanged({ accessibility: true, inputMonitoring: true });
 
     await waitFor(() => {
       expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
     });
+  });
+
+  it('brings the reminder banner back when a permission is revoked later', async () => {
+    render(<App />);
+    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
+    expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
+
+    permissionsChanged({ accessibility: true, inputMonitoring: false });
+
+    expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
   });
 
   it('keeps the open checklist up after the last grant so its Done button is seen', async () => {
@@ -144,7 +156,7 @@ describe('App setup flow', () => {
     render(<App />);
     expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
 
-    permissionsChanged?.({ accessibility: true, inputMonitoring: true });
+    permissionsChanged({ accessibility: true, inputMonitoring: true });
 
     expect(await screen.findByText('Done')).toBeInTheDocument();
     expect(screen.getByText('Set up Tomari')).toBeInTheDocument();

@@ -8,10 +8,11 @@ them. This page explains what each one is for and how to grant it.
 While either permission below is missing, the settings window offers a
 one-screen **setup checklist**: each permission as a row with what it is for,
 a **Grant Access** button, and a green **Granted** mark once it is on. On a
-first launch the window opens on this checklist automatically; **Set up
-later** switches to the normal tabs, leaving a thin reminder bar under the
-tab bar until everything is granted. The per-tab permission banners stay, and
-their **Open Setup** button leads back to the checklist.
+first launch the window opens on this checklist automatically; on later
+launches the tabs show as usual with a thin reminder bar under the tab bar
+that reopens it. **Set up later** on the checklist returns to the tabs the
+same way. The per-tab permission banners stay, and their **Open Setup**
+button also leads back to the checklist.
 
 The administrator password for Prevent Sleep is deliberately not on the
 checklist — it is asked for each time rather than granted once (see below).
