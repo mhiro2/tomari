@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Hotkey } from '../lib/types';
+import { SettingsProvider } from '../lib/settings';
+import type { AppSettings, Hotkey } from '../lib/types';
 import { SetupView } from './SetupView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
@@ -20,6 +21,18 @@ const SNAP_LEFT: Hotkey = {
   enabled: true,
 };
 
+const SETTINGS: AppSettings = {
+  launchAtLogin: false,
+  language: 'en',
+  keyboardEnabled: true,
+  windowManagementEnabled: true,
+  externalWindowActionsEnabled: false,
+  commandImeSwitchEnabled: true,
+  showInMenuBar: true,
+  dragToSnapEnabled: false,
+  dragToMoveEnabled: false,
+};
+
 function mockCommands(overrides: Record<string, unknown> = {}) {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd in overrides) {
@@ -27,6 +40,8 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
       return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
     }
     switch (cmd) {
+      case 'get_settings':
+        return Promise.resolve(SETTINGS);
       case 'list_hotkeys':
         return Promise.resolve([SNAP_LEFT]);
       case 'request_accessibility':
@@ -38,16 +53,20 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
   });
 }
 
+// The try-it hint reads the window-management master switch from the shared
+// settings provider.
 function renderView(overrides: Partial<Parameters<typeof SetupView>[0]> = {}) {
   return render(
-    <SetupView
-      permissions={{ accessibility: false, inputMonitoring: false }}
-      updateRegrant={false}
-      onGranted={noop}
-      onDismiss={noop}
-      onDone={noop}
-      {...overrides}
-    />,
+    <SettingsProvider>
+      <SetupView
+        permissions={{ accessibility: false, inputMonitoring: false }}
+        updateRegrant={false}
+        onGranted={noop}
+        onDismiss={noop}
+        onDone={noop}
+        {...overrides}
+      />
+    </SettingsProvider>,
   );
 }
 
@@ -172,6 +191,16 @@ describe('SetupView', () => {
     renderView({ permissions: { accessibility: true, inputMonitoring: true } });
 
     // The all-set line arriving means the async hotkey lookup has settled too.
+    expect(await screen.findByText(/All set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Try it/)).not.toBeInTheDocument();
+  });
+
+  it('drops the try-it hint while window management is switched off', async () => {
+    mockCommands({
+      get_settings: { ...SETTINGS, windowManagementEnabled: false },
+    });
+    renderView({ permissions: { accessibility: true, inputMonitoring: true } });
+
     expect(await screen.findByText(/All set/)).toBeInTheDocument();
     expect(screen.queryByText(/Try it/)).not.toBeInTheDocument();
   });

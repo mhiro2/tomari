@@ -11,6 +11,7 @@ import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { acceleratorChips } from '../lib/format';
 import { useT } from '../lib/i18n';
+import { useSettings } from '../lib/settings';
 
 export interface SetupPermissions {
   accessibility: boolean;
@@ -32,6 +33,7 @@ export function SetupView({
   onDone: () => void;
 }) {
   const t = useT();
+  const { settings } = useSettings();
   const [error, setError] = useState<string | null>(null);
   const allGranted = permissions.accessibility && permissions.inputMonitoring;
   // The view replaces the tabs (often unmounting the very button that opened
@@ -111,7 +113,11 @@ export function SetupView({
       {allGranted && (
         <>
           <p className="hint">{t('setup.allSet')}</p>
-          {tryItChips.length > 0 && <TryItHint chips={tryItChips} />}
+          {/* Only promise a snap that can actually happen: the hint needs a
+              live binding *and* the window-management master switch on. */}
+          {tryItChips.length > 0 && settings?.windowManagementEnabled === true && (
+            <TryItHint chips={tryItChips} />
+          )}
         </>
       )}
 
