@@ -120,7 +120,7 @@ describe('SetupView', () => {
   it('explains the update-caused regrant when flagged', () => {
     renderView({ updateRegrant: true });
 
-    expect(screen.getByText(/The update reset these permissions/)).toBeInTheDocument();
+    expect(screen.getByText(/went missing after the update/)).toBeInTheDocument();
   });
 
   it('surfaces a failed permission request as an error', async () => {

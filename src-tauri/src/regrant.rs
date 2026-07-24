@@ -10,6 +10,13 @@
 //! means the user revoked it by hand, which deliberately does not qualify —
 //! nagging a deliberate choice would be worse than staying quiet.
 //!
+//! This is a heuristic, not proof: a manual revocation followed by an update
+//! before the next launch also matches (the correlation is real, the cause is
+//! not). The prompt's wording stays correlational ("went missing after the
+//! update") for that reason. And the release that *introduces* the snapshot
+//! cannot detect its own update's revocation — there is nothing yet to
+//! compare against — so detection only starts with the following update.
+//!
 //! Everything here is best-effort UX: a snapshot that fails to read or write
 //! is ignored, never surfaced as an error. Once Tomari ships with a stable
 //! Developer ID signature this detection loses its trigger and can be removed.

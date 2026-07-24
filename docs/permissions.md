@@ -70,7 +70,9 @@ inside the app.
 
 Tomari does detect it, though: each run stores which permissions were granted,
 and a launch that finds a previously granted permission missing *and* a changed
-app version opens the settings window on the setup checklist with a note that
-the update caused it. If the version has not changed — you revoked a permission
-yourself — nothing opens automatically; the tray items and tab banners point it
-out as usual.
+app version opens the settings window on the setup checklist, noting that the
+permissions went missing after the update. If the version has not changed — you
+revoked a permission yourself — nothing opens automatically; the tray items and
+tab banners point it out as usual. (Detection needs a stored snapshot to
+compare against, so it starts working from the first update *after* the release
+that introduced it.)

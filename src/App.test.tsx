@@ -106,7 +106,28 @@ describe('App setup flow', () => {
     render(<App />);
 
     expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
-    expect(screen.getByText(/The update reset these permissions/)).toBeInTheDocument();
+    expect(screen.getByText(/went missing after the update/)).toBeInTheDocument();
+  });
+
+  it('stops blaming the update once setup has completed', async () => {
+    mockCommands({
+      setup_status: { ...ALL_GRANTED, updateRegrant: true, accessibility: false },
+    });
+
+    render(<App />);
+    expect(await screen.findByText(/went missing after the update/)).toBeInTheDocument();
+
+    // Re-grant everything and leave via Done, then revoke by hand and reopen:
+    // the checklist must show the generic intro, not the stale update note.
+    permissionsChanged({ accessibility: true, inputMonitoring: true });
+    fireEvent.click(await screen.findByText('Done'));
+    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
+
+    permissionsChanged({ accessibility: false, inputMonitoring: true });
+    fireEvent.click(await screen.findByText('Continue'));
+
+    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
+    expect(screen.queryByText(/went missing after the update/)).not.toBeInTheDocument();
   });
 
   it('shows the tabs plus the reminder banner when permissions are missing on a normal launch', async () => {

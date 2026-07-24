@@ -116,6 +116,13 @@ function AppShell() {
     if (setup === 'done' && !allGranted) setSetup('dismissed');
   }, [setup, permissions]);
 
+  // The update explanation has served its purpose once setup completes; a
+  // checklist reopened after a *later* manual revocation must not still
+  // blame the update.
+  useEffect(() => {
+    if (setup === 'done') setUpdateRegrant(false);
+  }, [setup]);
+
   const onAutoCheckHandled = useCallback(() => setAutoCheckUpdate(false), []);
   const openSetup = useCallback(() => setSetup('open'), []);
 

@@ -108,7 +108,7 @@ const en = {
   'setup.bannerAction': 'Continue',
   'setup.openSetup': 'Open Setup',
   'setup.updateRegrant':
-    'The update reset these permissions — a known limitation of Tomari for now. Please grant them again.',
+    "Tomari's permissions went missing after the update — a known limitation for now. Please grant them again.",
   'setup.adminNote':
     'Prevent Sleep is separate: it asks for your administrator password each time instead of a one-time grant.',
 
@@ -302,7 +302,7 @@ const ja: Record<MessageKey, string> = {
   'setup.bannerAction': '続ける',
   'setup.openSetup': 'セットアップを開く',
   'setup.updateRegrant':
-    'アップデートにより権限の再許可が必要です（現時点の Tomari の既知の制約です）。もう一度許可してください。',
+    'アップデート後に権限が外れてしまったようです（現時点の Tomari の既知の制約です）。もう一度許可してください。',
   'setup.adminNote':
     'スリープ防止は権限とは別で、使うたびに管理者パスワードを確認します。ここでの許可は不要です。',
 
