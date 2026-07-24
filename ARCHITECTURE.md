@@ -224,8 +224,12 @@ skips arming whenever a gesture chord is held so the two never fight.
   launch resumes from it (covered by tests, including frozen per-version
   fixtures). Shipped entries are never edited; schema changes append a step.
 - Tables: `hotkeys` / `modifier_rules` / `settings` (a single `id = 1` row
-  holding the `AppSettings` JSON). Domain values are stored as JSON strings in
-  their columns, keeping the schema resilient to domain-type evolution.
+  holding the `AppSettings` JSON) / `meta` (app-internal key/value records —
+  currently the permission snapshot `regrant.rs` compares at launch to detect
+  update-caused revocations — kept out of `settings` so they never leak into
+  the settings object the frontend round-trips). Domain values are stored as
+  JSON strings in their columns, keeping the schema resilient to domain-type
+  evolution.
 - First-run seeding keys off the _absence of the settings row_
   (`seed_first_run_defaults` in `main.rs`). Keying off empty tables would
   resurrect defaults whenever a user deliberately clears everything. A launch

@@ -67,3 +67,10 @@ Accessibility and Input Monitoring after each update, the same way you did on
 first install. This is a known limitation until proper Developer ID signing
 and notarization are in place; it is not something you can work around from
 inside the app.
+
+Tomari does detect it, though: each run stores which permissions were granted,
+and a launch that finds a previously granted permission missing *and* a changed
+app version opens the settings window on the setup checklist with a note that
+the update caused it. If the version has not changed — you revoked a permission
+yourself — nothing opens automatically; the tray items and tab banners point it
+out as usual.

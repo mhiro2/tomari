@@ -15,6 +15,7 @@ use crate::domain::keyboard::{Hotkey, ModifierRule};
 use crate::error::{Error, Result};
 
 mod keyboard;
+mod meta;
 mod settings;
 
 /// A thread-safe handle to the on-disk SQLite database.
@@ -203,7 +204,7 @@ fn collect_valid_rows<T>(
 /// batch (and never edit an existing entry — released builds have already
 /// applied those); the schema version a binary writes is simply the list's
 /// length, so it needs no separate bump.
-const MIGRATIONS: &[&str] = &[MIGRATION_V1];
+const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2];
 
 /// `0 → 1`: the initial schema. `hyper` defaults to `0` so callers can omit it
 /// and get the "not a hyper key" behaviour. `IF NOT EXISTS` tolerates a
@@ -232,6 +233,16 @@ CREATE TABLE IF NOT EXISTS modifier_rules (
 CREATE TABLE IF NOT EXISTS settings (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
     data TEXT    NOT NULL
+);
+"#;
+
+/// `1 → 2`: the `meta` key/value table, for small app-internal records (the
+/// permission snapshot) that must stay out of the `settings` row the frontend
+/// round-trips.
+const MIGRATION_V2: &str = r#"
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 "#;
 
@@ -276,6 +287,39 @@ CREATE TABLE settings (
 );
 
 PRAGMA user_version = 1;
+"#,
+        // v2: v1 plus the `meta` key/value table.
+        r#"
+CREATE TABLE hotkeys (
+    id          TEXT    PRIMARY KEY,
+    label       TEXT    NOT NULL,
+    accelerator TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    enabled     INTEGER NOT NULL
+);
+
+CREATE TABLE modifier_rules (
+    id        TEXT    PRIMARY KEY,
+    label     TEXT    NOT NULL,
+    modifier  TEXT    NOT NULL,
+    side      TEXT    NOT NULL,
+    remap_to  TEXT,
+    tap       TEXT    NOT NULL,
+    enabled   INTEGER NOT NULL,
+    hyper     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT    NOT NULL
+);
+
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+PRAGMA user_version = 2;
 "#,
     ];
 
@@ -452,6 +496,7 @@ PRAGMA user_version = 1;
             assert!(db.list_hotkeys().expect("hotkeys").is_empty());
             assert!(db.list_modifier_rules().expect("rules").is_empty());
             assert!(!db.settings_exist().expect("settings probe"));
+            assert_eq!(db.get_meta("probe").expect("meta probe"), None);
         }
     }
 

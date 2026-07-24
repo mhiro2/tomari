@@ -632,8 +632,7 @@ pub fn undo_window(state: State<'_, AppState>) -> CmdResult<()> {
 pub struct SetupStatus {
     pub first_run: bool,
     /// Previously granted permissions are believed lost to an app update
-    /// (ad-hoc signing revokes them on every update). Always `false` until
-    /// the permission-snapshot detection is wired up.
+    /// (ad-hoc signing revokes them on every update). See [`crate::regrant`].
     pub update_regrant: bool,
     pub accessibility: bool,
     pub input_monitoring: bool,
@@ -643,7 +642,7 @@ pub struct SetupStatus {
 pub fn setup_status(state: State<'_, AppState>) -> SetupStatus {
     SetupStatus {
         first_run: state.first_run,
-        update_regrant: false,
+        update_regrant: state.update_regrant(),
         accessibility: state.windows.permission_granted(),
         input_monitoring: input_monitoring_status(),
     }

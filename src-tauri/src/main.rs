@@ -21,6 +21,7 @@ mod keysend;
 mod locks;
 #[cfg(target_os = "macos")]
 mod overlay;
+mod regrant;
 mod shortcuts;
 mod state;
 #[cfg(target_os = "macos")]
@@ -195,6 +196,27 @@ fn main() {
             // override a previous run left behind after an unclean exit.
             keepawake::reconcile_on_launch(&handle);
 
+            // Compare the current permission state against the snapshot the
+            // previous run stored: a grant that vanished together with a
+            // version change means an update revoked it (ad-hoc signing does
+            // this on every update), which the setup checklist should explain
+            // proactively rather than letting the user discover taps that
+            // silently stopped working. Same-version losses are the user's own
+            // revocation and stay quiet. All of it is best-effort UX — a
+            // snapshot that fails to read or write never affects startup.
+            let initial = tray::permission_state(&handle);
+            let app_version = app.package_info().version.to_string();
+            {
+                let prev = regrant::load_snapshot(&state.db);
+                let update_regrant =
+                    regrant::is_update_regrant(prev.as_ref(), initial, &app_version);
+                state.set_update_regrant(update_regrant);
+                regrant::store_snapshot(&state.db, initial, &app_version);
+                if update_regrant {
+                    let _ = actions::show_panel(&handle);
+                }
+            }
+
             // Permissions are granted in System Settings, outside the app, so
             // poll their state and react on a transition (the native left-click
             // menu has no "about to open" hook to do this lazily). Only the
@@ -205,13 +227,12 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 let poll_handle = handle.clone();
-                // Sample the state setup already observed (accessibility_status
-                // and the tray were built above) so the first tick compares
-                // against reality instead of `None` — otherwise a permission
-                // granted within the first poll interval would read as "always
-                // was granted" rather than a transition, and the dead taps would
-                // never be revived.
-                let initial = tray::permission_state(&poll_handle);
+                // `initial` was sampled above (the tray was built from it too),
+                // so the first tick compares against reality instead of `None` —
+                // otherwise a permission granted within the first poll interval
+                // would read as "always was granted" rather than a transition,
+                // and the dead taps would never be revived.
+                let poll_version = app_version.clone();
                 std::thread::spawn(move || {
                     // Poll responsively while a permission is still missing, then
                     // ease off to a slow heartbeat once both are granted and
@@ -238,6 +259,7 @@ fn main() {
                             matches!(last, Some((_, was_im)) if !was_im) && current.1;
                         last = Some(current);
                         let refresh_handle = poll_handle.clone();
+                        let refresh_version = poll_version.clone();
                         let _ = poll_handle.run_on_main_thread(move || {
                             if input_monitoring_granted {
                                 eventtap::restart(&refresh_handle);
@@ -252,6 +274,12 @@ fn main() {
                                     input_monitoring: current.1,
                                 },
                             );
+                            // Keep the stored snapshot tracking every observed
+                            // transition, so the next launch compares against
+                            // the state this run actually ended with.
+                            if let Some(state) = refresh_handle.try_state::<AppState>() {
+                                regrant::store_snapshot(&state.db, current, &refresh_version);
+                            }
                         });
                     }
                 });

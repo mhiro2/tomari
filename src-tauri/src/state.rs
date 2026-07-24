@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tauri_plugin_global_shortcut::Shortcut;
@@ -71,6 +72,11 @@ pub struct AppState {
     /// settings window once; every uncertain detection lands on `false` so an
     /// existing user is never surprised by a window.
     pub first_run: bool,
+    /// Whether this launch looks like an app update silently revoked
+    /// previously granted permissions (see [`crate::regrant`]). Computed once
+    /// in `setup` — it needs the initial permission read — and `false` until
+    /// then, the safe side for the frontend's `setup_status` pull.
+    update_regrant: AtomicBool,
     /// Monotonic origin for the millisecond timestamps fed to the engines.
     epoch: Instant,
 }
@@ -95,8 +101,19 @@ impl AppState {
             config_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
             first_run,
+            update_regrant: AtomicBool::new(false),
             epoch: Instant::now(),
         }
+    }
+
+    /// Record the update-regrant detection result (see [`crate::regrant`]).
+    pub fn set_update_regrant(&self, value: bool) {
+        self.update_regrant.store(value, Ordering::Relaxed);
+    }
+
+    /// Whether this launch detected an update-caused permission revocation.
+    pub fn update_regrant(&self) -> bool {
+        self.update_regrant.load(Ordering::Relaxed)
     }
 
     /// Acquire the config-mutation lock for the duration of a save or delete.

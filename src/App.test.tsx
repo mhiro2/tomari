@@ -98,6 +98,17 @@ describe('App setup flow', () => {
     expect(screen.queryByText('Keyboard customization')).not.toBeInTheDocument();
   });
 
+  it('opens the checklist with the update explanation when an update revoked permissions', async () => {
+    mockCommands({
+      setup_status: { ...ALL_GRANTED, updateRegrant: true, accessibility: false },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
+    expect(screen.getByText(/The update reset these permissions/)).toBeInTheDocument();
+  });
+
   it('shows the tabs plus the reminder banner when permissions are missing on a normal launch', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, inputMonitoring: false },
