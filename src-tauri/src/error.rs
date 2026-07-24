@@ -11,6 +11,13 @@ use serde::Serialize;
 /// A stable classification of a command failure. Only the frequent, actionable
 /// cases get their own variant; everything else is [`ErrorCode::Other`], whose
 /// `message` is shown as-is.
+///
+/// Adding a variant is a three-sided change: mirror it in the frontend's
+/// `CmdErrorCode` union (`src/lib/types.ts`) and give it en/ja translations
+/// (`src/lib/errors.ts` + `src/lib/i18n.tsx`) — otherwise the Japanese UI
+/// shows the raw English `message`. The wire-string test below and the
+/// frontend's compile-time exhaustiveness check both fail until the mirror
+/// is complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
@@ -92,5 +99,54 @@ impl From<tomari_window::Error> for CmdError {
             _ => ErrorCode::Other,
         };
         Self::new(code, e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire string each code serializes to — the contract the frontend's
+    /// `CmdErrorCode` union mirrors. An exhaustive match, so a new variant
+    /// fails to compile here until it is added (and thereby to the mirror
+    /// checklist in the enum's doc comment).
+    fn wire_string(code: ErrorCode) -> &'static str {
+        match code {
+            ErrorCode::PermissionRequired => "permissionRequired",
+            ErrorCode::NoFocusedWindow => "noFocusedWindow",
+            ErrorCode::ShortcutConflict => "shortcutConflict",
+            ErrorCode::Other => "other",
+        }
+    }
+
+    /// Yields every variant as a chain starting from `None`. Unlike a plain
+    /// array (which the compiler never re-checks), the match is exhaustive
+    /// over the *previous* variant, so adding a variant fails to compile
+    /// until it is linked into the chain — which is exactly what feeds it to
+    /// the serialization assertion below.
+    fn next_code(after: Option<ErrorCode>) -> Option<ErrorCode> {
+        match after {
+            None => Some(ErrorCode::PermissionRequired),
+            Some(ErrorCode::PermissionRequired) => Some(ErrorCode::NoFocusedWindow),
+            Some(ErrorCode::NoFocusedWindow) => Some(ErrorCode::ShortcutConflict),
+            Some(ErrorCode::ShortcutConflict) => Some(ErrorCode::Other),
+            Some(ErrorCode::Other) => None,
+        }
+    }
+
+    #[test]
+    fn error_codes_serialize_to_the_frontend_contract() {
+        let mut visited = 0;
+        let mut code = next_code(None);
+        while let Some(current) = code {
+            let json = serde_json::to_string(&current).unwrap();
+            assert_eq!(json, format!("\"{}\"", wire_string(current)));
+            visited += 1;
+            code = next_code(Some(current));
+        }
+        // The exact count catches a chain that skips a variant (a lazily
+        // added `=> None` arm would otherwise hide the new variant from the
+        // loop above).
+        assert_eq!(visited, 4, "the chain must visit every variant once");
     }
 }

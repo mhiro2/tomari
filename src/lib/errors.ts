@@ -9,9 +9,23 @@ export function errorText(e: unknown): string {
 }
 
 // Command-error codes the UI has a localized message for; anything else falls
-// back to the (English) `message` the backend attached.
-const LOCALIZED_CODES = ['permissionRequired', 'noFocusedWindow', 'shortcutConflict'] as const;
+// back to the (English) `message` the backend attached. Exported so the test
+// suite can drive its per-code assertions from the same list.
+export const LOCALIZED_CODES = [
+  'permissionRequired',
+  'noFocusedWindow',
+  'shortcutConflict',
+] as const;
 type LocalizedCode = (typeof LOCALIZED_CODES)[number];
+
+// Compile-time exhaustiveness: a code added to `CmdErrorCode` without a
+// translation here (and its `error.*` strings in i18n.tsx) makes the Exclude
+// non-never and this alias fail to type-check. 'other' is the one deliberate
+// exception — its `message` is shown verbatim. The backend side of the
+// contract is pinned by error.rs's wire-string test. (Exported only so the
+// checker does not flag the assertion itself as unused.)
+type AssertNever<T extends never> = T;
+export type EveryCodeIsLocalized = AssertNever<Exclude<CmdErrorCode, LocalizedCode | 'other'>>;
 
 function isLocalized(code: CmdErrorCode): code is LocalizedCode {
   return (LOCALIZED_CODES as readonly string[]).includes(code);

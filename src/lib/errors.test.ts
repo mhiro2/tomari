@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { cmdErrorMessage, errorText, formatCmdError } from './errors';
-import { translate } from './i18n';
+import { LOCALIZED_CODES, cmdErrorMessage, errorText, formatCmdError } from './errors';
+import { DICTS, translate } from './i18n';
 import type { CmdError } from './types';
 
 const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
@@ -13,13 +13,15 @@ describe('formatCmdError', () => {
     expect(formatCmdError(err, t)).toBe(t('error.permissionRequired'));
   });
 
-  it.each([
-    ['permissionRequired', 'error.permissionRequired'],
-    ['noFocusedWindow', 'error.noFocusedWindow'],
-    ['shortcutConflict', 'error.shortcutConflict'],
-  ] as const)('localizes code %s', (code, key) => {
+  // Driven by the translation table itself (the keysend coverage-test idea):
+  // a code added to LOCALIZED_CODES is automatically checked in every
+  // language, so a missing or empty translation cannot slip through.
+  it.each(LOCALIZED_CODES)('localizes code %s in every language', (code) => {
     const err: CmdError = { code, message: 'ignored' };
-    expect(formatCmdError(err, t)).toBe(t(key));
+    expect(formatCmdError(err, t)).toBe(t(`error.${code}`));
+    for (const lang of ['en', 'ja'] as const) {
+      expect(DICTS[lang][`error.${code}`]).toBeTruthy();
+    }
   });
 
   it('falls back to the message for an unknown code', () => {
