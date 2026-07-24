@@ -24,6 +24,7 @@ struct Text {
     maximize: &'static str,
     center: &'static str,
     snap_window: &'static str,
+    undo: &'static str,
     keep_awake: &'static str,
     open_settings: &'static str,
     check_updates: &'static str,
@@ -38,6 +39,7 @@ const TEXT_EN: Text = Text {
     maximize: "Maximize",
     center: "Center",
     snap_window: "Snap Window",
+    undo: "Undo Move",
     keep_awake: "Prevent Sleep",
     open_settings: "Settings…",
     check_updates: "Check for Updates",
@@ -52,6 +54,7 @@ const TEXT_JA: Text = Text {
     maximize: "最大化",
     center: "中央",
     snap_window: "ウィンドウをスナップ",
+    undo: "元に戻す",
     keep_awake: "スリープ防止",
     open_settings: "設定…",
     check_updates: "アップデートを確認",
@@ -138,8 +141,14 @@ fn build_menu(
     let snap_center = MenuItemBuilder::with_id("snap:center", text.center)
         .enabled(ax_granted)
         .build(app)?;
+    // Undo sits with the snaps: the natural reach right after a missed snap.
+    let undo = MenuItemBuilder::with_id("undo", text.undo)
+        .enabled(ax_granted)
+        .build(app)?;
     let snap = SubmenuBuilder::new(app, text.snap_window)
         .items(&[&snap_left, &snap_right, &snap_max, &snap_center])
+        .separator()
+        .item(&undo)
         .build()?;
 
     // A checkmark reflects the live keep-awake state; clicking toggles it.
@@ -239,6 +248,12 @@ fn on_menu(app: &AppHandle, id: &str) {
             // `toggle` rebuilds the menu (so the checkmark reflects the new
             // state) and emits the change event for the panel.
             crate::keepawake::toggle(app);
+            return;
+        }
+        "undo" => {
+            if let Some(state) = app.try_state::<AppState>() {
+                let _ = actions::dispatch(&AppAction::UndoWindow, app, state.inner());
+            }
             return;
         }
         "quit" => {
