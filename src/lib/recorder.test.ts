@@ -31,9 +31,9 @@ describe('captureAccelerator', () => {
 
   it('allows function keys without any modifier', () => {
     expect(captureAccelerator(event('F5'))).toEqual({ status: 'captured', accelerator: 'F5' });
-    expect(captureAccelerator(event('F24', { shiftKey: true }))).toEqual({
+    expect(captureAccelerator(event('F20', { shiftKey: true }))).toEqual({
       status: 'captured',
-      accelerator: 'Shift+F24',
+      accelerator: 'Shift+F20',
     });
   });
 
@@ -52,6 +52,9 @@ describe('captureAccelerator', () => {
   });
 
   it('reports physical keys with no backend mapping as unsupported', () => {
+    // macOS has no virtual keycode past F20, so F21+ cannot be registered
+    // or synthesized.
+    expect(captureAccelerator(event('F21'))).toEqual({ status: 'unsupported' });
     expect(captureAccelerator(event('F25'))).toEqual({ status: 'unsupported' });
     expect(captureAccelerator(event('IntlYen', { metaKey: true }))).toEqual({
       status: 'unsupported',

@@ -63,11 +63,12 @@ pub fn sanitize_hotkey(hotkey: Hotkey) -> Result<Hotkey, CmdError> {
     })
 }
 
-/// Whether a canonical key token is a function key (`F1`..=`F24`).
+/// Whether a canonical key token is a function key (`F1`..=`F20`, the range
+/// the accelerator parser accepts).
 fn is_function_key(key: &str) -> bool {
     key.strip_prefix('F')
         .and_then(|n| n.parse::<u32>().ok())
-        .is_some_and(|n| (1..=24).contains(&n))
+        .is_some_and(|n| (1..=20).contains(&n))
 }
 
 /// Validate and canonicalize a modifier rule before it is stored. Like
@@ -123,8 +124,9 @@ pub fn sanitize_modifier_rule(
 
     // A SendKeystroke tap must carry an accelerator that both parses and — on
     // macOS — maps to a synthesizable keycode, or the rule would save yet fail
-    // every time the tap fired (macOS defines no keycodes past F20, which the
-    // parser still accepts).
+    // every time the tap fired. The parser's key set is kept in lockstep with
+    // `keysend::keycode_for` (see its coverage test), so the keycode check is
+    // a guard against future drift between the two rather than a known gap.
     if let AppAction::SendKeystroke(accel) = &rule.tap {
         let parsed = accelerator::parse(accel)
             .map_err(|e| CmdError::other(format!("invalid tap keystroke: {e}")))?;
@@ -353,12 +355,11 @@ mod tests {
         assert!(sanitize_modifier_rule(good, &[]).is_ok());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn rejects_a_tap_keystroke_with_no_macos_keycode() {
-        // F21–F24 parse (the grammar accepts F1–F24) but macOS defines no
-        // keycode past F20, so they cannot be synthesized — a tap that saved
-        // would fail at send time.
+    fn rejects_a_tap_keystroke_macos_cannot_send() {
+        // macOS defines no virtual keycode past F20, so F21–F24 cannot be
+        // synthesized. The accelerator parser rejects them outright (on every
+        // platform), so such a tap can never be saved.
         let mut rule = mod_rule("mr-1", ModifierKey::Control, KeySide::Either);
         rule.tap = AppAction::SendKeystroke("F21".into());
         assert!(sanitize_modifier_rule(rule, &[]).is_err());

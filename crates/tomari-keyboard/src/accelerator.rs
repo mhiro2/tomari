@@ -57,10 +57,14 @@ fn modifier_of(token: &str) -> Option<&'static str> {
 fn normalize_key(token: &str) -> Option<String> {
     let lower = token.to_ascii_lowercase();
 
-    // Function keys F1..F24.
+    // Function keys F1..F20. macOS defines no virtual keycode past F20, so
+    // F21–F24 can be neither registered as a global hotkey (global-hotkey's
+    // Carbon backend has no scancode for them) nor synthesized as a keystroke
+    // (`keysend::keycode_for`); accepting them here would let an accelerator
+    // validate and save yet fail at registration or send time.
     if let Some(num) = lower.strip_prefix('f')
         && let Ok(n) = num.parse::<u32>()
-        && (1..=24).contains(&n)
+        && (1..=20).contains(&n)
     {
         return Some(format!("F{n}"));
     }
@@ -183,6 +187,7 @@ mod tests {
     #[test]
     fn function_keys_and_named_keys() {
         assert_eq!(normalize("F5").unwrap(), "F5");
+        assert_eq!(normalize("F20").unwrap(), "F20");
         assert_eq!(normalize("cmd+enter").unwrap(), "Cmd+Enter");
         assert_eq!(normalize("ctrl+alt+escape").unwrap(), "Ctrl+Alt+Escape");
     }
@@ -205,6 +210,10 @@ mod tests {
         assert!(!is_valid("Cmd+Shift")); // no key
         assert!(!is_valid("Cmd+A+B")); // two keys
         assert!(!is_valid("Cmd+Frobnicate"));
+        // macOS has no virtual keycode past F20, so F21–F24 (which some
+        // keyboards emit) are rejected along with out-of-range numbers.
+        assert!(!is_valid("F21"));
+        assert!(!is_valid("F24"));
         assert!(!is_valid("F25"));
     }
 

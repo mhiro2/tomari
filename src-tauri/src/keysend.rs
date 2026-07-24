@@ -103,8 +103,8 @@ pub(crate) fn keycode_for(key: &str) -> Option<u16> {
         "F10" => 0x6D,
         "F11" => 0x67,
         "F12" => 0x6F,
-        // F13–F20. macOS defines no virtual keycodes past F20, so F21–F24 (which
-        // the parser still accepts) have no mapping and remain unsendable.
+        // F13–F20. macOS defines no virtual keycodes past F20, which is why
+        // the accelerator parser also stops there.
         "F13" => 0x69,
         "F14" => 0x6B,
         "F15" => 0x71,
@@ -174,12 +174,27 @@ mod tests {
     use tomari_keyboard::accelerator;
 
     /// Every key the accelerator parser can produce — and that Tomari can store
-    /// in a `SendKeystroke` — must resolve to a keycode here, or the action would
-    /// parse and save yet fail at send time. macOS defines virtual keycodes only
-    /// through F20, so F21–F24 are the sole accepted gap.
+    /// in a `SendKeystroke` — must resolve to a keycode here, or the action
+    /// would parse and save yet fail at send time. The parser caps function
+    /// keys at F20 precisely because macOS defines no virtual keycode past it,
+    /// so there is no accepted gap: coverage must be total.
     #[test]
-    fn keysend_covers_parser_punctuation_and_function_keys() {
-        for key in [
+    fn keysend_covers_every_parser_accepted_key() {
+        let named = [
+            "Escape",
+            "Enter",
+            "Tab",
+            "Space",
+            "Delete",
+            "Backspace",
+            "Left",
+            "Right",
+            "Down",
+            "Up",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
             "Plus",
             "Minus",
             "Equal",
@@ -192,16 +207,16 @@ mod tests {
             "BracketRight",
             "Backslash",
             "Backquote",
-            "F13",
-            "F14",
-            "F15",
-            "F16",
-            "F17",
-            "F18",
-            "F19",
-            "F20",
-        ] {
-            let parsed = accelerator::parse(key).unwrap();
+        ];
+        let function_keys = (1..=20).map(|n| format!("F{n}"));
+        let alphanumerics = ('A'..='Z').chain('0'..='9').map(String::from);
+        for key in named
+            .into_iter()
+            .map(String::from)
+            .chain(function_keys)
+            .chain(alphanumerics)
+        {
+            let parsed = accelerator::parse(&key).unwrap();
             assert!(
                 key_to_event(&parsed.key).is_some(),
                 "no keycode for parser-accepted key `{key}`"

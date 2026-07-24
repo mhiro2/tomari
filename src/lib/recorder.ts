@@ -75,7 +75,9 @@ const MODIFIER_CODES = new Set([
 function keyToken(code: string): string | null {
   if (/^Key[A-Z]$/u.test(code)) return code.slice(3);
   if (/^Digit[0-9]$/u.test(code)) return code.slice(5);
-  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/u.test(code)) return code;
+  // F1–F20 only: macOS has no virtual keycode past F20, so the backend can
+  // neither register nor synthesize F21–F24 (its parser rejects them too).
+  if (/^F(?:[1-9]|1[0-9]|20)$/u.test(code)) return code;
   return CODE_KEYS[code] ?? null;
 }
 
