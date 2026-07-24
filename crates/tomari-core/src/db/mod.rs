@@ -17,10 +17,6 @@ use crate::error::{Error, Result};
 mod keyboard;
 mod settings;
 
-/// The current schema version. Bump this and add a branch in [`migrate`] when
-/// the schema changes.
-const SCHEMA_VERSION: i32 = 1;
-
 /// A thread-safe handle to the on-disk SQLite database.
 pub struct Database {
     conn: Mutex<Connection>,
@@ -109,35 +105,40 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.with_conn(|conn| {
-            let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > SCHEMA_VERSION {
-                // The database was written by a newer version of the app and
-                // uses a schema this binary does not understand. Opening it
-                // anyway risks silent data loss or corruption, so refuse
-                // outright rather than proceeding as if `version ==
-                // SCHEMA_VERSION`.
-                return Err(Error::Migration(format!(
-                    "database schema version {version} is newer than this app supports \
-                     (expected at most {SCHEMA_VERSION}); please update the app"
-                )));
-            }
-            if version == SCHEMA_VERSION {
-                return Ok(());
-            }
-
-            // Create the schema and stamp the version in one transaction so a
-            // failure (e.g. a crash mid-setup) rolls back cleanly instead of
-            // leaving half-created tables that break the next launch. `PRAGMA
-            // user_version` is part of the transaction and reverts on rollback.
-            let tx = conn.unchecked_transaction()?;
-            tx.execute_batch(SCHEMA)
-                .map_err(|e| Error::Migration(e.to_string()))?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            tx.commit()?;
-            Ok(())
-        })
+        self.with_conn(|conn| apply_migrations(conn, MIGRATIONS))
     }
+}
+
+/// Bring a database up to date by applying, in order, every migration its
+/// stored `user_version` has not seen yet.
+///
+/// Each step runs in its own transaction that also stamps the version it
+/// reached, so a failure rolls that step back entirely (`PRAGMA user_version`
+/// is transactional and reverts too) and a crash between steps leaves a
+/// consistent intermediate version that the next launch resumes from. A
+/// database stamped *ahead* of `migrations` was written by a newer app and is
+/// refused outright: pretending it matches the current schema risks silent
+/// data loss.
+///
+/// Takes the migration list as a parameter so tests can drive it with
+/// synthetic histories; production always passes [`MIGRATIONS`].
+fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
+    let latest = migrations.len() as i32;
+    let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > latest {
+        return Err(Error::Migration(format!(
+            "database schema version {version} is newer than this app supports \
+             (expected at most {latest}); please update the app"
+        )));
+    }
+    for next in (version + 1)..=latest {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(migrations[(next - 1) as usize])
+            .map_err(|e| Error::Migration(format!("migrating to schema version {next}: {e}")))?;
+        tx.pragma_update(None, "user_version", next)?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 /// Collect mapped rows, skipping any row whose stored JSON no longer
@@ -161,9 +162,18 @@ fn collect_valid_rows<T>(
     Ok(out)
 }
 
-/// The full database schema. `hyper` defaults to `0` so callers can omit it and
-/// get the "not a hyper key" behaviour.
-const SCHEMA: &str = r#"
+/// Ordered schema migrations: `MIGRATIONS[n]` upgrades a database at
+/// `user_version == n` to `n + 1`. To change the schema, append a new SQL
+/// batch (and never edit an existing entry — released builds have already
+/// applied those); the schema version a binary writes is simply the list's
+/// length, so it needs no separate bump.
+const MIGRATIONS: &[&str] = &[MIGRATION_V1];
+
+/// `0 → 1`: the initial schema. `hyper` defaults to `0` so callers can omit it
+/// and get the "not a hyper key" behaviour. `IF NOT EXISTS` tolerates a
+/// database created by a pre-versioning build that has the tables but still
+/// reads `user_version == 0`; later migrations should use plain DDL.
+const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS hotkeys (
     id          TEXT    PRIMARY KEY,
     label       TEXT    NOT NULL,
@@ -193,6 +203,9 @@ CREATE TABLE IF NOT EXISTS settings (
 mod tests {
     use super::*;
 
+    /// The version a fully migrated database reads.
+    const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
+
     #[test]
     fn opens_and_migrates_in_memory() {
         let db = Database::open_in_memory().expect("open");
@@ -202,7 +215,7 @@ mod tests {
 
     #[test]
     fn fresh_database_has_the_full_schema() {
-        // The consolidated migration must create every table along with the
+        // The full migration chain must create every table along with the
         // `hyper` column. Each list query touches those columns, so a dropped
         // column or table would surface here.
         let db = Database::open_in_memory().expect("open");
@@ -225,6 +238,83 @@ mod tests {
 
         let err = db.migrate().expect_err("newer schema must be rejected");
         assert!(matches!(err, Error::Migration(_)));
+    }
+
+    #[test]
+    fn applies_pending_migrations_stepwise_and_resumes() {
+        // A database part-way through a synthetic migration history picks up
+        // exactly the steps it has not seen, stamping the version as it goes.
+        let migrations: &[&str] = &["CREATE TABLE a (x INTEGER);", "CREATE TABLE b (y INTEGER);"];
+        let conn = Connection::open_in_memory().expect("open");
+
+        apply_migrations(&conn, &migrations[..1]).expect("first step");
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+
+        apply_migrations(&conn, migrations).expect("remaining steps");
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // Both steps' tables exist; re-running is a no-op.
+        conn.execute("INSERT INTO a (x) VALUES (1)", []).unwrap();
+        conn.execute("INSERT INTO b (y) VALUES (1)", []).unwrap();
+        apply_migrations(&conn, migrations).expect("idempotent");
+    }
+
+    #[test]
+    fn a_failing_migration_step_rolls_back_and_keeps_the_version_reached() {
+        // A step that fails part-way through must leave no trace of itself —
+        // neither its tables nor its version stamp — while the steps before it
+        // stay applied, so the next launch resumes from the failure point.
+        let migrations: &[&str] = &[
+            "CREATE TABLE a (x INTEGER);",
+            "CREATE TABLE b (y INTEGER); THIS IS NOT SQL;",
+        ];
+        let conn = Connection::open_in_memory().expect("open");
+
+        let err = apply_migrations(&conn, migrations).expect_err("second step must fail");
+        assert!(matches!(err, Error::Migration(_)));
+
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "only the successful step is stamped");
+        conn.execute("INSERT INTO a (x) VALUES (1)", [])
+            .expect("step 1's table survives");
+        assert!(
+            conn.execute("INSERT INTO b (y) VALUES (1)", []).is_err(),
+            "the failed step's table was rolled back"
+        );
+    }
+
+    #[test]
+    fn upgrades_a_database_from_every_past_schema_version() {
+        // For each version a released build may have left on disk, build a
+        // database frozen at that version, reopen it through the normal path
+        // and verify it reaches the latest schema with every table usable.
+        // New migrations extend this loop automatically.
+        for stop_at in 0..MIGRATIONS.len() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("tomari.sqlite3");
+
+            let conn = Connection::open(&path).expect("open raw");
+            apply_migrations(&conn, &MIGRATIONS[..stop_at]).expect("build fixture");
+            drop(conn);
+
+            let db = Database::open(&path).expect("upgrade to latest");
+            let version = db
+                .with_conn(|conn| {
+                    Ok(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?)
+                })
+                .unwrap();
+            assert_eq!(version, SCHEMA_VERSION, "from version {stop_at}");
+            assert!(db.list_hotkeys().expect("hotkeys").is_empty());
+            assert!(db.list_modifier_rules().expect("rules").is_empty());
+            assert!(!db.settings_exist().expect("settings probe"));
+        }
     }
 
     #[test]
