@@ -195,6 +195,7 @@ mod tests {
             ModifierEngine::new(vec![]),
             Box::new(windows),
             settings,
+            false,
         )
     }
 

@@ -256,6 +256,17 @@ fn main() {
                 });
             }
 
+            // A true first run (the database was just seeded) auto-opens the
+            // settings window once: launched as an Accessory there is no
+            // window, no Dock icon, and every headline feature still waits on
+            // permissions — without this, "nothing happened" is the whole
+            // first impression. Later launches stay quiet as before. Safe
+            // even before the WebView has finished loading; this only shows
+            // the window.
+            if state.first_run {
+                let _ = actions::show_panel(&handle);
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -377,50 +388,7 @@ fn init_logging(paths: Option<&AppPaths>) {
 /// unrecoverable shows a native alert once and exits instead.
 fn build_state(paths: &AppPaths) -> AppState {
     let db = open_database(paths);
-
-    // Seed defaults only on the very first run, detected by the absence of the
-    // settings row (plus an otherwise-empty database, checked below). The
-    // settings row — not empty tables — is the primary marker so that a user who
-    // deliberately clears all of their hotkeys or rules does not get them back.
-    match db.settings_exist() {
-        // Already initialized: leave the user's data alone.
-        Ok(true) => {}
-        // No settings row — a first run *if* the database is otherwise empty.
-        // Guard against seeding over an inconsistent database that has hotkey or
-        // rule rows but no settings row (an older build could write those before
-        // a failed settings write): `seed_defaults` upserts by primary key, so
-        // seeding would overwrite any user row whose id matches a default. Only
-        // seed a truly pristine database; on a raw-count read failure, treat the
-        // database as non-empty and skip, never risking a clobber.
-        Ok(false) => {
-            let has_rows =
-                db.count_hotkeys().unwrap_or(1) > 0 || db.count_modifier_rules().unwrap_or(1) > 0;
-            if has_rows {
-                tracing::warn!(
-                    "settings row missing but hotkeys or rules exist; skipping first-run seed to avoid overwriting existing data"
-                );
-            } else if let Err(e) = db.seed_defaults(
-                &defaults::default_hotkeys(),
-                &defaults::default_modifier_rules(),
-                &AppSettings::default(),
-            ) {
-                tracing::error!(error = %e, "could not seed first-run defaults");
-                alert(
-                    "Tomari could not save its initial settings. It is running with \
-                     built-in defaults for now; they will be stored on your next change.",
-                    false,
-                );
-            }
-        }
-        // A read failure is *not* a first run: the settings row may well exist
-        // but be momentarily unreadable (a lock, a transient SQLite error).
-        // Seeding now would overwrite a real user's configuration, so touch
-        // nothing on disk and run this session on the fallbacks the reads below
-        // already provide (each surfaces its own alert if it, too, fails).
-        Err(e) => {
-            tracing::error!(error = %e, "could not determine first-run state; leaving the database untouched");
-        }
-    }
+    let first_run = seed_first_run_defaults(&db);
 
     // A read failure here is a row that opened fine but no longer decodes (a
     // corrupt JSON blob, or a value a newer build wrote) — distinct from the
@@ -465,7 +433,65 @@ fn build_state(paths: &AppPaths) -> AppState {
     }
     let engine = ModifierEngine::new(rules);
 
-    AppState::new(db, engine, make_window_manager(), settings)
+    AppState::new(db, engine, make_window_manager(), settings, first_run)
+}
+
+/// Seed defaults only on the very first run, detected by the absence of the
+/// settings row (plus an otherwise-empty database, checked below). The
+/// settings row — not empty tables — is the primary marker so that a user who
+/// deliberately clears all of their hotkeys or rules does not get them back.
+///
+/// Returns whether this launch is a true first run — the seed actually ran —
+/// which `setup` uses to auto-open the settings window once. Every ambiguous
+/// case (an unreadable row, an inconsistent database, a failed seed) returns
+/// `false`: surprising an existing user with a window is worse than staying
+/// quiet on a genuinely fresh install.
+fn seed_first_run_defaults(db: &Database) -> bool {
+    match db.settings_exist() {
+        // Already initialized: leave the user's data alone.
+        Ok(true) => false,
+        // No settings row — a first run *if* the database is otherwise empty.
+        // Guard against seeding over an inconsistent database that has hotkey or
+        // rule rows but no settings row (an older build could write those before
+        // a failed settings write): `seed_defaults` upserts by primary key, so
+        // seeding would overwrite any user row whose id matches a default. Only
+        // seed a truly pristine database; on a raw-count read failure, treat the
+        // database as non-empty and skip, never risking a clobber.
+        Ok(false) => {
+            let has_rows =
+                db.count_hotkeys().unwrap_or(1) > 0 || db.count_modifier_rules().unwrap_or(1) > 0;
+            if has_rows {
+                tracing::warn!(
+                    "settings row missing but hotkeys or rules exist; skipping first-run seed to avoid overwriting existing data"
+                );
+                return false;
+            }
+            if let Err(e) = db.seed_defaults(
+                &defaults::default_hotkeys(),
+                &defaults::default_modifier_rules(),
+                &AppSettings::default(),
+            ) {
+                tracing::error!(error = %e, "could not seed first-run defaults");
+                alert(
+                    "Tomari could not save its initial settings. It is running with \
+                     built-in defaults for now; they will be stored on your next change.",
+                    false,
+                );
+                return false;
+            }
+            true
+        }
+        // A read failure is *not* a first run: the settings row may well exist
+        // but be momentarily unreadable (a lock, a transient SQLite error).
+        // Seeding now would overwrite a real user's configuration, so touch
+        // nothing on disk and run this session on the fallbacks the reads in
+        // `build_state` already provide (each surfaces its own alert if it,
+        // too, fails).
+        Err(e) => {
+            tracing::error!(error = %e, "could not determine first-run state; leaving the database untouched");
+            false
+        }
+    }
 }
 
 /// Alert (once) when the database holds hotkey or rule rows that no longer
@@ -631,4 +657,48 @@ fn make_window_manager() -> Box<dyn WindowManager + Send + Sync> {
     Box::new(tomari_window::MockWindowManager::new(
         tomari_core::Rect::new(0.0, 0.0, 1440.0, 900.0),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pristine_database_seeds_and_counts_as_a_first_run() {
+        let db = Database::open_in_memory().unwrap();
+
+        assert!(seed_first_run_defaults(&db));
+        assert!(db.settings_exist().unwrap());
+        assert!(db.count_hotkeys().unwrap() > 0);
+        assert!(db.count_modifier_rules().unwrap() > 0);
+    }
+
+    #[test]
+    fn an_initialized_database_is_not_a_first_run() {
+        let db = Database::open_in_memory().unwrap();
+        seed_first_run_defaults(&db);
+
+        // The same database on its next launch: settings row present.
+        assert!(!seed_first_run_defaults(&db));
+    }
+
+    #[test]
+    fn stray_hotkeys_without_settings_skip_the_seed_and_the_first_run() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_hotkey(&defaults::default_hotkeys()[0]).unwrap();
+
+        assert!(!seed_first_run_defaults(&db));
+        assert!(!db.settings_exist().unwrap(), "nothing was seeded");
+        assert_eq!(db.count_hotkeys().unwrap(), 1, "the stray row was kept");
+    }
+
+    #[test]
+    fn stray_modifier_rules_without_settings_skip_the_seed_and_the_first_run() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_modifier_rule(&defaults::default_modifier_rules()[0])
+            .unwrap();
+
+        assert!(!seed_first_run_defaults(&db));
+        assert!(!db.settings_exist().unwrap(), "nothing was seeded");
+    }
 }

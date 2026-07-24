@@ -777,6 +777,7 @@ mod tests {
             ModifierEngine::new(engine_rules),
             Box::new(MockWindowManager::new(Rect::new(0.0, 0.0, 100.0, 100.0))),
             AppSettings::default(),
+            false,
         )
     }
 

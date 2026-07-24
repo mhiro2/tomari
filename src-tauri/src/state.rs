@@ -66,6 +66,11 @@ pub struct AppState {
     /// Sleep-prevention ("keep awake") runtime state. Not persisted — always
     /// starts inactive at launch. See [`crate::keepawake`].
     pub keep_awake: Mutex<KeepAwake>,
+    /// Whether this launch is a true first run — the database was pristine and
+    /// the defaults were just seeded. `setup` reads it to auto-open the
+    /// settings window once; every uncertain detection lands on `false` so an
+    /// existing user is never surprised by a window.
+    pub first_run: bool,
     /// Monotonic origin for the millisecond timestamps fed to the engines.
     epoch: Instant,
 }
@@ -76,6 +81,7 @@ impl AppState {
         engine: ModifierEngine,
         windows: Box<dyn WindowManager + Send + Sync>,
         settings: AppSettings,
+        first_run: bool,
     ) -> Self {
         Self {
             db,
@@ -88,6 +94,7 @@ impl AppState {
             screen_geometry: Mutex::new(Vec::new()),
             config_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
+            first_run,
             epoch: Instant::now(),
         }
     }
@@ -174,6 +181,7 @@ mod tests {
             ModifierEngine::new(vec![]),
             Box::new(MockWindowManager::new(Rect::new(0.0, 0.0, 100.0, 100.0))),
             AppSettings::default(),
+            false,
         )
     }
 
