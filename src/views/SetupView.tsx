@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Chip, Group } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
+import { acceleratorChips } from '../lib/format';
 import { useT } from '../lib/i18n';
 
 export interface SetupPermissions {
@@ -39,6 +40,28 @@ export function SetupView({
   const titleRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     titleRef.current?.focus();
+  }, []);
+
+  // The "try it" hint shows whatever accelerator is actually bound to the
+  // left-half snap right now (the user may have rebound the seeded ⌃⌥←), so
+  // it is looked up rather than hardcoded; no binding — or a failed read —
+  // just drops the line.
+  const [tryItChips, setTryItChips] = useState<string[]>([]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const hotkeys = await api.listHotkeys();
+        const snapLeft = hotkeys.find(
+          (hk) =>
+            hk.enabled &&
+            (hk.action.type === 'snapWindow' || hk.action.type === 'snapWindowExact') &&
+            hk.action.value === 'leftHalf',
+        );
+        setTryItChips(acceleratorChips(snapLeft?.accelerator));
+      } catch {
+        setTryItChips([]);
+      }
+    })();
   }, []);
 
   async function request(key: keyof SetupPermissions, call: () => Promise<boolean>) {
@@ -85,7 +108,12 @@ export function SetupView({
         />
       </Group>
 
-      {allGranted && <p className="hint">{t('setup.allSet')}</p>}
+      {allGranted && (
+        <>
+          <p className="hint">{t('setup.allSet')}</p>
+          {tryItChips.length > 0 && <TryItHint chips={tryItChips} />}
+        </>
+      )}
 
       <div className="setup__footer">
         {allGranted ? (
@@ -99,6 +127,27 @@ export function SetupView({
         )}
       </div>
     </div>
+  );
+}
+
+// The first-success hint, with the shortcut rendered as native keycap chips.
+// `t()` leaves the `{keys}` placeholder in place when no param is given, so
+// splitting on it lets the <kbd> elements sit inside the translated sentence.
+function TryItHint({ chips }: { chips: string[] }) {
+  const t = useT();
+  const [before, after] = t('setup.tryIt').split('{keys}');
+  return (
+    <p className="hint">
+      {before}
+      <span className="accel">
+        {/* A canonical accelerator never repeats a token, so the glyph is a
+            stable key (same convention as ShortcutRecorder). */}
+        {chips.map((chip) => (
+          <kbd key={chip}>{chip}</kbd>
+        ))}
+      </span>
+      {after}
+    </p>
   );
 }
 

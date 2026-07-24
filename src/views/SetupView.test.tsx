@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { Hotkey } from '../lib/types';
 import { SetupView } from './SetupView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
@@ -9,6 +10,33 @@ const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
 
 const noop = () => {};
+
+// The seeded left-half snap binding the "try it" hint looks up.
+const SNAP_LEFT: Hotkey = {
+  id: 'hk-left',
+  label: 'Snap Left',
+  accelerator: 'Ctrl+Alt+Left',
+  action: { type: 'snapWindow', value: 'leftHalf' },
+  enabled: true,
+};
+
+function mockCommands(overrides: Record<string, unknown> = {}) {
+  mockInvoke.mockImplementation((cmd: string) => {
+    if (cmd in overrides) {
+      const value = overrides[cmd];
+      return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+    }
+    switch (cmd) {
+      case 'list_hotkeys':
+        return Promise.resolve([SNAP_LEFT]);
+      case 'request_accessibility':
+      case 'request_input_monitoring':
+        return Promise.resolve(true);
+      default:
+        return Promise.resolve(null);
+    }
+  });
+}
 
 function renderView(overrides: Partial<Parameters<typeof SetupView>[0]> = {}) {
   return render(
@@ -26,7 +54,7 @@ function renderView(overrides: Partial<Parameters<typeof SetupView>[0]> = {}) {
 describe('SetupView', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
-    mockInvoke.mockResolvedValue(true);
+    mockCommands();
   });
 
   it('lists both permissions with a grant button while they are missing', () => {
@@ -79,7 +107,7 @@ describe('SetupView', () => {
   });
 
   it('does not report a grant when the request comes back denied', async () => {
-    mockInvoke.mockResolvedValue(false);
+    mockCommands({ request_accessibility: false });
     const onGranted = vi.fn();
     renderView({
       permissions: { accessibility: false, inputMonitoring: true },
@@ -117,6 +145,47 @@ describe('SetupView', () => {
     expect(onDone).toHaveBeenCalled();
   });
 
+  it('shows the try-it hint with the currently bound accelerator once all is granted', async () => {
+    renderView({ permissions: { accessibility: true, inputMonitoring: true } });
+
+    expect(await screen.findByText(/Try it: press/)).toBeInTheDocument();
+    // Ctrl+Alt+Left rendered as native keycap glyphs.
+    for (const glyph of ['⌃', '⌥', '←']) {
+      expect(screen.getByText(glyph)).toBeInTheDocument();
+    }
+  });
+
+  it('shows the rebound accelerator, not the seeded default, in the try-it hint', async () => {
+    mockCommands({
+      list_hotkeys: [{ ...SNAP_LEFT, accelerator: 'Cmd+Shift+L' }],
+    });
+    renderView({ permissions: { accessibility: true, inputMonitoring: true } });
+
+    expect(await screen.findByText(/Try it: press/)).toBeInTheDocument();
+    for (const glyph of ['⌘', '⇧', 'L']) {
+      expect(screen.getByText(glyph)).toBeInTheDocument();
+    }
+  });
+
+  it('drops the try-it hint when no enabled left-half binding exists', async () => {
+    mockCommands({ list_hotkeys: [{ ...SNAP_LEFT, enabled: false }] });
+    renderView({ permissions: { accessibility: true, inputMonitoring: true } });
+
+    // The all-set line arriving means the async hotkey lookup has settled too.
+    expect(await screen.findByText(/All set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Try it/)).not.toBeInTheDocument();
+  });
+
+  it('drops the try-it hint when the hotkey list cannot be read', async () => {
+    mockCommands({
+      list_hotkeys: Object.assign(new Error('list failed'), { code: 'unknown' }),
+    });
+    renderView({ permissions: { accessibility: true, inputMonitoring: true } });
+
+    expect(await screen.findByText(/All set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Try it/)).not.toBeInTheDocument();
+  });
+
   it('explains the update-caused regrant when flagged', () => {
     renderView({ updateRegrant: true });
 
@@ -124,7 +193,9 @@ describe('SetupView', () => {
   });
 
   it('surfaces a failed permission request as an error', async () => {
-    mockInvoke.mockRejectedValue(Object.assign(new Error('request failed'), { code: 'unknown' }));
+    mockCommands({
+      request_accessibility: Object.assign(new Error('request failed'), { code: 'unknown' }),
+    });
     renderView({ permissions: { accessibility: false, inputMonitoring: true } });
 
     fireEvent.click(screen.getByText('Grant Access'));
