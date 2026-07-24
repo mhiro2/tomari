@@ -52,19 +52,77 @@ fn modifier_of(token: &str) -> Option<&'static str> {
     }
 }
 
+/// The highest function key the parser accepts. macOS defines no virtual
+/// keycode past F20, so F21–F24 can be neither registered as a global hotkey
+/// (global-hotkey's Carbon backend has no scancode for them) nor synthesized
+/// as a keystroke (`keysend::keycode_for`); accepting them would let an
+/// accelerator validate and save yet fail at registration or send time.
+const MAX_FUNCTION_KEY: u32 = 20;
+
+/// Alias → canonical spelling for every named (non-alphanumeric, non-function)
+/// key the parser recognizes. Kept as data — rather than a `match` — so
+/// [`all_canonical_keys`] enumerates the same set the parser accepts and the
+/// two cannot drift. Canonical names match what global-hotkey's accelerator
+/// parser (`global_hotkey::hotkey::parse_key`) accepts, since that is the
+/// crate `shortcuts::register_all` hands the canonical string to.
+const NAMED_KEYS: &[(&str, &str)] = &[
+    ("left", "Left"),
+    ("right", "Right"),
+    ("up", "Up"),
+    ("down", "Down"),
+    ("space", "Space"),
+    ("tab", "Tab"),
+    ("enter", "Enter"),
+    ("return", "Enter"),
+    ("esc", "Escape"),
+    ("escape", "Escape"),
+    ("delete", "Delete"),
+    ("del", "Delete"),
+    ("backspace", "Backspace"),
+    ("home", "Home"),
+    ("end", "End"),
+    ("pageup", "PageUp"),
+    ("pagedown", "PageDown"),
+    ("plus", "Plus"),
+    ("minus", "Minus"),
+    ("equal", "Equal"),
+    ("comma", "Comma"),
+    ("period", "Period"),
+    ("slash", "Slash"),
+    ("semicolon", "Semicolon"),
+    ("quote", "Quote"),
+    ("bracketleft", "BracketLeft"),
+    ("bracketright", "BracketRight"),
+    ("backslash", "Backslash"),
+    ("backquote", "Backquote"),
+];
+
+/// Every canonical key token the parser can emit: function keys, letters,
+/// digits and the named keys, deduplicated. Anything that synthesizes or maps
+/// these keys (e.g. `keysend`) should enumerate this in a test to prove total
+/// coverage — a new key added here then fails that test until it is handled.
+pub fn all_canonical_keys() -> Vec<String> {
+    let mut keys: Vec<String> = (1..=MAX_FUNCTION_KEY).map(|n| format!("F{n}")).collect();
+    keys.extend(('A'..='Z').chain('0'..='9').map(String::from));
+    keys.extend(
+        NAMED_KEYS
+            .iter()
+            .map(|(_, canonical)| canonical.to_string()),
+    );
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 /// Normalize a non-modifier key token to its canonical spelling, or `None` if
 /// it is not a recognized key.
 fn normalize_key(token: &str) -> Option<String> {
     let lower = token.to_ascii_lowercase();
 
-    // Function keys F1..F20. macOS defines no virtual keycode past F20, so
-    // F21–F24 can be neither registered as a global hotkey (global-hotkey's
-    // Carbon backend has no scancode for them) nor synthesized as a keystroke
-    // (`keysend::keycode_for`); accepting them here would let an accelerator
-    // validate and save yet fail at registration or send time.
+    // Function keys F1..F20 (see `MAX_FUNCTION_KEY` for why it stops there).
     if let Some(num) = lower.strip_prefix('f')
         && let Ok(n) = num.parse::<u32>()
-        && (1..=20).contains(&n)
+        && (1..=MAX_FUNCTION_KEY).contains(&n)
     {
         return Some(format!("F{n}"));
     }
@@ -77,39 +135,10 @@ fn normalize_key(token: &str) -> Option<String> {
         }
     }
 
-    let named = match lower.as_str() {
-        "left" => "Left",
-        "right" => "Right",
-        "up" => "Up",
-        "down" => "Down",
-        "space" => "Space",
-        "tab" => "Tab",
-        "enter" | "return" => "Enter",
-        "esc" | "escape" => "Escape",
-        "delete" | "del" => "Delete",
-        "backspace" => "Backspace",
-        "home" => "Home",
-        "end" => "End",
-        "pageup" => "PageUp",
-        "pagedown" => "PageDown",
-        "plus" => "Plus",
-        "minus" => "Minus",
-        "equal" => "Equal",
-        "comma" => "Comma",
-        "period" => "Period",
-        "slash" => "Slash",
-        // Punctuation/symbol keys. Names match what global-hotkey's accelerator
-        // parser (`global_hotkey::hotkey::parse_key`) accepts, since that is
-        // the crate `shortcuts::register_all` hands the canonical string to.
-        "semicolon" => "Semicolon",
-        "quote" => "Quote",
-        "bracketleft" => "BracketLeft",
-        "bracketright" => "BracketRight",
-        "backslash" => "Backslash",
-        "backquote" => "Backquote",
-        _ => return None,
-    };
-    Some(named.to_string())
+    NAMED_KEYS
+        .iter()
+        .find(|(alias, _)| *alias == lower)
+        .map(|(_, canonical)| canonical.to_string())
 }
 
 /// Parse and normalize an accelerator string.

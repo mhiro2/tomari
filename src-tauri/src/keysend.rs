@@ -177,48 +177,16 @@ mod tests {
     /// in a `SendKeystroke` — must resolve to a keycode here, or the action
     /// would parse and save yet fail at send time. The parser caps function
     /// keys at F20 precisely because macOS defines no virtual keycode past it,
-    /// so there is no accepted gap: coverage must be total.
+    /// so there is no accepted gap: coverage must be total. The key set comes
+    /// from the parser itself (`all_canonical_keys`), so a key added there
+    /// fails here until this map handles it.
     #[test]
     fn keysend_covers_every_parser_accepted_key() {
-        let named = [
-            "Escape",
-            "Enter",
-            "Tab",
-            "Space",
-            "Delete",
-            "Backspace",
-            "Left",
-            "Right",
-            "Down",
-            "Up",
-            "Home",
-            "End",
-            "PageUp",
-            "PageDown",
-            "Plus",
-            "Minus",
-            "Equal",
-            "Comma",
-            "Period",
-            "Slash",
-            "Semicolon",
-            "Quote",
-            "BracketLeft",
-            "BracketRight",
-            "Backslash",
-            "Backquote",
-        ];
-        let function_keys = (1..=20).map(|n| format!("F{n}"));
-        let alphanumerics = ('A'..='Z').chain('0'..='9').map(String::from);
-        for key in named
-            .into_iter()
-            .map(String::from)
-            .chain(function_keys)
-            .chain(alphanumerics)
-        {
+        for key in accelerator::all_canonical_keys() {
             let parsed = accelerator::parse(&key).unwrap();
+            assert_eq!(parsed.key, key, "`{key}` must already be canonical");
             assert!(
-                key_to_event(&parsed.key).is_some(),
+                key_to_event(&key).is_some(),
                 "no keycode for parser-accepted key `{key}`"
             );
         }
