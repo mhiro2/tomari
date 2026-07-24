@@ -100,7 +100,7 @@ const en = {
     'Needed to tap/hold and remap modifier keys, and for the drag features.',
   'setup.granted': 'Granted',
   'setup.grant': 'Grant Access',
-  'setup.grantFor': 'Grant {name} access',
+  'setup.grantFor': 'Grant Access for {name}',
   'setup.later': 'Set up later',
   'setup.done': 'Done',
   'setup.allSet': 'All set — Tomari is ready to use.',

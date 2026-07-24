@@ -121,26 +121,25 @@ function PermissionRow({
         <span className="item__desc">{why}</span>
       </div>
       <div className="item__trail">
-        {granted ? (
-          // <output> (implicit role "status") announces the flip to "Granted"
-          // when the backend's poll (or the request itself) reports the
-          // permission arriving.
-          <output>
-            <Chip tone="ok">{t('setup.granted')}</Chip>
-          </output>
-        ) : (
+        {!granted && (
           <button
             type="button"
             className="btn btn--primary"
             // Both rows share the visible "Grant Access" label; the accessible
-            // name carries the permission so the buttons stay distinguishable
-            // out of context.
+            // name keeps that label verbatim (so voice control still matches
+            // it) and appends the permission so the buttons stay
+            // distinguishable out of context.
             aria-label={t('setup.grantFor', { name: title })}
             onClick={onRequest}
           >
             {t('setup.grant')}
           </button>
         )}
+        {/* The live region (<output> = role "status") is mounted empty from
+            the start: only content *added* to an existing region is reliably
+            announced, so the "Granted" chip must appear inside it rather than
+            arrive with it. */}
+        <output>{granted && <Chip tone="ok">{t('setup.granted')}</Chip>}</output>
       </div>
     </div>
   );

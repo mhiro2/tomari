@@ -42,16 +42,19 @@ describe('SetupView', () => {
   it('shows a granted permission as an announced chip, not a button', () => {
     renderView({ permissions: { accessibility: true, inputMonitoring: false } });
 
-    // role="status" so the flip to "Granted" is announced when it happens.
-    expect(screen.getByRole('status')).toHaveTextContent('Granted');
+    // Every row keeps an (initially empty) live region mounted so the later
+    // flip to "Granted" lands *inside* an existing region and gets announced.
+    const regions = screen.getAllByRole('status');
+    expect(regions).toHaveLength(2);
+    expect(screen.getByText('Granted')).toBeInTheDocument();
     expect(screen.getAllByText('Grant Access')).toHaveLength(1);
   });
 
   it('names each grant button after its permission for assistive tech', () => {
     renderView();
 
-    expect(screen.getByLabelText('Grant Accessibility access')).toBeInTheDocument();
-    expect(screen.getByLabelText('Grant Input Monitoring access')).toBeInTheDocument();
+    expect(screen.getByLabelText('Grant Access for Accessibility')).toBeInTheDocument();
+    expect(screen.getByLabelText('Grant Access for Input Monitoring')).toBeInTheDocument();
   });
 
   it('moves focus to the heading on mount', () => {
