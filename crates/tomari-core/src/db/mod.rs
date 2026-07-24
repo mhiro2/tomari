@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::domain::AppSettings;
 use crate::domain::keyboard::{Hotkey, ModifierRule};
@@ -118,26 +118,48 @@ impl Database {
 /// consistent intermediate version that the next launch resumes from. A
 /// database stamped *ahead* of `migrations` was written by a newer app and is
 /// refused outright: pretending it matches the current schema risks silent
-/// data loss.
+/// data loss. A *negative* version (SQLite stores whatever was stamped) is
+/// equally meaningless and refused — indexing the list with it would panic,
+/// and the release profile's `panic = "abort"` would turn that into a silent
+/// exit instead of the intended launch error.
 ///
 /// Takes the migration list as a parameter so tests can drive it with
 /// synthetic histories; production always passes [`MIGRATIONS`].
 fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
     let latest = migrations.len() as i32;
     let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > latest {
+    if version < 0 || version > latest {
         return Err(Error::Migration(format!(
-            "database schema version {version} is newer than this app supports \
-             (expected at most {latest}); please update the app"
+            "database schema version {version} is outside what this app supports \
+             (expected 0 to {latest}); if it is newer, please update the app"
         )));
     }
     for next in (version + 1)..=latest {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(migrations[(next - 1) as usize])
-            .map_err(|e| Error::Migration(format!("migrating to schema version {next}: {e}")))?;
-        tx.pragma_update(None, "user_version", next)?;
-        tx.commit()?;
+        apply_step(conn, migrations, next)?;
     }
+    Ok(())
+}
+
+/// Apply the single migration that brings the schema to version `next`, under
+/// an *immediate* (write-locking) transaction.
+///
+/// The version is re-read once the lock is held: two app instances can race
+/// through [`apply_migrations`]' initial read at launch — the database opens
+/// before the single-instance guard engages — and the loser must skip steps
+/// the winner already committed rather than re-run them (a re-run would at
+/// best fail on existing DDL and at worst re-apply a non-idempotent data
+/// transformation). Skipping drops the transaction unstarted-equivalent: it
+/// rolls back having written nothing.
+fn apply_step(conn: &Connection, migrations: &[&str], next: i32) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let current: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current >= next {
+        return Ok(());
+    }
+    tx.execute_batch(migrations[(next - 1) as usize])
+        .map_err(|e| Error::Migration(format!("migrating to schema version {next}: {e}")))?;
+    tx.pragma_update(None, "user_version", next)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -205,6 +227,79 @@ mod tests {
 
     /// The version a fully migrated database reads.
     const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
+
+    /// Frozen snapshots of every schema version a build has shipped with:
+    /// `VERSION_FIXTURES[n - 1]` recreates a version-`n` database verbatim.
+    /// Deliberately independent of `MIGRATIONS` — deriving fixtures from the
+    /// live list would let an accidental edit to a shipped migration rewrite
+    /// the "old database" being tested and hide the incompatibility. Append a
+    /// snapshot when a new version ships; never touch existing entries.
+    const VERSION_FIXTURES: &[&str] = &[
+        // v1: the initial schema.
+        r#"
+CREATE TABLE hotkeys (
+    id          TEXT    PRIMARY KEY,
+    label       TEXT    NOT NULL,
+    accelerator TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    enabled     INTEGER NOT NULL
+);
+
+CREATE TABLE modifier_rules (
+    id        TEXT    PRIMARY KEY,
+    label     TEXT    NOT NULL,
+    modifier  TEXT    NOT NULL,
+    side      TEXT    NOT NULL,
+    remap_to  TEXT,
+    tap       TEXT    NOT NULL,
+    enabled   INTEGER NOT NULL,
+    hyper     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT    NOT NULL
+);
+
+PRAGMA user_version = 1;
+"#,
+    ];
+
+    /// A structural description of every user table — column names, types,
+    /// nullability, defaults and primary keys — for comparing two databases
+    /// without depending on the DDL's exact text.
+    fn schema_snapshot(conn: &Connection) -> Vec<String> {
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let mut out = Vec::new();
+        for table in tables {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = stmt
+                .query_map([], |row| {
+                    Ok(format!(
+                        "{table}.{}: {} notnull={} default={:?} pk={}",
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i32>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i32>(5)?,
+                    ))
+                })
+                .unwrap();
+            out.extend(columns.map(|column| column.unwrap()));
+        }
+        out
+    }
 
     #[test]
     fn opens_and_migrates_in_memory() {
@@ -292,29 +387,82 @@ mod tests {
 
     #[test]
     fn upgrades_a_database_from_every_past_schema_version() {
-        // For each version a released build may have left on disk, build a
-        // database frozen at that version, reopen it through the normal path
-        // and verify it reaches the latest schema with every table usable.
-        // New migrations extend this loop automatically.
-        for stop_at in 0..MIGRATIONS.len() {
+        // For each version a released build may have left on disk, recreate a
+        // database frozen at that version from its snapshot, reopen it through
+        // the normal path and verify it reaches the latest schema with every
+        // table usable. Includes version 0 (an empty database) and the latest
+        // itself (a no-op open); new snapshots extend the loop automatically.
+        for version in 0..=VERSION_FIXTURES.len() {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("tomari.sqlite3");
 
             let conn = Connection::open(&path).expect("open raw");
-            apply_migrations(&conn, &MIGRATIONS[..stop_at]).expect("build fixture");
+            if version > 0 {
+                conn.execute_batch(VERSION_FIXTURES[version - 1])
+                    .expect("build fixture");
+            }
             drop(conn);
 
             let db = Database::open(&path).expect("upgrade to latest");
-            let version = db
+            let reached = db
                 .with_conn(|conn| {
                     Ok(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?)
                 })
                 .unwrap();
-            assert_eq!(version, SCHEMA_VERSION, "from version {stop_at}");
+            assert_eq!(reached, SCHEMA_VERSION, "from version {version}");
             assert!(db.list_hotkeys().expect("hotkeys").is_empty());
             assert!(db.list_modifier_rules().expect("rules").is_empty());
             assert!(!db.settings_exist().expect("settings probe"));
         }
+    }
+
+    #[test]
+    fn migration_chain_produces_the_frozen_latest_schema() {
+        // Running every migration from scratch must land on exactly the
+        // structure captured in the latest frozen snapshot. This pins the two
+        // definitions together: editing a shipped migration (or forgetting to
+        // freeze a new version's snapshot) diverges them and fails here.
+        let migrated = Connection::open_in_memory().expect("open");
+        apply_migrations(&migrated, MIGRATIONS).expect("migrate");
+
+        let frozen = Connection::open_in_memory().expect("open");
+        frozen
+            .execute_batch(VERSION_FIXTURES.last().expect("at least one version"))
+            .expect("build fixture");
+
+        assert_eq!(schema_snapshot(&migrated), schema_snapshot(&frozen));
+        assert_eq!(MIGRATIONS.len(), VERSION_FIXTURES.len());
+    }
+
+    #[test]
+    fn refuses_a_negative_schema_version() {
+        // SQLite happily stores `PRAGMA user_version = -1`; treating it as "no
+        // migrations applied" would index the migration list out of bounds and
+        // panic, which the release profile turns into a silent exit.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "user_version", -1).unwrap();
+
+        let err = apply_migrations(&conn, MIGRATIONS).expect_err("must refuse");
+        assert!(matches!(err, Error::Migration(_)));
+    }
+
+    #[test]
+    fn a_step_that_lost_a_launch_race_is_skipped_under_the_lock() {
+        // Two instances can both read `user_version` before either has
+        // migrated (the database opens before the single-instance guard
+        // engages). Simulate the loser: it computed `next == 1` from that
+        // stale read, but the winner has already committed step 1. The
+        // re-check under the write lock must skip — re-running the DDL would
+        // fail on the existing table.
+        let migrations: &[&str] = &["CREATE TABLE a (x INTEGER);"];
+        let conn = Connection::open_in_memory().expect("open");
+        apply_migrations(&conn, migrations).expect("winner migrates");
+
+        apply_step(&conn, migrations, 1).expect("loser skips instead of re-applying");
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
     }
 
     #[test]

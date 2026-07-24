@@ -214,10 +214,15 @@ skips arming whenever a gesture chord is held so the two never fight.
 
 - SQLite (rusqlite, bundled). `Database` wraps a single connection in a
   `Mutex`, with WAL and `foreign_keys = ON`.
-- Migrations are `PRAGMA user_version` plus a single constant SQL schema
-  (`SCHEMA`). The schema and the version bump run in one transaction, so a
-  failure mid-setup rolls back cleanly (covered by tests). Post-release,
-  schema changes add an incremental step rather than editing `SCHEMA`.
+- Migrations are `PRAGMA user_version` plus an ordered `MIGRATIONS` list:
+  entry `n` upgrades a version-`n` database to `n + 1`, and the version a
+  binary writes is simply the list's length. Each step runs in its own
+  *immediate* (write-locking) transaction that re-checks `user_version` under
+  the lock — two instances racing at launch (the database opens before the
+  single-instance guard engages) cannot double-apply a step — and stamps the
+  version it reached, so a failure rolls that step back cleanly and the next
+  launch resumes from it (covered by tests, including frozen per-version
+  fixtures). Shipped entries are never edited; schema changes append a step.
 - Tables: `hotkeys` / `modifier_rules` / `settings` (a single `id = 1` row
   holding the `AppSettings` JSON). Domain values are stored as JSON strings in
   their columns, keeping the schema resilient to domain-type evolution.
@@ -366,8 +371,9 @@ without permissions too (unit tests).
 
 - **Rust**: pure logic (the engine, geometry, accelerators) is
   covered by in-module unit tests. The DB opens in memory; tests cover the
-  migration creating the full schema (every table and column). Window
-  operations are tested without the OS via `MockWindowManager`.
+  migration chain creating the full schema and upgrading frozen fixtures of
+  every past schema version to the latest. Window operations are tested
+  without the OS via `MockWindowManager`.
 - **Frontend**: Vitest + Testing Library (jsdom). `vitest.setup.ts` mocks the
   Tauri API.
 - **Toolchain**: clippy (`-D warnings`) / oxlint (type-aware) for linting,
@@ -383,9 +389,10 @@ without permissions too (unit tests).
 
 ## 11. Adding a feature
 
-1. If it needs domain types and persistence, add the types to `tomari-core`,
-   bump `SCHEMA_VERSION`, and add one migration step (keep existing rows
-   alive with additive defaults).
+1. If it needs domain types and persistence, add the types to `tomari-core`
+   and append one migration step to `MIGRATIONS` (keep existing rows alive
+   with additive defaults) plus a frozen fixture of the new schema version;
+   the schema version follows the list's length automatically.
 2. Put decision/computation logic in a new `tomari-<feature>` crate (or an
    existing one) as **pure functions / pure state machines**, with unit
    tests. Isolate OS dependencies behind a trait or a `cfg(target_os)`
