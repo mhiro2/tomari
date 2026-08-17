@@ -26,6 +26,8 @@ const SETTINGS: AppSettings = {
   showInMenuBar: true,
   dragToSnapEnabled: false,
   dragToMoveEnabled: false,
+  menuBarTidyEnabled: false,
+  menuBarAutoCollapseSecs: 0,
 };
 
 // GeneralView reads settings (master switches live elsewhere) from the shared provider.

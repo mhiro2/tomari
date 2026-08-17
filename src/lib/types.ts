@@ -41,6 +41,7 @@ export type AppAction =
   | { type: 'switchIme'; value: ImeMode }
   | { type: 'sendKeystroke'; value: string }
   | { type: 'toggleKeepAwake' }
+  | { type: 'toggleMenuBar' }
   | { type: 'noOp' };
 
 export interface Hotkey {
@@ -72,6 +73,8 @@ export interface AppSettings {
   showInMenuBar: boolean;
   dragToSnapEnabled: boolean;
   dragToMoveEnabled: boolean;
+  menuBarTidyEnabled: boolean;
+  menuBarAutoCollapseSecs: number;
 }
 
 // State of the lid-close veto (pmset disablesleep): off, awaiting admin auth, or
@@ -85,6 +88,15 @@ export interface KeepAwakeStatus {
   active: boolean;
   // Lid-close veto state — when "engaged", work continues with the lid shut.
   lidClose: LidCloseState;
+}
+
+// Runtime menu-bar-tidy state. Like keep-awake this never persists: a launch
+// always starts collapsed.
+export interface MenuBarStatus {
+  // The feature's master switch, mirroring `menuBarTidyEnabled`.
+  enabled: boolean;
+  // Whether the tidied icons are currently pushed off-screen.
+  collapsed: boolean;
 }
 
 export interface AcceleratorCheck {

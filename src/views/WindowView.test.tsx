@@ -26,6 +26,8 @@ const SETTINGS: AppSettings = {
   showInMenuBar: true,
   dragToSnapEnabled: false,
   dragToMoveEnabled: false,
+  menuBarTidyEnabled: false,
+  menuBarAutoCollapseSecs: 0,
 };
 
 // WindowView reads settings (master switch, drag-to-snap) from the shared provider.

@@ -13,6 +13,7 @@ use tomari_window::{WindowHandle, WindowManager};
 
 use crate::keepawake::KeepAwake;
 use crate::locks::MutexExt;
+use crate::menubar::MenuBarState;
 
 /// How many window frames the undo history keeps before dropping the oldest.
 const WINDOW_HISTORY_CAP: usize = 50;
@@ -67,6 +68,10 @@ pub struct AppState {
     /// Sleep-prevention ("keep awake") runtime state. Not persisted — always
     /// starts inactive at launch. See [`crate::keepawake`].
     pub keep_awake: Mutex<KeepAwake>,
+    /// Whether the tidied menu bar items are expanded, plus the auto-collapse
+    /// deadline. Runtime state like keep-awake: a launch starts collapsed. See
+    /// [`crate::menubar`].
+    pub menu_bar: Mutex<MenuBarState>,
     /// Whether this launch is a true first run — the database was pristine and
     /// the defaults were just seeded. `setup` reads it to auto-open the
     /// settings window once; every uncertain detection lands on `false` so an
@@ -89,6 +94,7 @@ impl AppState {
         settings: AppSettings,
         first_run: bool,
     ) -> Self {
+        let menu_bar = MenuBarState::new(settings.menu_bar_auto_collapse_secs);
         Self {
             db,
             engine: Mutex::new(engine),
@@ -100,6 +106,7 @@ impl AppState {
             screen_geometry: Mutex::new(Vec::new()),
             config_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
+            menu_bar: Mutex::new(menu_bar),
             first_run,
             update_regrant: AtomicBool::new(false),
             epoch: Instant::now(),

@@ -1,9 +1,9 @@
 # Tomari
 
 Tomari gathers a handful of small macOS utilities under **a single menu bar
-icon**. Today it ships **keyboard customization** and **window management**,
-and it is built so that new tools can be added on the same foundation over
-time.
+icon**. Today it ships **keyboard customization**, **window management** and
+**menu bar tidying**, and it is built so that new tools can be added on the
+same foundation over time.
 
 ## Features
 
@@ -26,6 +26,12 @@ time.
 - Trigger from the menu bar, a global shortcut, or the grid in the UI.
 - Drag a window to a screen edge or corner to snap on release (optional).
 - Multi-display moves, size cycling, and undo.
+
+### Menu bar
+
+- Hide the status icons you rarely look at behind a divider, and bring them
+  back with a click, the tray, or a shortcut. Which icons those are is your own
+  ⌘-drag arrangement: macOS lets an app move only its own menu bar icons.
 
 ### Keep Awake
 

@@ -27,6 +27,7 @@ const WINDOW_ACTIONS = [
 function actionFromKey(key: string): AppAction {
   if (key === 'togglePanel') return { type: 'togglePanel' };
   if (key === 'toggleKeepAwake') return { type: 'toggleKeepAwake' };
+  if (key === 'toggleMenuBar') return { type: 'toggleMenuBar' };
   const windowAction = WINDOW_ACTIONS.find((a) => a.key === key);
   if (windowAction) return windowAction.action;
   // The <select> only ever offers SNAP_PRESETS' own values for any key that
@@ -41,6 +42,7 @@ function ActionOptions({ t }: { t: Translator }) {
     <>
       <option value="togglePanel">{t('action.togglePanel')}</option>
       <option value="toggleKeepAwake">{t('action.toggleKeepAwake')}</option>
+      <option value="toggleMenuBar">{t('action.toggleMenuBar')}</option>
       {SNAP_PRESETS.map((p) => (
         <option key={p} value={p}>
           {t('action.snap', { target: presetLabel(p, t) })}

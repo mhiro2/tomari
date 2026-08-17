@@ -25,6 +25,8 @@ const SETTINGS: AppSettings = {
   showInMenuBar: true,
   dragToSnapEnabled: false,
   dragToMoveEnabled: false,
+  menuBarTidyEnabled: false,
+  menuBarAutoCollapseSecs: 0,
 };
 
 // A button that flips "launch at login" and shows the current value.

@@ -10,13 +10,14 @@ import { SettingsProvider, useSettings } from './lib/settings';
 import type { PermissionsChanged } from './lib/types';
 import { GeneralView } from './views/GeneralView';
 import { KeyboardView } from './views/KeyboardView';
+import { MenuBarView } from './views/MenuBarView';
 import { SessionView } from './views/SessionView';
 import { SetupView, type SetupPermissions } from './views/SetupView';
 import { WindowView } from './views/WindowView';
 
 type Section = SectionName;
 
-const SECTIONS: Section[] = ['keyboard', 'window', 'session', 'general'];
+const SECTIONS: Section[] = ['keyboard', 'window', 'menubar', 'session', 'general'];
 
 export function App() {
   return (
@@ -165,6 +166,7 @@ function AppShell() {
   const featureOff: Record<Section, boolean> = {
     keyboard: settings ? !settings.keyboardEnabled : false,
     window: settings ? !settings.windowManagementEnabled : false,
+    menubar: settings ? !settings.menuBarTidyEnabled : false,
     session: false,
     general: false,
   };
@@ -224,6 +226,7 @@ function AppShell() {
             <>
               {section === 'keyboard' && <KeyboardView onOpenSetup={openSetup} />}
               {section === 'window' && <WindowView onOpenSetup={openSetup} />}
+              {section === 'menubar' && <MenuBarView />}
               {section === 'session' && <SessionView />}
               {section === 'general' && (
                 <GeneralView

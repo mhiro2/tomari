@@ -31,6 +31,8 @@ const SETTINGS: AppSettings = {
   showInMenuBar: true,
   dragToSnapEnabled: false,
   dragToMoveEnabled: false,
+  menuBarTidyEnabled: false,
+  menuBarAutoCollapseSecs: 0,
 };
 
 function mockCommands(overrides: Record<string, unknown> = {}) {

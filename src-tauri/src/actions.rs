@@ -33,6 +33,10 @@ pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result
             crate::keepawake::toggle(app);
             Ok(())
         }
+        AppAction::ToggleMenuBar => {
+            crate::menubar::toggle(app);
+            Ok(())
+        }
         AppAction::NoOp => Ok(()),
     }
 }

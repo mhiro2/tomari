@@ -590,6 +590,40 @@ select.input {
   color: var(--err);
 }
 
+/* ===== Menu bar map ===================================================== */
+
+/* A picture of the arrangement the user makes by ⌘-dragging: two zones with
+   the divider between them, laid out the way the menu bar itself reads. Amber
+   marks the divider — it is the boundary the whole feature turns on, and the
+   one part of the picture the user has to find in their own menu bar. */
+.mb-map {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: var(--fs-caption);
+  color: var(--ink-dim);
+}
+
+.mb-map__zone {
+  flex: 1;
+  padding: 5px 8px;
+  text-align: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-xs);
+}
+
+.mb-map__divider {
+  display: flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: var(--radius-xs);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber-line);
+  color: var(--amber);
+  font-weight: 600;
+}
+
 /* ===== Keycaps (Keyboard domain only) ================================== */
 
 .kbd-chip {

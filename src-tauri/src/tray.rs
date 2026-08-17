@@ -26,6 +26,7 @@ struct Text {
     snap_window: &'static str,
     undo: &'static str,
     keep_awake: &'static str,
+    expand_menu_bar: &'static str,
     open_settings: &'static str,
     check_updates: &'static str,
     quit: &'static str,
@@ -41,6 +42,7 @@ const TEXT_EN: Text = Text {
     snap_window: "Snap Window",
     undo: "Undo Move",
     keep_awake: "Prevent Sleep",
+    expand_menu_bar: "Show Menu Bar Icons",
     open_settings: "Settings…",
     check_updates: "Check for Updates",
     quit: "Quit Tomari",
@@ -56,6 +58,7 @@ const TEXT_JA: Text = Text {
     snap_window: "ウィンドウをスナップ",
     undo: "元に戻す",
     keep_awake: "スリープ防止",
+    expand_menu_bar: "メニューバーのアイコンを表示",
     open_settings: "設定…",
     check_updates: "アップデートを確認",
     quit: "Tomari を終了",
@@ -157,14 +160,24 @@ fn build_menu(
         .checked(keep_awake_active)
         .build(app)?;
 
+    // Only offered while menu bar tidying is on: with the feature off there is
+    // nothing hidden to show, and an item that does nothing is worse than none.
+    let menu_bar = crate::menubar::status(app.state::<AppState>().inner());
+    let expand_menu_bar = menu_bar.enabled.then(|| {
+        CheckMenuItemBuilder::with_id("menu-bar-expand", text.expand_menu_bar)
+            .checked(!menu_bar.collapsed)
+            .build(app)
+    });
+
     let open = MenuItemBuilder::with_id("open", text.open_settings).build(app)?;
     let check_update = MenuItemBuilder::with_id("check-update", text.check_updates).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", text.quit).build(app)?;
 
-    menu.item(&snap)
-        .separator()
-        .item(&keep_awake)
-        .separator()
+    let mut menu = menu.item(&snap).separator().item(&keep_awake);
+    if let Some(item) = expand_menu_bar {
+        menu = menu.item(&item?);
+    }
+    menu.separator()
         .item(&open)
         .item(&check_update)
         .separator()
@@ -248,6 +261,12 @@ fn on_menu(app: &AppHandle, id: &str) {
             // `toggle` rebuilds the menu (so the checkmark reflects the new
             // state) and emits the change event for the panel.
             crate::keepawake::toggle(app);
+            return;
+        }
+        "menu-bar-expand" => {
+            // Same contract as keep-awake above: the toggle republishes, which
+            // rebuilds this menu and notifies the panel.
+            crate::menubar::toggle(app);
             return;
         }
         "undo" => {

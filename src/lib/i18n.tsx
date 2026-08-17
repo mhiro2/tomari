@@ -10,6 +10,7 @@ const en = {
   // the tray entry and the switch inside the section.
   'app.nav.keyboard': 'Keyboard',
   'app.nav.window': 'Windows',
+  'app.nav.menubar': 'Menu Bar',
   'app.nav.session': 'Prevent Sleep',
   'app.nav.general': 'General',
   'app.sections': 'Sections',
@@ -58,6 +59,7 @@ const en = {
   'action.sendKeystroke': 'Send: {keys}',
   'action.ime': 'IME → {mode}',
   'action.toggleKeepAwake': 'Toggle Prevent Sleep',
+  'action.toggleMenuBar': 'Show/Hide Menu Bar Icons',
   'action.noOp': 'Do Nothing',
 
   'keyboard.modifierKeys': 'Modifier keys',
@@ -135,6 +137,22 @@ const en = {
   'window.dragToMoveHint':
     'Hold ⌃⌥ and drag anywhere in a window to move it, or ⌃⌥⌘ to resize it from the bottom-right (top-left stays put). Works on the window under the pointer — no need to click first. Requires Accessibility and Input Monitoring.',
 
+  'menubar.title': 'Menu bar tidying',
+  'menubar.offNote': 'Menu bar tidying is off — Tomari adds no divider to your menu bar.',
+  'menubar.enable': 'Turn on menu bar tidying',
+  'menubar.showToggle': 'Show hidden icons',
+  'menubar.showDesc': 'Also from the ‹ item, the tray menu, or a shortcut.',
+  'menubar.autoCollapse': 'Collapse automatically',
+  'menubar.autoCollapseNever': 'Never',
+  'menubar.autoCollapseSecs': 'After {secs} seconds',
+  'menubar.arrangeSection': 'Choosing what to hide',
+  'menubar.arrangeBody':
+    'Hold ⌘ and drag your menu bar icons so the ones you want tucked away sit left of the ≡ divider.',
+  'menubar.zoneHidden': 'hidden',
+  'menubar.zoneVisible': 'always shown',
+  'menubar.limitNote':
+    'macOS only lets an app move its own menu bar icons. Expanding may not reveal everything if the frontmost app has a long menu bar, or your Mac has a notch.',
+
   'settings.general': 'General',
   'settings.launchAtLogin': 'Launch at login',
   'settings.showInMenuBar': 'Show in menu bar',
@@ -199,6 +217,7 @@ export type MessageKey = keyof typeof en;
 const ja: Record<MessageKey, string> = {
   'app.nav.keyboard': 'キーボード',
   'app.nav.window': 'ウィンドウ',
+  'app.nav.menubar': 'メニューバー',
   'app.nav.session': 'スリープ防止',
   'app.nav.general': '一般',
   'app.sections': 'セクション',
@@ -247,6 +266,7 @@ const ja: Record<MessageKey, string> = {
   'action.sendKeystroke': '送信: {keys}',
   'action.ime': 'IME → {mode}',
   'action.toggleKeepAwake': 'スリープ防止の切り替え',
+  'action.toggleMenuBar': 'メニューバーのアイコン表示切替',
   'action.noOp': '何もしない',
 
   'keyboard.modifierKeys': '修飾キー',
@@ -322,6 +342,22 @@ const ja: Record<MessageKey, string> = {
   'window.enableDragToMove': 'ドラッグで移動・リサイズを有効化',
   'window.dragToMoveHint':
     '⌃⌥ を押しながらウィンドウのどこでもドラッグすると移動、⌃⌥⌘ なら右下方向にリサイズします（左上は固定）。ポインタの下のウィンドウに効くので、先にクリックする必要はありません。アクセシビリティと入力監視の権限が必要です。',
+
+  'menubar.title': 'メニューバー整理',
+  'menubar.offNote': 'メニューバー整理はオフです。区切りは表示されません。',
+  'menubar.enable': 'メニューバー整理を有効化',
+  'menubar.showToggle': '隠したアイコンを表示',
+  'menubar.showDesc': 'メニューバーの ‹、トレイ、ショートカットからも操作できます。',
+  'menubar.autoCollapse': '自動で折りたたむ',
+  'menubar.autoCollapseNever': 'しない',
+  'menubar.autoCollapseSecs': '{secs} 秒後',
+  'menubar.arrangeSection': '隠すものを決める',
+  'menubar.arrangeBody':
+    '⌘ を押しながらメニューバーのアイコンをドラッグして、隠したいものを ≡ より左に並べます。',
+  'menubar.zoneHidden': '隠れる',
+  'menubar.zoneVisible': '常に表示',
+  'menubar.limitNote':
+    'macOS では、アプリは自分のアイコンしか動かせません。前面アプリのメニューが長いときやノッチのある Mac では、展開しても全部は見えないことがあります。',
 
   'settings.general': '一般',
   'settings.launchAtLogin': 'ログイン時に起動',

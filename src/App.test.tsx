@@ -28,6 +28,8 @@ const SETTINGS: AppSettings = {
   showInMenuBar: true,
   dragToSnapEnabled: false,
   dragToMoveEnabled: false,
+  menuBarTidyEnabled: false,
+  menuBarAutoCollapseSecs: 0,
 };
 
 const ALL_GRANTED: SetupStatus = {

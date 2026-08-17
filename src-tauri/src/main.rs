@@ -19,6 +19,7 @@ mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
 mod locks;
+mod menubar;
 #[cfg(target_os = "macos")]
 mod overlay;
 mod regrant;
@@ -121,6 +122,8 @@ fn main() {
             commands::install_update,
             commands::get_keep_awake,
             commands::set_keep_awake,
+            commands::get_menu_bar,
+            commands::set_menu_bar_collapsed,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -195,6 +198,10 @@ fn main() {
             // Keep-awake never persists as "on", so clear any lid-close sleep
             // override a previous run left behind after an unclean exit.
             keepawake::reconcile_on_launch(&handle);
+
+            // Put the menu bar divider back if tidying is switched on. Always
+            // collapsed to start with, so a launch looks the same every time.
+            menubar::init(&handle);
 
             // Compare the current permission state against the snapshot the
             // previous run stored: a grant that vanished together with a
@@ -331,6 +338,10 @@ fn main() {
                 // means Caps Lock is never left remapped for however long that
                 // dialog is up (or declined).
                 let _ = capsmap::reconcile(false);
+                // Drop the divider before the slow part below: it is the one
+                // piece of teardown the user can see, and `cleanup_blocking`
+                // can sit behind an admin-auth dialog for a while.
+                menubar::teardown(app);
                 keepawake::cleanup_blocking(app);
             }
         });

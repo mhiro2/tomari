@@ -81,6 +81,36 @@ Multi-display moves and undo have no buttons in the window: reaching for the
 mouse to place a window defeats the point. Bind them to shortcuts in the
 Keyboard section, or reach them from the menu bar menu.
 
+## Menu bar tidying
+
+Push the status icons you rarely look at off the edge of the screen, and bring
+them back when you want them.
+
+Turn it on in the **Menu Bar** section and Tomari adds two small items to your
+menu bar: a **divider** (≡) and a **handle** (‹). Collapsing stretches the
+divider so everything to its *left* slides off-screen; the handle stays put so
+you can always bring them back.
+
+**You choose what gets hidden.** Hold ⌘ and drag your menu bar icons so the ones
+you want tucked away sit to the left of the divider. macOS lets an app move only
+its own menu bar icons, so this part is yours to do — there is no way for Tomari
+to sort them for you.
+
+- **Expand and collapse** — click the ‹ handle, use **Show Menu Bar Icons** in
+  the tray menu, or bind the "Show/Hide Menu Bar Icons" action to a shortcut in
+  the Keyboard section.
+- **Collapse automatically** — off by default; 5, 15 or 30 seconds are
+  available. A timed collapse fires on schedule whatever you are doing,
+  including while one of the revealed menus is open.
+- **Limits** — expanding may not reveal everything if the frontmost app has a
+  long menu bar of its own, or if your Mac has a notch. That is the method, not
+  a bug: Tomari is making room by moving its own item, not by taking over the
+  menu bar.
+
+If you ever lose the handle (⌘-dragging it to the *left* of the divider hides it
+along with everything else), open Tomari's window with the global shortcut
+(default ⌘⇧K) and use the switch in the Menu Bar section.
+
 ## Prevent Sleep (keep awake)
 
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from

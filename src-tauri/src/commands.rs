@@ -161,6 +161,12 @@ pub async fn save_settings(
         let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
     }
 
+    // Bring the menu bar's status items up or down and redraw the auto-collapse
+    // deadline. Reconciled on every save, not only when the switch changed: the
+    // items are cheap to reapply and a previous failure to create them then has
+    // a chance to heal, the same reasoning as the taps below.
+    crate::menubar::apply_settings(&app, &previous, &settings);
+
     // Only (re)start a tap when its own toggle (or the window-management
     // master switch) actually changed. Flipping unrelated preferences must not
     // tear a tap down and rebuild it, which would briefly drop input
@@ -753,6 +759,20 @@ pub fn get_keep_awake(state: State<'_, AppState>) -> crate::keepawake::KeepAwake
 #[tauri::command]
 pub fn set_keep_awake(app: AppHandle, enabled: bool) -> crate::keepawake::KeepAwakeStatus {
     crate::keepawake::set(&app, enabled)
+}
+
+/// Whether menu bar tidying is on and, if so, whether it is collapsed right
+/// now — for the panel to render on open.
+#[tauri::command]
+pub fn get_menu_bar(state: State<'_, AppState>) -> crate::menubar::MenuBarStatus {
+    crate::menubar::status(state.inner())
+}
+
+/// Expand or collapse the tidied menu bar items from the panel. A no-op while
+/// the feature is off, which the returned status reflects.
+#[tauri::command]
+pub fn set_menu_bar_collapsed(app: AppHandle, collapsed: bool) -> crate::menubar::MenuBarStatus {
+    crate::menubar::set_collapsed(&app, collapsed)
 }
 
 #[cfg(test)]

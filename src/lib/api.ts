@@ -9,6 +9,7 @@ import type {
   AppSettings,
   Hotkey,
   KeepAwakeStatus,
+  MenuBarStatus,
   ModifierRule,
   SaveSettingsOutcome,
   SetupStatus,
@@ -79,6 +80,14 @@ export const getKeepAwake = (): Promise<KeepAwakeStatus> => invoke('get_keep_awa
 // background), signalled by the "tomari:keep-awake-changed" event.
 export const setKeepAwake = (enabled: boolean): Promise<KeepAwakeStatus> =>
   invoke('set_keep_awake', { enabled });
+
+// Whether menu bar tidying is on and, if so, whether it is collapsed.
+export const getMenuBar = (): Promise<MenuBarStatus> => invoke('get_menu_bar');
+
+// Expand or collapse the tidied menu bar icons. Resolves to the resulting
+// status, which reports the feature still off if it was never switched on.
+export const setMenuBarCollapsed = (collapsed: boolean): Promise<MenuBarStatus> =>
+  invoke('set_menu_bar_collapsed', { collapsed });
 
 // Resolves to the available update, or null when already on the latest version.
 export const checkForUpdate = (): Promise<UpdateInfo | null> => invoke('check_for_update');

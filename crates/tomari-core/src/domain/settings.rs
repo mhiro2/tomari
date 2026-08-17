@@ -49,6 +49,17 @@ pub struct AppSettings {
     /// first. A single switch covers both gestures, like the snap toggle above.
     #[serde(default)]
     pub drag_to_move_enabled: bool,
+    /// Tidy the menu bar: Tomari places a divider among the status items, and
+    /// collapsing pushes everything left of it off the edge of the screen. Which
+    /// items end up hidden is the user's own ⌘-drag arrangement — macOS exposes
+    /// no way to read, let alone move, another app's status item.
+    #[serde(default)]
+    pub menu_bar_tidy_enabled: bool,
+    /// Collapse again this many seconds after expanding. Zero disables the
+    /// timer, which is the default: a collapse landing while the user has one of
+    /// the revealed menus open would yank it away mid-use.
+    #[serde(default)]
+    pub menu_bar_auto_collapse_secs: u32,
 }
 
 fn default_external_window_actions_enabled() -> bool {
@@ -71,6 +82,8 @@ impl Default for AppSettings {
             show_in_menu_bar: true,
             drag_to_snap_enabled: false,
             drag_to_move_enabled: false,
+            menu_bar_tidy_enabled: false,
+            menu_bar_auto_collapse_secs: 0,
         }
     }
 }
@@ -154,6 +167,8 @@ mod tests {
             show_in_menu_bar: false,
             drag_to_snap_enabled: true,
             drag_to_move_enabled: true,
+            menu_bar_tidy_enabled: true,
+            menu_bar_auto_collapse_secs: 15,
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: AppSettings = serde_json::from_str(&json).unwrap();

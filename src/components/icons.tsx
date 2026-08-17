@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 /** The sections the sidebar can select. */
-export type SectionName = 'keyboard' | 'window' | 'session' | 'general';
+export type SectionName = 'keyboard' | 'window' | 'menubar' | 'session' | 'general';
 
 // One drawing standard for every section icon, so the sidebar reads as a single
 // column rather than four unrelated marks: a 16×16 box, a 1.5 stroke, no fill,
@@ -22,6 +22,15 @@ const SHAPES: Record<SectionName, ReactNode> = {
     <>
       <rect x="2" y="3" width="12" height="10" rx="1.5" />
       <path d="M8 3v10" />
+    </>
+  ),
+  // The divider with icons either side of it — the arrangement the feature is
+  // all about.
+  menubar: (
+    <>
+      <path d="M2.6 8h.01M5.1 8h.01" />
+      <path d="M8 3.5v9" />
+      <path d="M10.9 8h.01M13.4 8h.01" />
     </>
   ),
   // An open eye: the Mac stays awake.

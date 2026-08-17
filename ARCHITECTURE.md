@@ -6,8 +6,9 @@ for adding new features.
 Tomari is a small utility that lives in the macOS menu bar. It currently
 provides **keyboard customization** (modifier tap/hold, remapping, hyper key,
 global shortcuts), **window management** (snapping to presets, moving across
-displays, undo, drag-to-snap), and **sleep prevention** (keep awake, including
-with the lid closed).
+displays, undo, drag-to-snap), **menu bar tidying** (hiding status items behind
+a divider), and **sleep prevention** (keep awake, including with the lid
+closed).
 
 ---
 
@@ -35,15 +36,16 @@ with the lid closed).
 │ src/            React + TypeScript UI       │
 │                 (one window, sidebar        │
 │                  sections: Keyboard /       │
-│                  Windows / Prevent Sleep /  │
-│                  General)                   │
+│                  Windows / Menu Bar /       │
+│                  Prevent Sleep / General)   │
 └──────────────────────┬──────────────────────┘
                        │ Tauri invoke (camelCase JSON)
 ┌──────────────────────▼──────────────────────┐
 │ src-tauri/      Tauri v2 shell (tomari-app) │
 │   commands / tray / shortcuts / actions     │
 │   eventtap / drag_to_snap / drag_to_move /  │
-│   keysend / window_ops  (macOS-specific)    │
+│   keysend / window_ops / menubar            │
+│   (macOS-specific)                          │
 └───────┬──────────────┬──────────────┬───────┘
         ▼              ▼              ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
@@ -75,7 +77,8 @@ platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
   `SnapWindow(WindowPreset)` / `SnapWindowExact(WindowPreset)` (the exact
   variant applies the preset without the half→third→two-thirds cycle, so the
   URL scheme is idempotent) / `MoveWindowToDisplay` / `UndoWindow` /
-  `SwitchIme(ImeMode)` / `SendKeystroke` / `ToggleKeepAwake` / `NoOp`.
+  `SwitchIme(ImeMode)` / `SendKeystroke` / `ToggleKeepAwake` /
+  `ToggleMenuBar` / `NoOp`.
   Round-trips to the frontend as-is via
   `#[serde(tag = "type", content = "value")]`.
 - **`Hotkey`** — an accelerator string plus an `AppAction`.
@@ -86,8 +89,9 @@ platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
   window-management value types. Coordinates are points with a top-left origin,
   matching both CGDisplay and the AX API.
 - **`AppSettings`** — feature master switches, drag-to-snap configuration, the
-  left/right ⌘ IME-toggle switch (`command_ime_switch_enabled`), UI language
-  (`Language`: system / en / ja), etc. Persisted as a single JSON row. (The app
+  left/right ⌘ IME-toggle switch (`command_ime_switch_enabled`), menu bar
+  tidying (`menu_bar_tidy_enabled` plus its `menu_bar_auto_collapse_secs`), UI
+  language (`Language`: system / en / ja), etc. Persisted as a single JSON row. (The app
   is dark-only, so there is no theme setting; the tap/hold threshold is a fixed
   engine constant, not a preference.)
 
@@ -380,7 +384,53 @@ leftover override — only one we set, never a user's own `disablesleep` — and
 relaunch and logout alike) releases everything before the process exits. The
 pure `reconcile_decision` is unit-tested; the IOKit / `pmset` layer stays thin.
 
-## 9. Permission model
+## 9. Menu bar tidying (`src-tauri/src/menubar/`)
+
+Gather the status items you rarely look at behind a divider and push them off
+the edge of the screen until you ask for them — the job Bartender, Ice and
+Hidden Bar do.
+
+macOS offers no API to enumerate, identify or move another app's status item,
+so hiding one directly is impossible. What is possible is to own an item and
+make it enormous: the menu bar lays items out right to left, so an item
+stretched to a sentinel width (`10_000pt`, which macOS clamps to something a
+little over the screen) pushes everything to its left past the edge. **Which
+icons those are is the user's own ⌘-drag arrangement** — the app cannot do the
+sorting for them, and this is the feature's one hard limit rather than a gap to
+be closed later.
+
+Two status items, with distinct jobs:
+
+- the **divider** is the boundary. It shows a mark so it can be found and
+  ⌘-dragged, and it is the item that stretches.
+- the **controller** is the handle: fixed width, always clickable. It must sit
+  to the *right* of the divider, or collapsing sweeps the only way back out of
+  reach. macOS adds each new item to the left of the existing ones, so the
+  controller is created **first** — the order in `make_items` is load-bearing on
+  a first run, after which the autosave names take over.
+
+Layered like the rest: `state.rs` is pure (expanded/collapsed, the
+auto-collapse deadline, and a generation so a timer armed by one expand cannot
+collapse a later one) and unit-tested; `status.rs` is the thin AppKit layer,
+main-thread-only in a `thread_local!` with the same last-writer-wins generation
+`overlay` uses, since `run_on_main_thread` only queues.
+
+Auto-collapse defaults to **off**. A collapse landing while the user has one of
+the revealed menus open would take it away mid-use, which is not a default worth
+shipping. State is runtime-only and starts collapsed, except when the feature is
+first switched on: that starts expanded, or a user who has arranged nothing yet
+sees no effect at all and concludes the switch is broken. Quit removes the items
+— not as a safety net (a status item belongs to the process and goes with it,
+even on a crash, so there is no `keepawake`-style marker to keep) but so the
+menu bar is tidy the moment Tomari is asked to leave.
+
+Verified on macOS 26: the divider stretches, the controller stays on screen, and
+clicking it, the tray item, a hotkey or the panel all round-trip. Position
+persistence (`autosaveName`) is best effort on Apple's side and is only written
+once the user actually drags an item, so a rearrangement surviving OFF→ON and
+relaunch is still unproven.
+
+## 10. Permission model
 
 | Permission       | Required by                                        | Acquisition                                                                                                                            |
 | ---------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -391,7 +441,7 @@ pure `reconcile_decision` is unit-tested; the IOKit / `pmset` layer stays thin.
 Global shortcuts need neither permission. The pure engines are testable
 without permissions too (unit tests).
 
-## 10. Testing
+## 11. Testing
 
 - **Rust**: pure logic (the engine, geometry, accelerators) is
   covered by in-module unit tests. The DB opens in memory; tests cover the
@@ -411,7 +461,7 @@ without permissions too (unit tests).
   jobs before publishing (`.github/workflows/release.yaml`), so a release
   build is gated on the same checks as a regular push.
 
-## 11. Adding a feature
+## 12. Adding a feature
 
 1. If it needs domain types and persistence, add the types to `tomari-core`
    and append one migration step to `MIGRATIONS` (keep existing rows alive

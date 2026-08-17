@@ -114,6 +114,8 @@ export function actionLabel(action: AppAction, t: Translator): string {
       return t('action.sendKeystroke', { keys: action.value });
     case 'toggleKeepAwake':
       return t('action.toggleKeepAwake');
+    case 'toggleMenuBar':
+      return t('action.toggleMenuBar');
     case 'noOp':
       return t('action.noOp');
   }

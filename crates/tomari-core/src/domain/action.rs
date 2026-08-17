@@ -42,6 +42,8 @@ pub enum AppAction {
     /// Turn sleep prevention on or off (toggle). Keeps the system awake while
     /// long-running work continues, including with the lid closed.
     ToggleKeepAwake,
+    /// Expand or collapse the tidied part of the menu bar.
+    ToggleMenuBar,
     /// Explicitly do nothing (used to leave a tap unbound).
     NoOp,
 }
@@ -60,6 +62,7 @@ impl AppAction {
             Self::SwitchIme(ImeMode::Kana) => "IME: かな".into(),
             Self::SendKeystroke(k) => format!("Send: {k}"),
             Self::ToggleKeepAwake => "Keep Awake".into(),
+            Self::ToggleMenuBar => "Toggle Menu Bar".into(),
             Self::NoOp => "Do Nothing".into(),
         }
     }
@@ -92,6 +95,7 @@ mod tests {
                 AppAction::SwitchIme(_) => "switchIme",
                 AppAction::SendKeystroke(_) => "sendKeystroke",
                 AppAction::ToggleKeepAwake => "toggleKeepAwake",
+                AppAction::ToggleMenuBar => "toggleMenuBar",
                 AppAction::NoOp => "noOp",
             }
         }
@@ -105,6 +109,7 @@ mod tests {
             AppAction::SwitchIme(ImeMode::Kana),
             AppAction::SendKeystroke("Escape".into()),
             AppAction::ToggleKeepAwake,
+            AppAction::ToggleMenuBar,
             AppAction::NoOp,
         ];
 
