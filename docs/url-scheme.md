@@ -40,7 +40,7 @@ own window instead.
   sending keys, and switching the IME **cannot** be invoked from a URL.
 - Window placement (snap / move-display / undo) is **off by default**. Turn on
   the **"URL scheme control"** toggle under **External control** in the General
-  tab to let launchers move your windows. Until then those URLs are logged
+  section to let launchers move your windows. Until then those URLs are logged
   and ignored.
 - **`toggle-panel` always works**, regardless of that toggle. It only shows or
   hides Tomari's own window, so it stays available as a recovery route when the

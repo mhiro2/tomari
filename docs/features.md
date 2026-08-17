@@ -62,7 +62,7 @@ consequences to be aware of:
 - **Default snap shortcuts** — `⌃⌥←` / `⌃⌥→` / `⌃⌥↑` for left half, right half,
   and maximize. `⌃⌥` (Control + Option) is the Mac-native modifier pair used by
   most window managers and does not collide with macOS's own `⌃`+arrow (Spaces
-  and Mission Control). All shortcuts are rebindable in the Keyboard tab.
+  and Mission Control). All shortcuts are rebindable in the Keyboard section.
 - **Drag-to-snap (optional)** — drag a window to a screen edge or corner to
   show a preview, then release to snap to a half, a corner, or full screen
   depending on where you let go.
@@ -77,11 +77,15 @@ consequences to be aware of:
   sizes (for example 1/2 → 1/3 → 2/3).
 - **Undo** — restore the window's previous position.
 
+Multi-display moves and undo have no buttons in the window: reaching for the
+mouse to place a window defeats the point. Bind them to shortcuts in the
+Keyboard section, or reach them from the menu bar menu.
+
 ## Prevent Sleep (keep awake)
 
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from
 being interrupted — **even when the display is closed**. You can toggle it
-manually from the menu bar tray, the toggle in the Session tab, or a global
+manually from the menu bar tray, the toggle in the Prevent Sleep section, or a global
 shortcut (the "Toggle Prevent Sleep" action). Automatic process detection is
 planned for the future.
 
@@ -108,22 +112,24 @@ machine plugged in is recommended.
 ## Menu bar and window
 
 Tomari runs as a menu bar app: clicking its menu bar icon opens a menu with
-quick actions plus a Settings entry that opens the window (Keyboard, Window,
-Session, and General tabs). On the very first launch the settings window opens
-automatically (the main features need permissions you have not granted yet);
-after that Tomari starts silently in the menu bar. The same happens on the rare
-launch where Tomari had to reset an unreadable settings database — your
-settings are back at their defaults, so the window shows you what state you
-are in.
+quick actions plus a Settings entry that opens the window. A sidebar down the
+left lists the sections — Keyboard, Windows, Prevent Sleep, and General — and a
+muted dot marks a section whose feature is switched off. On the very first
+launch the settings window opens automatically (the main features need
+permissions you have not granted yet); after that Tomari starts silently in the
+menu bar. The same happens on the rare launch where Tomari had to reset an
+unreadable settings database — your settings are back at their defaults, so the
+window shows you what state you are in.
 
 On that first launch the window opens on a one-screen setup checklist in place
-of the tabs (see [Permissions](permissions.md)): grant Accessibility and Input
-Monitoring from there, or choose **Set up later** to use the tabs. While a
-permission is still missing, a reminder bar under the tab bar — and an **Open
-Setup** button in the per-tab permission banners — leads back to the checklist. You can hide the icon with **Show in menu bar** in
-the General tab if you prefer a fully background app. Because hiding it removes
-the app's only visible affordance (Tomari has no Dock icon), turning it off asks
-you to confirm first and spells out how to reopen the window.
+of the sections (see [Permissions](permissions.md)): grant Accessibility and
+Input Monitoring from there, or choose **Set up later** to go to the sections.
+While a permission is still missing, a reminder bar above the content — and an
+**Open Setup** button in the per-section permission banners — leads back to the
+checklist. You can hide the icon with **Show in menu bar** in the General
+section if you prefer a fully background app. Because hiding it removes the
+app's only visible affordance (Tomari has no Dock icon), turning it off asks you
+to confirm first and spells out how to reopen the window.
 
 Even with the icon hidden, you can always reopen the window:
 
@@ -140,4 +146,4 @@ Even with the icon hidden, you can always reopen the window:
 
 The Tomari window and tray menu are available in **Japanese and English**. By
 default Tomari follows your system language; you can also pick a language
-explicitly in the General tab.
+explicitly in the General section.

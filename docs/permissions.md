@@ -9,9 +9,9 @@ While either permission below is missing, the settings window offers a
 one-screen **setup checklist**: each permission as a row with what it is for,
 a **Grant Access** button, and a green **Granted** mark once it is on. On a
 first launch the window opens on this checklist automatically; on later
-launches the tabs show as usual with a thin reminder bar under the tab bar
-that reopens it. **Set up later** on the checklist returns to the tabs the
-same way. The per-tab permission banners stay, and their **Open Setup**
+launches the sections show as usual with a thin reminder bar above the content
+that reopens it. **Set up later** on the checklist returns to the sections the
+same way. The per-section permission banners stay, and their **Open Setup**
 button also leads back to the checklist.
 
 The administrator password for Prevent Sleep is deliberately not on the
@@ -73,6 +73,6 @@ and a launch that finds a previously granted permission missing *and* a changed
 app version opens the settings window on the setup checklist, noting that the
 permissions went missing after the update. If the version has not changed — you
 revoked a permission yourself — nothing opens automatically; the tray items and
-tab banners point it out as usual. (Detection needs a stored snapshot to
+section banners point it out as usual. (Detection needs a stored snapshot to
 compare against, so it starts working from the first update *after* the release
 that introduced it.)

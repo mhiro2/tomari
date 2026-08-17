@@ -1,6 +1,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useState } from 'react';
 
+import { SectionIcon, type SectionName } from './components/icons';
 import { Banner } from './components/ui';
 import * as api from './lib/api';
 import { formatCmdError } from './lib/errors';
@@ -13,18 +14,9 @@ import { SessionView } from './views/SessionView';
 import { SetupView, type SetupPermissions } from './views/SetupView';
 import { WindowView } from './views/WindowView';
 
-type Tab = 'keyboard' | 'window' | 'session' | 'general';
+type Section = SectionName;
 
-const TABS: Tab[] = ['keyboard', 'window', 'session', 'general'];
-
-// The text-presentation selector (U+FE0E) keeps these glyphs rendering as
-// plain monochrome text, not emoji, on macOS.
-const TAB_ICONS: Record<Tab, string> = {
-  keyboard: '⌨︎',
-  window: '▦︎',
-  session: '◉︎',
-  general: '⚙︎',
-};
+const SECTIONS: Section[] = ['keyboard', 'window', 'session', 'general'];
 
 export function App() {
   return (
@@ -61,7 +53,7 @@ type SetupState = 'unknown' | 'open' | 'dismissed' | 'done';
 function AppShell() {
   const t = useT();
   const { settings, loadError, retryLoad, saveError } = useSettings();
-  const [tab, setTab] = useState<Tab>('keyboard');
+  const [section, setSection] = useState<Section>('keyboard');
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
   const [setup, setSetup] = useState<SetupState>('unknown');
   const [updateRegrant, setUpdateRegrant] = useState(false);
@@ -71,10 +63,10 @@ function AppShell() {
   });
 
   // The tray "Check for Updates" entry shows this window and emits the event;
-  // jump to the General tab and run the check so the result shows up there.
+  // jump to the General section and run the check so the result shows up there.
   useEffect(() => {
     const unlisten = listen('tomari:check-update', () => {
-      setTab('general');
+      setSection('general');
       setAutoCheckUpdate(true);
     });
     return () => void unlisten.then((fn) => fn());
@@ -83,7 +75,8 @@ function AppShell() {
   // Pull the setup status once the WebView is up (an event pushed from the
   // backend at launch could fire before this listener exists, so it is a pull),
   // then keep the permission pair current from the backend's poll. A failed
-  // pull falls back to 'done' — the tabs, exactly the pre-setup-view behavior.
+  // pull falls back to 'done' — the sections, exactly the pre-setup-view
+  // behavior.
   useEffect(() => {
     void (async () => {
       try {
@@ -107,7 +100,7 @@ function AppShell() {
 
   // Once everything is granted, retire the reminder banner on its own; if a
   // permission is later revoked (in System Settings, outside the app), bring
-  // it back so the loss is visible even on tabs that carry no permission
+  // it back so the loss is visible even in sections that carry no permission
   // banner of their own. The open checklist is deliberately not auto-closed —
   // it stays to show the ✓s and let the user leave via its Done button.
   useEffect(() => {
@@ -131,15 +124,19 @@ function AppShell() {
     [],
   );
 
-  // Hold the shell until the setup pull settles: rendering the tabs first and
-  // swapping them for the checklist a beat later would flicker and yank the
-  // DOM out from under anyone who already started reading or tabbing.
+  // Hold the shell until the setup pull settles: rendering the sections first
+  // and swapping them for the checklist a beat later would flicker and yank the
+  // DOM out from under anyone who already started reading or tabbing. Setup
+  // takes the whole window — the sidebar would offer paths that do not work
+  // until the permissions are granted.
   if (setup === 'unknown') {
     return (
       <div className="app">
-        <main className="app__main">
-          <div className="view">{t('common.loading')}</div>
-        </main>
+        <div className="app__content">
+          <main className="app__main">
+            <div className="view">{t('common.loading')}</div>
+          </main>
+        </div>
       </div>
     );
   }
@@ -147,23 +144,25 @@ function AppShell() {
   if (setup === 'open') {
     return (
       <div className="app">
-        <main className="app__main">
-          <SetupView
-            permissions={permissions}
-            updateRegrant={updateRegrant}
-            onGranted={onGranted}
-            onDismiss={() => setSetup('dismissed')}
-            onDone={() => setSetup('done')}
-          />
-        </main>
+        <div className="app__content">
+          <main className="app__main">
+            <SetupView
+              permissions={permissions}
+              updateRegrant={updateRegrant}
+              onGranted={onGranted}
+              onDismiss={() => setSetup('dismissed')}
+              onDone={() => setSetup('done')}
+            />
+          </main>
+        </div>
       </div>
     );
   }
 
-  // A muted dot on a tab whose feature is switched off, so the master switch
-  // (which lives inside the tab) is discoverable from the nav. The Session and
-  // General tabs have no master switch, so they never carry one.
-  const featureOff: Record<Tab, boolean> = {
+  // A muted dot on a section whose feature is switched off, so the master
+  // switch (which lives inside the section) is discoverable from the sidebar.
+  // Prevent Sleep and General have no master switch, so they never carry one.
+  const featureOff: Record<Section, boolean> = {
     keyboard: settings ? !settings.keyboardEnabled : false,
     window: settings ? !settings.windowManagementEnabled : false,
     session: false,
@@ -172,70 +171,70 @@ function AppShell() {
 
   return (
     <div className="app">
-      <nav className="tabs" aria-label={t('app.sections')}>
-        {TABS.map((id) => (
+      <nav className="sidebar" aria-label={t('app.sections')}>
+        {SECTIONS.map((id) => (
           <button
             key={id}
             type="button"
-            className={`tab ${tab === id ? 'tab--active' : ''}`}
-            aria-current={tab === id ? 'true' : undefined}
+            className={`nav-item ${section === id ? 'nav-item--active' : ''}`}
+            aria-current={section === id ? 'true' : undefined}
             // When off, fold the state into the accessible name; the dot itself
             // is decorative.
             aria-label={
-              featureOff[id] ? `${t(`app.tabs.${id}`)} (${t('app.featureOff')})` : undefined
+              featureOff[id] ? `${t(`app.nav.${id}`)} (${t('app.featureOff')})` : undefined
             }
-            onClick={() => setTab(id)}
+            onClick={() => setSection(id)}
           >
-            <span className="tab__icon" aria-hidden="true">
-              {TAB_ICONS[id]}
-            </span>
-            {t(`app.tabs.${id}`)}
-            {featureOff[id] && <span className="tab__dot" aria-hidden="true" />}
+            <SectionIcon name={id} />
+            {t(`app.nav.${id}`)}
+            {featureOff[id] && <span className="nav-item__dot" aria-hidden="true" />}
           </button>
         ))}
       </nav>
 
-      {setup === 'dismissed' && (
-        <div className="setup-banner">
-          <span>{t('setup.bannerText')}</span>
-          <button type="button" className="btn btn--ghost" onClick={openSetup}>
-            {t('setup.bannerAction')}
-          </button>
-        </div>
-      )}
-
-      {saveError !== null && (
-        <p className="alert" role="alert">
-          {t('settings.saveFailed', { error: formatCmdError(saveError, t) })}
-        </p>
-      )}
-
-      <main className="app__main">
-        {settings === null && loadError !== null ? (
-          // The initial settings load failed, so every view would sit on its
-          // loading state forever — show the error with a retry instead.
-          <Banner tone="warn">
-            <div className="banner__body" role="alert">
-              <p>{t('common.loadFailed', { error: formatCmdError(loadError, t) })}</p>
-            </div>
-            <button type="button" className="btn btn--primary" onClick={retryLoad}>
-              {t('common.retry')}
+      <div className="app__content">
+        {setup === 'dismissed' && (
+          <div className="setup-banner">
+            <span>{t('setup.bannerText')}</span>
+            <button type="button" className="btn btn--ghost" onClick={openSetup}>
+              {t('setup.bannerAction')}
             </button>
-          </Banner>
-        ) : (
-          <>
-            {tab === 'keyboard' && <KeyboardView onOpenSetup={openSetup} />}
-            {tab === 'window' && <WindowView onOpenSetup={openSetup} />}
-            {tab === 'session' && <SessionView />}
-            {tab === 'general' && (
-              <GeneralView
-                autoCheckUpdate={autoCheckUpdate}
-                onAutoCheckHandled={onAutoCheckHandled}
-              />
-            )}
-          </>
+          </div>
         )}
-      </main>
+
+        {saveError !== null && (
+          <p className="alert" role="alert">
+            {t('settings.saveFailed', { error: formatCmdError(saveError, t) })}
+          </p>
+        )}
+
+        <main className="app__main">
+          {settings === null && loadError !== null ? (
+            // The initial settings load failed, so every view would sit on its
+            // loading state forever — show the error with a retry instead.
+            <Banner tone="warn">
+              <div className="banner__body" role="alert">
+                <p>{t('common.loadFailed', { error: formatCmdError(loadError, t) })}</p>
+              </div>
+              <button type="button" className="btn btn--primary" onClick={retryLoad}>
+                {t('common.retry')}
+              </button>
+            </Banner>
+          ) : (
+            <>
+              {section === 'keyboard' && <KeyboardView onOpenSetup={openSetup} />}
+              {section === 'window' && <WindowView onOpenSetup={openSetup} />}
+              {section === 'session' && <SessionView />}
+              {section === 'general' && (
+                <GeneralView
+                  autoCheckUpdate={autoCheckUpdate}
+                  onAutoCheckHandled={onAutoCheckHandled}
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

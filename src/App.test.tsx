@@ -6,6 +6,10 @@ import type { AppSettings, PermissionsChanged, SetupStatus } from './lib/types';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
+// The General section reads the app version on mount; it goes through its own
+// module rather than the command bridge.
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(() => Promise.resolve('1.2.3')) }));
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
 
@@ -46,6 +50,7 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(ALL_GRANTED);
       case 'list_modifier_rules':
       case 'list_hotkeys':
+      case 'list_window_presets':
         return Promise.resolve([]);
       case 'input_monitoring_status':
       case 'accessibility_status':
@@ -79,7 +84,7 @@ describe('App setup flow', () => {
     });
   });
 
-  it('shows the tabs, no checklist and no banner, when nothing is missing', async () => {
+  it('shows the sections, no checklist and no banner, when nothing is missing', async () => {
     render(<App />);
 
     expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
@@ -87,7 +92,7 @@ describe('App setup flow', () => {
     expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
   });
 
-  it('opens the checklist instead of the tabs on a first run with missing permissions', async () => {
+  it('opens the checklist instead of the sections on a first run with missing permissions', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, firstRun: true, accessibility: false },
     });
@@ -130,7 +135,7 @@ describe('App setup flow', () => {
     expect(screen.queryByText(/went missing after the update/)).not.toBeInTheDocument();
   });
 
-  it('shows the tabs plus the reminder banner when permissions are missing on a normal launch', async () => {
+  it('shows the sections plus the reminder banner when permissions are missing on a normal launch', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, inputMonitoring: false },
     });
@@ -194,7 +199,7 @@ describe('App setup flow', () => {
     expect(screen.getByText('Set up Tomari')).toBeInTheDocument();
   });
 
-  it('falls back to the tabs when the setup status cannot be read', async () => {
+  it('falls back to the sections when the setup status cannot be read', async () => {
     mockCommands({
       setup_status: Object.assign(new Error('status unavailable'), { code: 'unknown' }),
     });
@@ -203,5 +208,61 @@ describe('App setup flow', () => {
 
     expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
     expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
+  });
+});
+
+// The sidebar row and the switch inside the section share the "Prevent Sleep"
+// name, so reach for the section's descriptive text instead.
+const LID_HINT = /awake even with the lid closed/;
+
+function nav(name: string | RegExp) {
+  return screen.getByRole('button', { name });
+}
+
+describe('App sidebar', () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockCommands();
+    mockListen.mockReset();
+    mockListen.mockImplementation(() => Promise.resolve(() => {}));
+  });
+
+  it('starts on Keyboard with that row marked current', async () => {
+    render(<App />);
+
+    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
+    expect(nav('Keyboard')).toHaveAttribute('aria-current', 'true');
+    expect(nav('Windows')).not.toHaveAttribute('aria-current');
+  });
+
+  it('switches sections and moves the current marker with the click', async () => {
+    render(<App />);
+    await screen.findByText('Keyboard customization');
+
+    fireEvent.click(nav('Windows'));
+    expect(await screen.findByText('Snap focused window')).toBeInTheDocument();
+    expect(screen.queryByText('Keyboard customization')).not.toBeInTheDocument();
+    expect(nav('Windows')).toHaveAttribute('aria-current', 'true');
+    expect(nav('Keyboard')).not.toHaveAttribute('aria-current');
+
+    fireEvent.click(nav('Prevent Sleep'));
+    expect(await screen.findByText(LID_HINT)).toBeInTheDocument();
+
+    fireEvent.click(nav('General'));
+    expect(await screen.findByText('Maintenance')).toBeInTheDocument();
+
+    fireEvent.click(nav('Keyboard'));
+    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
+  });
+
+  it('names a section as off when its master switch is off', async () => {
+    mockCommands({ get_settings: { ...SETTINGS, windowManagementEnabled: false } });
+
+    render(<App />);
+    await screen.findByText('Keyboard customization');
+
+    // The dot is decorative, so the state has to reach the accessible name.
+    expect(nav('Windows (Off)')).toBeInTheDocument();
+    expect(nav('Keyboard')).toBeInTheDocument();
   });
 });

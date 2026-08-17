@@ -26,16 +26,17 @@ with the lid closed).
   frontend through Tauri commands. `src/lib/types.ts` mirrors them.
 - **Features are added crate by crate.** A new tool is an independent
   `tomari-<feature>` crate (pure logic plus a macOS apply layer if needed) and
-  a frontend tab.
+  a frontend section.
 
 ## 2. Layers and crates
 
 ```text
 ┌─────────────────────────────────────────────┐
 │ src/            React + TypeScript UI       │
-│                 (one window: Keyboard /     │
-│                  Window / Session /         │
-│                  General tabs)              │
+│                 (one window, sidebar        │
+│                  sections: Keyboard /       │
+│                  Windows / Prevent Sleep /  │
+│                  General)                   │
 └──────────────────────┬──────────────────────┘
                        │ Tauri invoke (camelCase JSON)
 ┌──────────────────────▼──────────────────────┐
@@ -236,7 +237,7 @@ skips arming whenever a gesture chord is held so the two never fight.
   where the seed actually ran is flagged as `AppState::first_run`, which
   `setup` uses to auto-open the settings window once and the frontend pulls
   via the `setup_status` command (together with the current permission states)
-  to decide whether to show the setup checklist instead of the tabs. It is a
+  to decide whether to show the setup checklist instead of the sections. It is a
   pull, not an event: a push at launch would race the WebView load. Any
   ambiguous detection counts as _not_ a first run, so an existing database
   never triggers it; a corruption reset that re-seeds a fresh database does,
@@ -263,8 +264,14 @@ skips arming whenever a gesture chord is held so the two never fight.
   hands off to the running instance (surfacing its panel) and exits.
   `deep-link` is registered right after it, as the plugin requires.
 - The activation policy is **Accessory** (no Dock icon). A single window
-  (`main`, 440×640, decorated, opaque, not always on top) is declared in
-  `tauri.conf.json`; it carries the Keyboard / Window / Session / General tabs. Closing
+  (`main`, 620×720, decorated, opaque, not always on top) is declared in
+  `tauri.conf.json`; a fixed-width sidebar lists its sections beside one content
+  column. A row of equal-width tabs was the earlier layout, but it runs out of
+  width at five entries — the sidebar grows down the column instead, which is
+  what a tool-per-section app needs as tools are added. The height is sized so
+  that every section fits without scrolling — check against Japanese, which
+  runs taller than English. A section that outgrows the window should be
+  trimmed rather than left to scroll silently. Closing
   it is reinterpreted as hide (so reopening is instant and keeps state), and as
   a normal macOS window it stays open on focus loss. Minimize/zoom are disabled
   (`minimizable`/`maximizable: false`) so only the red close button is active.
@@ -282,7 +289,7 @@ skips arming whenever a gesture chord is held so the two never fight.
 - **Tray** (`tray.rs`): setup items for missing permissions (at the very
   top), window snaps, Settings, Check for Updates (both open the single
   window; Check for Updates also emits `tomari:check-update`, which the UI
-  handles by switching to the General tab and running the check). Rebuilt as
+  handles by switching to the General section and running the check). Rebuilt as
   permission state changes. Labels are localized (English / Japanese) from
   the language setting; `System` resolves via `NSLocale` and a language
   change rebuilds the menu.
@@ -297,8 +304,12 @@ skips arming whenever a gesture chord is held so the two never fight.
   (`{ code, message }`, `src-tauri/src/error.rs`): the frontend localizes the
   frequent `code`s (missing permission, no focused window, shortcut conflict)
   and falls back to the English `message` for the rest.
-- **Frontend** (`src/`): `main.tsx` mounts a single `App` with four tabs —
-  `KeyboardView` / `WindowView` / `SessionView` / `GeneralView`. `lib/api.ts` provides typed invoke wrappers whose argument
+- **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar selects
+  one of four sections — `KeyboardView` / `WindowView` / `SessionView` /
+  `GeneralView`. A section's row carries a muted dot when its master switch is
+  off, folded into the row's accessible name so the state is not colour-only.
+  Sections are named for what they do (`SessionView` is *Prevent Sleep*,
+  matching its tray entry and its own switch). `lib/api.ts` provides typed invoke wrappers whose argument
   keys must match the Rust command parameter names; `lib/types.ts` mirrors
   the domain types. `lib/i18n.tsx` holds the typed English/Japanese message
   dictionaries and the `useT` hook; backend commands return ids (e.g.
@@ -413,9 +424,12 @@ without permissions too (unit tests).
 3. If users trigger it, add one variant to `AppAction` and one branch to
    `actions::dispatch`. That alone makes it reachable from hotkeys, taps,
    the tray, and the UI.
-4. UI work is a tab under `src/views/` plus additions to `lib/api.ts` /
-   `lib/types.ts`. Add a thin Tauri command in `commands.rs` and register it
-   in the handler list in `main.rs`.
+4. UI work is a section under `src/views/`, an entry in `SECTIONS` plus an icon
+   in `components/icons.tsx`, and additions to `lib/api.ts` / `lib/types.ts`.
+   Add a thin Tauri command in `commands.rs` and register it in the handler
+   list in `main.rs`. Only add an `api.ts` wrapper for what the panel actually
+   calls — an action better driven by hotkey than by mouse (moving a window
+   across displays, undo) needs no wrapper at all.
 5. In save commands, remember to sync persistence with live state (engines,
    shortcut registration, taps). Restart a tap only when the change truly
    requires it.

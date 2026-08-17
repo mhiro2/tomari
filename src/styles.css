@@ -1,5 +1,5 @@
 /* =========================================================================
-   Tomari — single-window UI (Keyboard / Window / Session / General tabs)
+   Tomari — single-window UI (a sidebar of sections beside one content column)
 
    Visual language: a solid dark window carries warm-neutral surfaces; amber is
    reserved for *state* — the active path, a waiting input, the spot a window
@@ -97,29 +97,31 @@ body {
 
 .app {
   display: flex;
-  flex-direction: column;
   height: 100vh;
   width: 100%;
   min-width: 360px;
 }
 
-.tabs {
+/* ===== Sidebar ========================================================== */
+
+/* Sections run down the side rather than across the top: the list grows as
+   Tomari gains tools, where a row of equal-width tabs runs out of width. */
+.sidebar {
+  flex: 0 0 152px;
   display: flex;
-  gap: 2px;
-  padding: 3px;
-  /* The native title bar sits above; give the tab bar a little breathing room
-     from it. */
-  margin: 12px 12px 6px;
+  flex-direction: column;
+  gap: 1px;
+  /* The native title bar sits above; start the list clear of it. */
+  padding: 12px 10px;
   background: var(--surface-sunken);
-  border-radius: var(--radius-sm);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
 }
 
-.tab {
-  flex: 1;
+.nav-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: 8px;
   padding: 6px 8px;
   border: 0;
   border-radius: var(--radius-xs);
@@ -127,38 +129,62 @@ body {
   color: var(--ink-dim);
   font-size: var(--fs-small);
   font-weight: 550;
+  text-align: left;
   cursor: pointer;
   transition:
     color 0.12s ease,
     background 0.12s ease;
 }
 
-.tab:active {
+.nav-item:active {
   filter: brightness(0.9);
 }
 
-.tab:hover:not(.tab--active) {
+.nav-item:hover:not(.nav-item--active) {
   color: var(--ink);
+  background: var(--field-bg);
 }
 
-.tab--active {
+.nav-item--active {
   background: var(--surface-strong);
   color: var(--ink);
   box-shadow: var(--shadow);
 }
 
-.tab__icon {
-  font-size: var(--fs-small);
+/* Amber marks the active path. The icon carries it so the signal stays small
+   even though a sidebar row is much wider than the tab it replaces. */
+.nav-item--active .nav-item__icon {
+  color: var(--amber);
+  opacity: 1;
+}
+
+/* One box for every icon keeps the labels aligned down the column; the shapes
+   themselves share a stroke standard (see components/icons.tsx). */
+.nav-item__icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
   opacity: 0.85;
 }
 
-/* A muted dot marks a tab whose feature is switched off. */
-.tab__dot {
+/* A muted dot marks a section whose feature is switched off. Trailing the row
+   keeps it in one column, readable as a list. */
+.nav-item__dot {
   width: 5px;
   height: 5px;
+  margin-left: auto;
   border-radius: 50%;
   background: var(--ink-faint);
   flex-shrink: 0;
+}
+
+/* The content column: shell-level notices stack above the scrolling view. */
+.app__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: 12px;
 }
 
 .app__main {
@@ -168,7 +194,7 @@ body {
      without the heavier look of the platform default. */
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
-  padding: 4px 12px 18px;
+  padding: 0 12px 18px;
 }
 
 .app__main::-webkit-scrollbar {
@@ -194,7 +220,7 @@ body {
 .view {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 /* ===== Settings group (inset list) ===================================== */
@@ -202,7 +228,7 @@ body {
 .group {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 
 .group__label {
@@ -229,12 +255,15 @@ body {
 
 /* ===== Rows ============================================================= */
 
+/* The Keyboard section stacks a dozen of these, so the row is kept tight: the
+   padding and the two text lines are trimmed to what stays comfortably
+   readable, leaving the 22px toggle as the row's real floor. */
 .item {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 11px 13px;
-  min-height: 44px;
+  padding: 8px 13px;
+  min-height: 38px;
 }
 
 .item + .item {
@@ -265,18 +294,21 @@ body {
 .item__body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
   flex: 1;
   min-width: 0;
 }
 
+/* Tighter than the document's 1.45: a title and its one-line description read
+   as a pair, and the looser leading only pushes rows apart. */
 .item__title {
   font-weight: 500;
+  line-height: 1.35;
 }
 
 .item__desc {
   color: var(--ink-dim);
   font-size: var(--fs-caption);
+  line-height: 1.35;
 }
 
 .item__trail {
@@ -563,7 +595,7 @@ select.input {
 .kbd-chip {
   min-width: 42px;
   text-align: center;
-  padding: 6px 8px;
+  padding: 5px 8px;
   background: var(--field-bg);
   border: 1px solid var(--line-strong);
   border-bottom-width: 2px;
@@ -770,7 +802,7 @@ kbd {
 }
 
 .toggle:focus-visible,
-.tab:focus-visible {
+.nav-item:focus-visible {
   outline-offset: 1px;
 }
 

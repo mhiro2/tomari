@@ -6,10 +6,12 @@ import { createContext, useContext, type ReactNode } from 'react';
 import type { Language } from './types';
 
 const en = {
-  'app.tabs.keyboard': 'Keyboard',
-  'app.tabs.window': 'Windows',
-  'app.tabs.session': 'Session',
-  'app.tabs.general': 'General',
+  // Sidebar section names. Prevent Sleep is named for what it does, matching
+  // the tray entry and the switch inside the section.
+  'app.nav.keyboard': 'Keyboard',
+  'app.nav.window': 'Windows',
+  'app.nav.session': 'Prevent Sleep',
+  'app.nav.general': 'General',
   'app.sections': 'Sections',
   'app.featureOff': 'Off',
 
@@ -195,10 +197,10 @@ const en = {
 export type MessageKey = keyof typeof en;
 
 const ja: Record<MessageKey, string> = {
-  'app.tabs.keyboard': 'キーボード',
-  'app.tabs.window': 'ウィンドウ',
-  'app.tabs.session': 'セッション',
-  'app.tabs.general': '一般',
+  'app.nav.keyboard': 'キーボード',
+  'app.nav.window': 'ウィンドウ',
+  'app.nav.session': 'スリープ防止',
+  'app.nav.general': '一般',
   'app.sections': 'セクション',
   'app.featureOff': 'オフ',
 
