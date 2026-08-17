@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 
 import { Banner, Group, MasterSwitchHeader, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
@@ -24,11 +24,6 @@ export function WindowView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const [presets, setPresets] = useState<WindowPreset[]>([]);
   const [granted, setGranted] = useState(true);
   const [status, setStatus] = useState<Status | null>(null);
-  // Mirrors `t` so the mount-only effect below can format a load failure
-  // without depending on `t` itself — `useT()` returns a new closure on every
-  // render, so adding it to the effect's deps would re-run the fetch each time.
-  const tRef = useRef(t);
-  tRef.current = t;
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showStatus(message: string, isError: boolean) {
@@ -51,15 +46,20 @@ export function WindowView({ onOpenSetup }: { onOpenSetup?: () => void }) {
     };
   }, []);
 
+  // Formats through the current `t` without the mount-only effect below
+  // depending on it — `useT()` returns a new closure on every render, so
+  // adding it to the effect's deps would re-run the fetch each time.
+  const reportLoadError = useEffectEvent((e: unknown) => showStatus(formatCmdError(e, t), true));
+
   useEffect(() => {
     void api
       .listWindowPresets()
       .then(setPresets)
-      .catch((e: unknown) => showStatus(formatCmdError(e, tRef.current), true));
+      .catch((e: unknown) => reportLoadError(e));
     void api
       .accessibilityStatus()
       .then(setGranted)
-      .catch((e: unknown) => showStatus(formatCmdError(e, tRef.current), true));
+      .catch((e: unknown) => reportLoadError(e));
     // Accessibility is granted in System Settings, outside the app, so follow
     // the backend's poll rather than requiring a reopen.
     const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>

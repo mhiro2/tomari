@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 
 import { Chip, Group, Toggle } from '../components/ui';
 import * as api from '../lib/api';
@@ -27,15 +27,14 @@ export function SessionView() {
   const [error, setError] = useState<string | null>(null);
 
   // The mount effect must not re-run on language change, so it reads the
-  // translator through a ref.
-  const tRef = useRef(t);
-  tRef.current = t;
+  // translator through an effect event.
+  const reportLoadError = useEffectEvent((e: unknown) => setError(formatCmdError(e, t)));
 
   useEffect(() => {
     api
       .getKeepAwake()
       .then(setStatus)
-      .catch((e: unknown) => setError(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => reportLoadError(e));
     const unlisten = listen<KeepAwakeStatus>('tomari:keep-awake-changed', (e) =>
       setStatus(e.payload),
     );

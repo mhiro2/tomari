@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 
 import { ShortcutRecorder } from '../components/ShortcutRecorder';
 import { Banner, EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
@@ -107,27 +107,33 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const [savingHotkeyIds, setSavingHotkeyIds] = useState<ReadonlySet<string>>(new Set());
   const rulesRef = useRef(rules);
   const hotkeysRef = useRef(hotkeys);
-  rulesRef.current = rules;
-  hotkeysRef.current = hotkeys;
-  // Mirrors `t` so the mount-only effect below can format a load failure
-  // without depending on `t` itself — `useT()` returns a new closure on every
-  // render, so adding it to the effect's deps would re-run the fetch each time.
-  const tRef = useRef(t);
-  tRef.current = t;
+  // Mirrored on commit (never during render, which React can replay or
+  // discard) so the refs only ever hold values from committed renders. Layout
+  // timing, not passive: the commit that stores a save's result also
+  // re-enables the row's controls, so the refs must be current before the
+  // next click can possibly be handled.
+  useLayoutEffect(() => {
+    rulesRef.current = rules;
+    hotkeysRef.current = hotkeys;
+  }, [rules, hotkeys]);
+  // Formats through the current `t` without the mount-only effect below
+  // depending on it — `useT()` returns a new closure on every render, so
+  // adding it to the effect's deps would re-run the fetch each time.
+  const formatLoadError = useEffectEvent((e: unknown) => formatCmdError(e, t));
 
   useEffect(() => {
     void api
       .listModifierRules()
       .then(setRules)
-      .catch((e: unknown) => setModifierError(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => setModifierError(formatLoadError(e)));
     void api
       .listHotkeys()
       .then(setHotkeys)
-      .catch((e: unknown) => setShortcutError(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => setShortcutError(formatLoadError(e)));
     void api
       .inputMonitoringStatus()
       .then(setInputMonitoringGranted)
-      .catch((e: unknown) => setShortcutError(formatCmdError(e, tRef.current)));
+      .catch((e: unknown) => setShortcutError(formatLoadError(e)));
     // Accessibility/Input Monitoring are granted in System Settings, outside
     // the app, so follow the backend's poll rather than requiring a reopen.
     const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
