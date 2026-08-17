@@ -7,7 +7,6 @@ import type {
   AcceleratorCheck,
   AppAction,
   AppSettings,
-  DisplayDirection,
   Hotkey,
   KeepAwakeStatus,
   ModifierRule,
@@ -45,10 +44,10 @@ export const listWindowPresets = (): Promise<WindowPreset[]> => invoke('list_win
 export const snapWindow = (preset: WindowPreset): Promise<WindowPreset | null> =>
   invoke('snap_window', { preset });
 
-export const moveWindowToDisplay = (direction: DisplayDirection): Promise<void> =>
-  invoke('move_window_to_display', { direction });
-
-export const undoWindow = (): Promise<void> => invoke('undo_window');
+// Moving between displays and undoing a move have no wrapper here: the panel
+// offers no buttons for them (reaching for the mouse to move a window defeats
+// the point), so they are driven by hotkey, the tray, or the URL scheme, all of
+// which go through the backend's own dispatch.
 
 // Startup pull for the setup checklist: whether this is a first run, whether an
 // update looks to have revoked permissions, and the current permission states.

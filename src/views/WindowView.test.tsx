@@ -102,20 +102,6 @@ describe('WindowView', () => {
     expect(await screen.findByText('Accessibility access needed')).toBeInTheDocument();
   });
 
-  it('moves the window between displays and undoes the last move', async () => {
-    renderView(<WindowView />);
-
-    fireEvent.click(await screen.findByText('Next Display →'));
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('move_window_to_display', { direction: 'next' });
-    });
-
-    fireEvent.click(screen.getByText('↩ Undo Last Move'));
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('undo_window');
-    });
-  });
-
   it('enables drag-to-snap and persists the toggle', async () => {
     renderView(<WindowView />);
 

@@ -558,13 +558,6 @@ select.input {
   color: var(--err);
 }
 
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
 /* ===== Keycaps (Keyboard domain only) ================================== */
 
 .kbd-chip {

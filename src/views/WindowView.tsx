@@ -81,15 +81,6 @@ export function WindowView({ onOpenSetup }: { onOpenSetup?: () => void }) {
     }
   }
 
-  async function run(label: string, op: () => Promise<void>) {
-    try {
-      await op();
-      showStatus(label, false);
-    } catch (err) {
-      showStatus(formatCmdError(err, t), true);
-    }
-  }
-
   async function grant() {
     try {
       const ok = await api.requestAccessibility();
@@ -145,38 +136,6 @@ export function WindowView({ onOpenSetup }: { onOpenSetup?: () => void }) {
                 <span>{presetLabel(preset, t)}</span>
               </button>
             ))}
-          </div>
-        </Group>
-
-        <Group label={t('window.displaysSection')}>
-          <div className="item">
-            <div className="row">
-              <button
-                type="button"
-                className="btn"
-                onClick={() =>
-                  void run(t('window.movedPrev'), () => api.moveWindowToDisplay('prev'))
-                }
-              >
-                {t('window.prevDisplay')}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() =>
-                  void run(t('window.movedNext'), () => api.moveWindowToDisplay('next'))
-                }
-              >
-                {t('window.nextDisplay')}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => void run(t('window.restored'), () => api.undoWindow())}
-              >
-                {t('window.undoMove')}
-              </button>
-            </div>
           </div>
         </Group>
 
