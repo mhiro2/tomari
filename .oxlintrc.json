@@ -1,5 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "extends": ["./.oxlintrc.react-doctor.json"],
   "plugins": ["react", "typescript", "unicorn", "import", "promise", "jsx-a11y"],
   "env": {
     "browser": true,

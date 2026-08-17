@@ -452,7 +452,9 @@ without permissions too (unit tests).
   Tauri API.
 - **Toolchain**: clippy (`-D warnings`) / oxlint (type-aware) for linting,
   rustfmt / oxfmt for formatting, tsc for type checking, cargo-deny for
-  dependency auditing. `make check` runs the whole local suite.
+  dependency auditing. `make check` runs the whole local suite. oxlint also
+  loads React Doctor's rules (`oxlint-plugin-react-doctor`) via
+  `.oxlintrc.react-doctor.json`.
 - **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macos),
   cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
   --debug`) that exercises the same `tauri.conf.json` bundle config a release

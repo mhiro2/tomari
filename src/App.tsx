@@ -112,7 +112,9 @@ function AppShell() {
 
   // The update explanation has served its purpose once setup completes; a
   // checklist reopened after a *later* manual revocation must not still
-  // blame the update.
+  // blame the update. This is a latch on the done transition, not derivable
+  // state, so the chained effect is deliberate.
+  // oxlint-disable-next-line react-doctor/no-effect-chain
   useEffect(() => {
     if (setup === 'done') setUpdateRegrant(false);
   }, [setup]);

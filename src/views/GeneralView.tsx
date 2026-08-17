@@ -56,7 +56,9 @@ export function GeneralView({
   }, [confirmHideTray]);
 
   // The tray's "Check for Updates" entry opens this panel and asks it to run
-  // the check, so the result shows up here.
+  // the check, so the result shows up here. The `checking` ref serializes
+  // runs, so a setter resolving after `await` can never be a stale overlap.
+  // oxlint-disable-next-line react-doctor/no-set-state-after-await-in-effect
   useEffect(() => {
     if (!autoCheckUpdate) return;
     void checkForUpdate();
