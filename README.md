@@ -1,4 +1,6 @@
-# Tomari
+<p align="center">
+  <img src="./assets/hero.jpg" alt="Tomari — Small macOS utilities. One quiet place." width="100%" />
+</p>
 
 Tomari gathers a handful of small macOS utilities under **a single menu bar
 icon**. Today it ships **keyboard customization**, **window management** and
