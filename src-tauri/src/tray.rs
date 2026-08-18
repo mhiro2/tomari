@@ -96,7 +96,9 @@ pub fn build(app: &App) -> tauri::Result<()> {
     let menu = build_menu(app.handle(), ax, im)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(tauri::include_image!("icons/tray.png"))
+        // macOS draws the tray image at 18pt whatever its pixel size, so embed
+        // the 2x bitmap to stay crisp on Retina. Both sizes come from tray.svg.
+        .icon(tauri::include_image!("icons/tray@2x.png"))
         .icon_as_template(true)
         .tooltip("Tomari")
         .menu(&menu)
