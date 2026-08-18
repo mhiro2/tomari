@@ -71,3 +71,6 @@ $RECYCLE.BIN/
 *.msm
 *.msp
 *.lnk
+
+# Python bytecode from the icon generators
+__pycache__/
