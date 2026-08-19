@@ -45,12 +45,20 @@ consequences to be aware of:
 - It merges with, rather than replaces, any custom `hidutil` key mappings you
   have set yourself: Tomari adds (and later removes) only its own Caps Lock → F18
   entry, leaving your other mappings in place.
+- If you had mapped the Caps Lock key itself to something else, Tomari has to
+  take that key over — so it remembers what you had it doing and puts it back
+  when the rule is turned off or Tomari quits. If that cannot be remembered, the
+  remap is not applied at all rather than losing your mapping. And if you had
+  already mapped Caps Lock to F18 yourself, Tomari uses it as-is and never
+  removes it — only a mapping Tomari made is one Tomari takes back.
 - While a Caps Lock rule is active, a physical **F18** key (uncommon) is treated
   as Caps Lock too — the remap makes them indistinguishable.
 - If Tomari is force-quit (rather than quit normally) the remap can persist until
-  the next launch, which removes it again; you can also clear just Tomari's entry
-  yourself by running `hidutil property --get UserKeyMapping`, removing the
-  Caps Lock → F18 entry, and setting the rest back.
+  the next launch, which removes it again. In the rare case where Tomari cannot
+  tell whether a remap is its own — it lost track of it mid-change — it leaves it
+  alone rather than risk removing one of yours. Either way you can clear just
+  that entry yourself by running `hidutil property --get UserKeyMapping`,
+  removing the Caps Lock → F18 entry, and setting the rest back.
 
 ## Window management
 

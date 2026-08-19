@@ -23,7 +23,7 @@
 //! granted the OS returns a null tap (and adds Tomari to the Input Monitoring
 //! list so the user can enable it).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult, EventField};
@@ -62,12 +62,6 @@ pub fn request_input_monitoring() -> bool {
 /// the cross-platform [`AppState`] struct.
 static EVENT_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
-/// Whether Caps Lock is currently remapped to F18 (see [`crate::capsmap`]), so
-/// F18 key events are the Caps Lock modifier rather than a real F18 key. Kept in
-/// step with the remap by [`restart`]; read on the tap thread for every
-/// keystroke, so it is an atomic rather than behind a lock.
-static CAPS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// (Re)start the tap to match the current settings: tears down any existing tap
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
 /// repeatedly (e.g. when the feature is toggled). Callers that do not need the
@@ -103,13 +97,12 @@ pub fn restart_result(app: &AppHandle) -> bool {
     // a chord.
     state.engine.lock_safe().reset();
 
-    // Reconcile the Caps Lock HID remap toward `manage` and record the *actual*
-    // resulting state (not the request) in the proxy flag, so a failed
+    // Reconcile the Caps Lock HID remap toward `manage`. `capsmap` publishes the
+    // *actual* resulting state (not the request) to its proxy flag, so a failed
     // `hidutil` cannot leave the flag out of step with the real mapping — which
     // would route F18, or a stuck Caps, wrongly.
     let reconcile_caps = |manage: bool| {
-        let active = crate::capsmap::reconcile(manage);
-        CAPS_PROXY_ACTIVE.store(active, Ordering::SeqCst);
+        let _ = crate::capsmap::reconcile(manage);
     };
 
     if !state.keyboard_enabled() {
@@ -152,20 +145,18 @@ pub fn is_running() -> bool {
 /// live check behind the `capsLockRemap` warning. A no-op unless the tap is
 /// running, so it never remaps Caps Lock to F18 with no tap to handle it.
 ///
-/// Returns whether the live remap now matches what the settings and rules ask
-/// for — `false` means a `hidutil` failure left the proxy flag (and thus Caps
-/// Lock's actual behavior) out of step with the saved configuration. Because
-/// `capsmap::reconcile` reads the real system state first and retries the
-/// transition, calling this on every save both keeps a still-unresolved
-/// mismatch warning (it does not silently vanish on an unrelated save) and
-/// heals it as soon as `hidutil` cooperates again.
+/// Returns whether the reconcile fully reached what the settings and rules ask
+/// for — `false` means a `hidutil` or ownership-record failure left Caps Lock's
+/// actual behavior, or the record that governs restoring it, out of step with
+/// the saved configuration. Because `capsmap::reconcile` reads the real system
+/// state first and retries the transition, calling this on every save both keeps
+/// a still-unresolved mismatch warning (it does not silently vanish on an
+/// unrelated save) and heals it as soon as the failing step cooperates again.
 pub fn reconcile_caps_mapping(state: &AppState) -> bool {
     let manage = EVENT_TAP.lock_safe().is_some()
         && state.keyboard_enabled()
         && state.engine.lock_safe().has_caps_lock_rule();
-    let active = crate::capsmap::reconcile(manage);
-    CAPS_PROXY_ACTIVE.store(active, Ordering::SeqCst);
-    active == manage
+    crate::capsmap::reconcile(manage).reconciled
 }
 
 /// Mutable state local to the tap thread, reached through a `Mutex` because the
@@ -453,7 +444,7 @@ fn on_key_down(
     // with no distinguishing bit. Accepted as a design trade-off — real F18
     // keys are vanishingly rare, and Caps Lock's own delivery leaves no less
     // invasive alternative.
-    if keycode == crate::capsmap::F18_KEYCODE && CAPS_PROXY_ACTIVE.load(Ordering::SeqCst) {
+    if keycode == crate::capsmap::F18_KEYCODE && crate::capsmap::caps_proxy_active() {
         // Autorepeat key-downs during a hold neither re-fire side effects nor
         // reach an app; only the initial press drives the modifier down.
         if event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) == 0 {
@@ -495,7 +486,7 @@ fn on_key_up(
     // press/release here is what fires the tap action (e.g. Esc). Drop the event.
     // Same known limitation as `on_key_down`: a real physical F18 is
     // indistinguishable from the proxy while it is active.
-    if keycode == crate::capsmap::F18_KEYCODE && CAPS_PROXY_ACTIVE.load(Ordering::SeqCst) {
+    if keycode == crate::capsmap::F18_KEYCODE && crate::capsmap::caps_proxy_active() {
         drive_modifier(
             app,
             app_state,

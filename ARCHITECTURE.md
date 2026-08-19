@@ -124,9 +124,29 @@ the OS `UserKeyMapping` facility (`hidutil`, Apple TN2450). The remap happens
 before the lock is interpreted, so Caps never locks; F18 emits real key-down/up
 that the tap drives as the Caps Lock modifier. `eventtap::restart` reconciles the
 remap with whether an enabled rule manages Caps Lock, and quit takes it down.
-Because setting the property rewrites the whole list, `apply`/`clear` read the
+Because setting the property rewrites the whole list, both directions read the
 current `UserKeyMapping` first and add/remove only Tomari's Caps Lock → F18
-entry, leaving any mappings the user set themselves intact.
+entry, leaving any mappings the user set themselves intact. The one mapping that
+cannot merely coexist is one the user put on the Caps Lock source itself (Caps →
+Escape, say): taking that slot over has to replace it, and `UserKeyMapping`
+records no provenance, so a live Caps Lock → F18 is equally plausibly the user's
+own. Ownership is therefore explicit, in a `capsmap.claim` record in the data
+directory. Nothing commits the record and the OS property together, so the
+record separates intending to take the slot from having taken it: absent (Tomari
+holds nothing — a live Caps Lock → F18 is the user's and is left alone),
+`pending [usage]` (write-ahead, OS write unconfirmed — a live Caps Lock → F18 is
+unattributable, so this state only ever gives the claim up), or `held [usage]`
+(confirmed, and the optional usage is what was displaced for the release to
+restore). Every transition fails closed: a record that cannot be written, or on
+the way back cannot be read, aborts it rather than risk the user's mapping.
+Taking over always rewrites the record, so a stale one left by a crash is
+replaced rather than deleted; every release is gated on our entry still being
+live, so a change made outside Tomari in the meantime wins and the claim is
+dropped unused. `reconcile` runs the release direction whenever Caps Lock should
+not be managed, which is what stops a stale claim outliving the mapping it
+described, and serializes the whole sequence — live read, record, OS write, and
+the F18-proxy flag the tap reads — on one mutex, since settings commands, wake,
+the permission poll and quit can all reach it concurrently.
 
 - All decisions live in the pure engine; the tap only handles input and
   output. Timestamps are unified on `AppState::now_ms()` (an `Instant`
