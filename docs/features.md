@@ -80,7 +80,8 @@ consequences to be aware of:
   window to move it, or `⌃⌥⌘` to resize it from the bottom-right (the top-left
   corner stays anchored). It acts on the window under the pointer with no need
   to click it first, and while a gesture is held the drag is consumed so the app
-  underneath never sees it.
+  underneath never sees it — including when there is no window to drag under the
+  pointer, since holding the chord is taken as meaning the click is for Tomari.
 - **Multi-display** — move the focused window to the neighboring display,
   placed proportionally.
 - **Cycling** — pressing the same snap hotkey repeatedly cycles through related

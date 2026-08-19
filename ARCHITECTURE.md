@@ -234,17 +234,51 @@ preview after the teardown's `hide`, nor can a stale `hide` clear a newer one.
 
 **Drag-to-move & resize** (`drag_to_move.rs`) is a third CGEventTap, opt-in and
 modifier-gated. Unlike drag-to-snap it does not watch the OS move a window — it
-_drives_ the window itself, so it is an **active** tap (`CGEventTapOptions::Default`):
-on mouse-down it reads the held modifiers (`gesture_for_flags`: `⌃⌥` → move,
-`⌃⌥⌘` → resize, Shift up), hit-tests the window under the cursor, and samples its
-frame plus the cursor as the anchor. Each later drag applies a pure delta
+_drives_ the window itself, so it is an **active** tap (`CGEventTapOptions::Default`),
+whose callback holds up **all** input while it runs, Tomari's own or not. So the
+callback calls into no other process, starts no thread, joins none and takes no
+lock: it reads the held modifiers (`gesture_for_flags`: `⌃⌥` → move, `⌃⌥⌘` →
+resize, Shift up) plus two atomics — `ENABLED`, mirrored out of the settings by
+`restart_result`, and `ACCESSIBILITY`, mirrored from the permission poller —
+then posts a `Command` down a channel and returns.
+
+Everything that messages the target app happens on the single applier thread
+started with the tap — the hit-test that finds the window, the frame read that
+anchors the drag, and each delta applied after it
 (`geometry::drag_move_frame` / `drag_resize_frame`, the resize anchored at the
-top-left and floored at `MIN_DRAG_SIZE`) straight through `DragWindow::set_origin`
-/ `set_size`. While a gesture is in flight the mouse events are **consumed**
-(`CallbackResult::Drop`) so the app underneath never sees the drag — which also
-means the held Control cannot leak through as a secondary-click. A plain drag
-with none of the gesture modifiers passes through untouched, and drag-to-snap
-skips arming whenever a gesture chord is held so the two never fight.
+top-left and floored at `MIN_DRAG_SIZE`) through `DragWindow::set_origin` /
+`set_size`. One thread for the whole tap, not one per gesture, is what keeps two
+gestures' Accessibility calls from overlapping: an ended gesture's last write
+cannot still be landing while the next gesture reads its anchor, because both are
+steps on the same thread. Every command carries its gesture's generation, and
+the queue is drained before every call, so a gesture that began and ended while
+an earlier call was in flight is discarded without a call of its own, and a slow
+write is followed by the newest cursor rather than a backlog. The guarantee is
+precisely that no call is *started* for a gesture already known to be over — a
+release arriving after the drain, or while a call is already running, cannot
+cancel it. What to do next is decided by a pure `next_step`, so that much is
+settled by tests rather than by scheduling.
+
+Because the hit-test is no longer synchronous, consuming the press commits
+before it is known whether anything under the cursor is draggable — a chord
+press over nothing draggable is swallowed rather than passed on, which is the
+deliberate trade for never stalling input. Ownership of the press is tracked
+separately from whether a gesture is still being driven, so a press that was
+consumed still has its release consumed after a gesture is cut short by a tap
+the system disabled mid-drag. The one case not covered is the tap going away
+mid-press (the feature switched off while the button is held): the callback is
+gone, so the release passes through. Deferring teardown until the user lets go
+would block a settings save on a human. A plain drag with none of the gesture
+modifiers passes through untouched, and drag-to-snap skips arming whenever a
+gesture chord is held so the two never fight.
+
+`DragToMoveState::drop` ends the current gesture, closes the channel and joins
+the applier. It runs on the tap thread as it shuts down — off the input path,
+and strictly before `RunningTap::drop`'s thread join returns — so no
+Accessibility call from a torn-down tap can still be in flight once the next tap
+is live. Ending the gesture before closing the channel is what keeps that wait
+short: the applier folds the `End` in with whatever positions are still queued
+and applies none of them.
 
 ## 6. Persistence (`tomari-core::db`)
 

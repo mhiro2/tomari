@@ -212,6 +212,8 @@ fn main() {
             // revocation and stay quiet. All of it is best-effort UX — a
             // snapshot that fails to read or write never affects startup.
             let initial = tray::permission_state(&handle);
+            #[cfg(target_os = "macos")]
+            drag_to_move::set_accessibility_granted(initial.0);
             let app_version = app.package_info().version.to_string();
             {
                 let prev = regrant::load_snapshot(&state.db);
@@ -252,6 +254,11 @@ fn main() {
                     loop {
                         std::thread::sleep(interval);
                         let current = tray::permission_state(&poll_handle);
+                        // The drag-to-move tap reads the Accessibility grant off
+                        // an atomic rather than calling into TCC from its
+                        // callback (which holds up all input), so this poll is
+                        // what keeps that mirror current.
+                        drag_to_move::set_accessibility_granted(current.0);
                         if last == Some(current) {
                             interval = if current == (true, true) { SLOW } else { FAST };
                             continue;
