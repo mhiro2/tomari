@@ -62,9 +62,15 @@
 //! unwritten claim or an unapplied mapping is simply retried, but a *confirm*
 //! that failed over a live remap leaves the unattributable `Pending` state,
 //! which the next reconcile gives up rather than retries — the mapping stays,
-//! and Tomari stops claiming it. The remaining multi-step races are closed by
-//! serializing the whole reconcile (live read, record, OS write, proxy flag) on
-//! [`RECONCILE`].
+//! and Tomari stops claiming it.
+//!
+//! Races *inside* Tomari are closed by serializing the whole reconcile (live
+//! read, record, OS write, proxy flag) on [`RECONCILE`] — every path that
+//! touches the property goes through it. A writer outside Tomari cannot be
+//! locked out and the property offers no atomic swap, so [`commit_entries`]
+//! brackets each write with the checks that are possible: the live list must
+//! still be what the plan was built from, and our own entry must afterwards be
+//! what we wrote. A write that lands in between is still lost.
 //!
 //! The mapping is per-user, needs no elevated privileges, and persists until
 //! reboot or removal — so we reconcile it on every tap (re)start and clear it on
@@ -421,10 +427,7 @@ fn plan_apply(mut entries: Vec<(u64, u64)>, claim: Claim) -> ApplyPlan {
             Claim::Pending(_) => ApplyPlan::Disown,
         };
     }
-    let displaced = entries
-        .iter()
-        .find(|&&(src, _)| src == CAPS_USAGE)
-        .map(|&(_, dst)| dst);
+    let displaced = caps_source(&entries);
     entries.retain(|&(src, _)| src != CAPS_USAGE);
     entries.push((CAPS_USAGE, F18_USAGE));
     ApplyPlan::Take { entries, displaced }
@@ -464,9 +467,52 @@ fn plan_clear(mut entries: Vec<(u64, u64)>, claim: Claim) -> ClearPlan {
     ClearPlan::Release { entries }
 }
 
+/// Write `entries` as the whole `UserKeyMapping`, bracketed by the two checks
+/// `hidutil` makes possible.
+///
+/// **Before**: the live list must still be exactly the `expected` one the plan
+/// was built from. Anything else — including a change to an entry that is none
+/// of our business — means our list is stale, and writing it would revert that
+/// change; so we do not write, and the next reconcile re-plans from the new
+/// list.
+///
+/// **After**: only the Caps Lock source has to be what we wrote. Deliberately
+/// narrower than the pre-check: another writer landing on an unrelated mapping
+/// in the same instant is not a failure of ours, and calling it one would leave
+/// the claim unconfirmed over a remap we really did make — which the next
+/// reconcile would then disown, stranding it.
+///
+/// This is not a compare-and-swap. The property has no revision to swap on and
+/// nothing here is atomic, so an outside write that lands between the pre-check
+/// and ours is still lost — the brackets narrow that window and catch the races
+/// that fall outside it, rather than eliminating them.
+fn commit_entries(
+    sys: &impl CapsMapSys,
+    expected: &[(u64, u64)],
+    entries: &[(u64, u64)],
+) -> Result<(), String> {
+    if sys.read_entries()? != expected {
+        return Err("hidutil key mappings changed while Tomari was updating them".into());
+    }
+    sys.set_entries(entries)?;
+    if caps_source(&sys.read_entries()?) != caps_source(entries) {
+        return Err("the Caps Lock key mapping did not take the value Tomari wrote".into());
+    }
+    Ok(())
+}
+
+/// The destination on the Caps Lock source, if any. Both plans leave at most one
+/// such entry, so this is the whole of what a write of ours is responsible for.
+fn caps_source(entries: &[(u64, u64)]) -> Option<u64> {
+    entries
+        .iter()
+        .find(|&&(src, _)| src == CAPS_USAGE)
+        .map(|&(_, dst)| dst)
+}
+
 fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
-    let entries = sys.read_entries()?;
-    match plan_apply(entries, sys.read_claim()?) {
+    let live = sys.read_entries()?;
+    match plan_apply(live.clone(), sys.read_claim()?) {
         ApplyPlan::AlreadyInEffect => Ok(()),
         ApplyPlan::Disown => {
             tracing::warn!(
@@ -483,24 +529,24 @@ fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
         // surfaces as the `capsLockRemap` warning.
         ApplyPlan::Take { entries, displaced } => {
             sys.write_claim(Claim::Pending(displaced))?;
-            sys.set_entries(&entries)?;
+            commit_entries(sys, &live, &entries)?;
             sys.write_claim(Claim::Held(displaced))
         }
     }
 }
 
 fn clear_with(sys: &impl CapsMapSys) -> Result<(), String> {
-    let entries = sys.read_entries()?;
+    let live = sys.read_entries()?;
     // Fail closed: without a readable claim we do not know whether a live
     // Caps Lock → F18 is ours, nor what it displaced. Leave everything as it is.
-    match plan_clear(entries, sys.read_claim()?) {
+    match plan_clear(live.clone(), sys.read_claim()?) {
         ClearPlan::Unclaimed => Ok(()),
         ClearPlan::DropClaim => sys.clear_claim(),
         // The list first, the claim second: releasing the claim while our entry
         // is still live would orphan it — no later clear would recognize it as
         // ours. The reverse order merely leaves a claim the next clear drops.
         ClearPlan::Release { entries } => {
-            sys.set_entries(&entries)?;
+            commit_entries(sys, &live, &entries)?;
             sys.clear_claim()
         }
     }
@@ -631,6 +677,12 @@ mod tests {
         claim_erasable: bool,
         /// Whether `hidutil property --set` is allowed to succeed.
         can_set: bool,
+        /// A list an outside writer installs right after our next read — how a
+        /// concurrent `hidutil` lands between the plan and the write.
+        steal_after_read: RefCell<Option<Vec<(u64, u64)>>>,
+        /// What the live list actually becomes when we set it, when that is not
+        /// what we asked for.
+        set_lands_as: RefCell<Option<Vec<(u64, u64)>>>,
         /// How many times the entry list was written.
         writes: RefCell<usize>,
     }
@@ -645,6 +697,8 @@ mod tests {
                 claim_writes_left: RefCell::new(None),
                 claim_erasable: true,
                 can_set: true,
+                steal_after_read: RefCell::new(None),
+                set_lands_as: RefCell::new(None),
                 writes: RefCell::new(0),
             }
         }
@@ -676,14 +730,19 @@ mod tests {
 
     impl CapsMapSys for FakeSys {
         fn read_entries(&self) -> Result<Vec<(u64, u64)>, String> {
-            self.entries.borrow().clone()
+            let live = self.entries.borrow().clone();
+            if let Some(stolen) = self.steal_after_read.borrow_mut().take() {
+                *self.entries.borrow_mut() = Ok(stolen);
+            }
+            live
         }
         fn set_entries(&self, entries: &[(u64, u64)]) -> Result<(), String> {
             *self.writes.borrow_mut() += 1;
             if !self.can_set {
                 return Err("hidutil failed".into());
             }
-            *self.entries.borrow_mut() = Ok(entries.to_vec());
+            let landed = self.set_lands_as.borrow_mut().take();
+            *self.entries.borrow_mut() = Ok(landed.unwrap_or_else(|| entries.to_vec()));
             Ok(())
         }
         fn read_claim(&self) -> Result<Claim, String> {
@@ -1120,6 +1179,61 @@ mod tests {
         let sys = FakeSys::new(&[]);
         clear_with(&sys).unwrap();
         assert_eq!(sys.writes(), 0);
+    }
+
+    #[test]
+    fn apply_refuses_a_write_over_a_concurrent_change() {
+        // Something outside Tomari rewrote the list between our read and our
+        // write, so the list we planned no longer exists: writing it would undo
+        // their change wholesale.
+        let sys = FakeSys::new(&[(OTHER_SRC, OTHER_DST)]);
+        *sys.steal_after_read.borrow_mut() = Some(vec![(CAPS_USAGE, USER_CAPS_DST)]);
+        assert!(apply_with(&sys).is_err());
+        assert_eq!(sys.writes(), 0);
+        assert_eq!(sys.entries(), vec![(CAPS_USAGE, USER_CAPS_DST)]);
+    }
+
+    #[test]
+    fn apply_refuses_to_report_a_write_that_did_not_land() {
+        // `hidutil` exited zero but the property is not what we set, so the
+        // reconcile must not read as complete.
+        let sys = FakeSys::new(&[]);
+        *sys.set_lands_as.borrow_mut() = Some(vec![(OTHER_SRC, OTHER_DST)]);
+        assert!(apply_with(&sys).is_err());
+        assert_eq!(sys.claim(), Claim::Pending(None));
+    }
+
+    #[test]
+    fn apply_tolerates_an_unrelated_change_landing_with_its_write() {
+        // Our entry is live, so the remap *is* ours and the claim must be
+        // confirmed — an outside writer adding an unrelated mapping in the same
+        // instant is not a failure of ours, and treating it as one would strand
+        // the remap we just made.
+        let sys = FakeSys::new(&[]);
+        *sys.set_lands_as.borrow_mut() =
+            Some(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]);
+        apply_with(&sys).unwrap();
+        assert_eq!(sys.claim(), Claim::Held(None));
+    }
+
+    #[test]
+    fn clear_tolerates_an_unrelated_change_landing_with_its_write() {
+        let sys = FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(Claim::Held(None));
+        *sys.set_lands_as.borrow_mut() = Some(vec![(OTHER_SRC, OTHER_DST)]);
+        clear_with(&sys).unwrap();
+        assert_eq!(sys.claim(), Claim::Unowned);
+    }
+
+    #[test]
+    fn clear_refuses_a_write_over_a_concurrent_change() {
+        let sys =
+            FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(Claim::Held(Some(USER_CAPS_DST)));
+        *sys.steal_after_read.borrow_mut() =
+            Some(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]);
+        assert!(clear_with(&sys).is_err());
+        assert_eq!(sys.writes(), 0);
+        // The claim survives, so the next reconcile retries the release.
+        assert_eq!(sys.claim(), Claim::Held(Some(USER_CAPS_DST)));
     }
 
     /// The outcome of a fully successful reconcile toward `should_manage`.

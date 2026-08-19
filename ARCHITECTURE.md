@@ -151,7 +151,13 @@ dropped unused. `reconcile` runs the release direction whenever Caps Lock should
 not be managed, which is what stops a stale claim outliving the mapping it
 described, and serializes the whole sequence — live read, record, OS write, and
 the F18-proxy flag the tap reads — on one mutex, since settings commands, wake,
-the permission poll and quit can all reach it concurrently.
+the permission poll and quit can all reach it concurrently. A writer outside
+Tomari cannot be locked out and the property offers no atomic swap, so each
+write is bracketed by the checks that are possible: the live list has to still
+be the one the plan was built from (otherwise we do not write, and the next
+reconcile re-plans), and our own entry has to afterwards be what we wrote. A
+write that lands in between is still lost — the brackets narrow the window
+rather than closing it.
 
 - All decisions live in the pure engine; the tap only handles input and
   output. Timestamps are unified on `AppState::now_ms()` (an `Instant`
