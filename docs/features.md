@@ -44,7 +44,9 @@ consequences to be aware of:
 
 - It merges with, rather than replaces, any custom `hidutil` key mappings you
   have set yourself: Tomari adds (and later removes) only its own Caps Lock → F18
-  entry, leaving your other mappings in place.
+  entry, leaving your other mappings in place. If Tomari cannot read your current
+  mappings back exactly, it does not write at all — the Caps Lock rule is
+  reported as not applied rather than risking your mappings.
 - If you had mapped the Caps Lock key itself to something else, Tomari has to
   take that key over — so it remembers what you had it doing and puts it back
   when the rule is turned off or Tomari quits. If that cannot be remembered, the

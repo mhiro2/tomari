@@ -16,7 +16,10 @@
 //! it back ([`clear_with`]) read the current list first and write it back with
 //! only our Caps Lock → F18 entry added or removed —
 //! a user's own pre-existing `hidutil` mappings (another key remap, say) survive
-//! rather than being wiped.
+//! rather than being wiped. Because that read is what the whole property is
+//! rebuilt from, [`parse_entries`] is strict: output it does not fully
+//! understand is an error, never a partial list, so a format change or a
+//! truncated read cannot silently drop the mappings it failed to read.
 //!
 //! ## Owning the Caps Lock source
 //!
@@ -100,32 +103,137 @@ fn set_mapping(json: &str) -> Result<(), String> {
     }
 }
 
-/// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs.
-/// `None` when `hidutil` could not be run at all — distinct from an empty list,
-/// so callers never mistake "unreadable" for "no mappings" and clobber the
-/// user's own remaps.
-fn read_entries() -> Option<Vec<(u64, u64)>> {
+/// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs. `Err`
+/// whenever the list cannot be established *exactly* — `hidutil` unavailable, a
+/// non-zero exit, or output this parser does not fully understand — because
+/// every write replaces the whole property from what was read here. An
+/// approximate read would silently drop the entries it failed to understand.
+fn read_entries() -> Result<Vec<(u64, u64)>, String> {
     let output = Command::new("/usr/bin/hidutil")
         .args(["property", "--get", "UserKeyMapping"])
         .output()
-        .ok()?;
+        .map_err(|e| format!("failed to run hidutil: {e}"))?;
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "hidutil exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    Some(parse_entries(&String::from_utf8_lossy(&output.stdout)))
+    parse_entries(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Parse every `UserKeyMapping` entry out of `hidutil property --get` text into
-/// `(src, dst)` usage pairs. Splitting on `}` yields one block per entry (the
-/// trailing fragment carries neither field and is dropped).
-fn parse_entries(text: &str) -> Vec<(u64, u64)> {
-    text.split('}')
-        .filter_map(|entry| {
-            let src = entry_field(entry, "HIDKeyboardModifierMappingSrc")?;
-            let dst = entry_field(entry, "HIDKeyboardModifierMappingDst")?;
-            Some((src, dst))
-        })
-        .collect()
+/// The `UserKeyMapping` entries in `hidutil property --get` output.
+///
+/// Strict by design: setting the property rewrites the *whole* list from what
+/// this returns, so anything less than a complete understanding of the output
+/// has to fail rather than parse what it recognizes and drop the rest. A changed
+/// output format, an extra field, an unexpected number format, or a truncated
+/// read would otherwise delete mappings that have nothing to do with Tomari.
+///
+/// The format is an old-style property list: a parenthesized list of
+/// `{ key = value; … }` dictionaries, printed as `(null)` when the property is
+/// not set at all.
+fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
+    let entries = parse_entry_list(text)?;
+    // One source mapped twice is not a list we can reason about: which entry
+    // owns that key is undefined, so "the mapping on the Caps Lock source" —
+    // what the claim is about, and what a write is checked against — would be a
+    // guess. Refuse it like any other shape we do not understand.
+    for (index, &(src, _)) in entries.iter().enumerate() {
+        if entries[..index].iter().any(|&(earlier, _)| earlier == src) {
+            return Err(malformed("the same source is mapped twice"));
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_entry_list(text: &str) -> Result<Vec<(u64, u64)>, String> {
+    let body = text.trim();
+    // How `hidutil` reports "no such property" — distinct from a set-but-empty
+    // list, but the same thing to us.
+    if body == "(null)" {
+        return Ok(Vec::new());
+    }
+    let inner = body
+        .strip_prefix('(')
+        .and_then(|b| b.strip_suffix(')'))
+        .ok_or_else(|| malformed("expected a parenthesized list"))?;
+    let mut rest = inner.trim();
+    if rest.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    loop {
+        let after_open = rest
+            .strip_prefix('{')
+            .ok_or_else(|| malformed("expected an entry"))?;
+        let (fields, after_close) = after_open
+            .split_once('}')
+            .ok_or_else(|| malformed("unterminated entry"))?;
+        entries.push(parse_entry(fields)?);
+
+        // What may sit between two entries: whitespace, a single comma, or a
+        // comma with whitespace around it — some macOS versions print one, some
+        // the other. Nothing at all, a doubled comma, or a comma with no entry
+        // after it are shapes we do not recognize, and letting one through would
+        // read as a shorter list than the property really holds.
+        let trimmed = after_close.trim_start();
+        let after_comma = trimmed.strip_prefix(',');
+        let separated = trimmed.len() < after_close.len() || after_comma.is_some();
+        rest = after_comma.map_or(trimmed, str::trim_start);
+        if rest.is_empty() {
+            return if after_comma.is_some() {
+                Err(malformed("trailing separator"))
+            } else {
+                Ok(entries)
+            };
+        }
+        if !separated {
+            return Err(malformed("expected a separator between entries"));
+        }
+    }
+}
+
+/// One entry's `key = value;` fields. Every field must be terminated by its
+/// semicolon, be one of the two keys we know, appear exactly once, and carry a
+/// parseable usage — a missing terminator, an empty field, or an unrecognized or
+/// repeated key means this is not the format we can safely rewrite.
+fn parse_entry(fields: &str) -> Result<(u64, u64), String> {
+    let mut src = None;
+    let mut dst = None;
+    let mut rest = fields.trim();
+    while !rest.is_empty() {
+        let (field, after) = rest
+            .split_once(';')
+            .ok_or_else(|| malformed("expected `;` after a field"))?;
+        rest = after.trim_start();
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(malformed("empty field"));
+        }
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| malformed("expected `key = value`"))?;
+        let usage =
+            parse_usage(value).ok_or_else(|| malformed("expected a decimal or hex HID usage"))?;
+        let slot = match key.trim() {
+            "HIDKeyboardModifierMappingSrc" => &mut src,
+            "HIDKeyboardModifierMappingDst" => &mut dst,
+            _ => return Err(malformed("unrecognized field")),
+        };
+        if slot.replace(usage).is_some() {
+            return Err(malformed("repeated field"));
+        }
+    }
+    match (src, dst) {
+        (Some(src), Some(dst)) => Ok((src, dst)),
+        _ => Err(malformed("entry is missing a source or destination")),
+    }
+}
+
+fn malformed(reason: &str) -> String {
+    format!("could not parse hidutil key mappings: {reason}")
 }
 
 /// Serialize `(src, dst)` pairs into the JSON `hidutil property --set` expects.
@@ -140,14 +248,6 @@ fn serialize_mapping(entries: &[(u64, u64)]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(r#"{{"UserKeyMapping":[{body}]}}"#)
-}
-
-/// The usage value of `key` within one `UserKeyMapping` entry, if present.
-fn entry_field(entry: &str, key: &str) -> Option<u64> {
-    let after_key = entry.get(entry.find(key)? + key.len()..)?;
-    let after_eq = after_key.get(after_key.find('=')? + 1..)?;
-    let value = after_eq.get(..after_eq.find(';')?)?;
-    parse_usage(value)
 }
 
 /// Parse a HID usage printed by `hidutil`, which uses decimal or hex (`0x…`)
@@ -268,8 +368,9 @@ fn clear_claim() -> Result<(), String> {
 /// Caps Lock → F18, an unwritable and an unreadable claim, and a foreign change
 /// to the Caps Lock source without a real `hidutil` or on-disk record.
 trait CapsMapSys {
-    /// The live `UserKeyMapping` entries (`None` = could not be read).
-    fn read_entries(&self) -> Option<Vec<(u64, u64)>>;
+    /// The live `UserKeyMapping` entries, or why they could not be established
+    /// exactly.
+    fn read_entries(&self) -> Result<Vec<(u64, u64)>, String>;
     /// Replace the whole `UserKeyMapping` list with `entries`.
     fn set_entries(&self, entries: &[(u64, u64)]) -> Result<(), String>;
     /// The recorded claim (a missing record is [`Claim::Unowned`]).
@@ -285,7 +386,7 @@ trait CapsMapSys {
 /// `Caps → X` plus `Y → F18`) is not mistaken for the remap.
 fn caps_to_f18_live(sys: &impl CapsMapSys) -> bool {
     sys.read_entries()
-        .is_some_and(|entries| entries.contains(&(CAPS_USAGE, F18_USAGE)))
+        .is_ok_and(|entries| entries.contains(&(CAPS_USAGE, F18_USAGE)))
 }
 
 /// What [`apply_with`] should do given the live entry list and our claim.
@@ -364,9 +465,7 @@ fn plan_clear(mut entries: Vec<(u64, u64)>, claim: Claim) -> ClearPlan {
 }
 
 fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
-    let entries = sys
-        .read_entries()
-        .ok_or("could not read current hidutil key mappings")?;
+    let entries = sys.read_entries()?;
     match plan_apply(entries, sys.read_claim()?) {
         ApplyPlan::AlreadyInEffect => Ok(()),
         ApplyPlan::Disown => {
@@ -391,9 +490,7 @@ fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
 }
 
 fn clear_with(sys: &impl CapsMapSys) -> Result<(), String> {
-    let entries = sys
-        .read_entries()
-        .ok_or("could not read current hidutil key mappings")?;
+    let entries = sys.read_entries()?;
     // Fail closed: without a readable claim we do not know whether a live
     // Caps Lock → F18 is ours, nor what it displaced. Leave everything as it is.
     match plan_clear(entries, sys.read_claim()?) {
@@ -455,7 +552,7 @@ fn reconcile_with(sys: &impl CapsMapSys, should_manage: bool) -> ReconcileOutcom
 struct RealSys;
 
 impl CapsMapSys for RealSys {
-    fn read_entries(&self) -> Option<Vec<(u64, u64)>> {
+    fn read_entries(&self) -> Result<Vec<(u64, u64)>, String> {
         read_entries()
     }
     fn set_entries(&self, entries: &[(u64, u64)]) -> Result<(), String> {
@@ -520,7 +617,7 @@ mod tests {
     /// Fake [`CapsMapSys`] over an in-memory entry list and claim, with each
     /// side effect independently failable.
     struct FakeSys {
-        entries: RefCell<Option<Vec<(u64, u64)>>>,
+        entries: RefCell<Result<Vec<(u64, u64)>, String>>,
         claim: RefCell<Claim>,
         /// Whether the claim record can be read at all (permissions, corruption).
         claim_readable: bool,
@@ -541,7 +638,7 @@ mod tests {
     impl FakeSys {
         fn new(entries: &[(u64, u64)]) -> Self {
             Self {
-                entries: RefCell::new(Some(entries.to_vec())),
+                entries: RefCell::new(Ok(entries.to_vec())),
                 claim: RefCell::new(Claim::Unowned),
                 claim_readable: true,
                 claim_writable: true,
@@ -561,6 +658,13 @@ mod tests {
             self.entries.borrow().clone().unwrap_or_default()
         }
 
+        /// Make the live list unreadable, as a changed `hidutil` output format
+        /// or a failed spawn would.
+        fn unreadable(self) -> Self {
+            *self.entries.borrow_mut() = Err("unreadable".into());
+            self
+        }
+
         fn claim(&self) -> Claim {
             *self.claim.borrow()
         }
@@ -571,7 +675,7 @@ mod tests {
     }
 
     impl CapsMapSys for FakeSys {
-        fn read_entries(&self) -> Option<Vec<(u64, u64)>> {
+        fn read_entries(&self) -> Result<Vec<(u64, u64)>, String> {
             self.entries.borrow().clone()
         }
         fn set_entries(&self, entries: &[(u64, u64)]) -> Result<(), String> {
@@ -579,7 +683,7 @@ mod tests {
             if !self.can_set {
                 return Err("hidutil failed".into());
             }
-            *self.entries.borrow_mut() = Some(entries.to_vec());
+            *self.entries.borrow_mut() = Ok(entries.to_vec());
             Ok(())
         }
         fn read_claim(&self) -> Result<Claim, String> {
@@ -621,8 +725,121 @@ mod tests {
         );
         assert_eq!(
             parse_entries(&text),
-            vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]
+            Ok(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)])
         );
+    }
+
+    #[test]
+    fn parse_entries_accepts_the_shapes_hidutil_prints() {
+        // Comma-separated entries, hex usages, reversed field order, and the two
+        // ways of saying "nothing set" — all seen across macOS versions.
+        assert_eq!(
+            parse_entries(&format!(
+                "({{HIDKeyboardModifierMappingDst = 0x70000006d; \
+                 HIDKeyboardModifierMappingSrc = 0x700000039;}},\
+                 {{HIDKeyboardModifierMappingSrc = {OTHER_SRC}; \
+                 HIDKeyboardModifierMappingDst = {OTHER_DST};}})"
+            )),
+            Ok(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)])
+        );
+        for empty in ["(null)", "()", "(\n)", "  (null)\n"] {
+            assert_eq!(parse_entries(empty), Ok(Vec::new()), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn parse_entries_rejects_anything_it_does_not_fully_understand() {
+        // Each of these would previously have parsed as a *shorter* list, and
+        // writing that back would delete the entries it could not read.
+        let src = "HIDKeyboardModifierMappingSrc";
+        let dst = "HIDKeyboardModifierMappingDst";
+        for (case, text) in [
+            (
+                "truncated mid-entry",
+                format!("(\n  {{\n    {src} = {OTHER_SRC};\n"),
+            ),
+            (
+                "missing closing paren",
+                format!("({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}}"),
+            ),
+            (
+                "an unrecognized field",
+                format!("({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST}; Flags = 1;}})"),
+            ),
+            ("no destination", format!("({{{src} = {OTHER_SRC};}})")),
+            ("no source", format!("({{{dst} = {OTHER_DST};}})")),
+            (
+                "a repeated field",
+                format!("({{{src} = {OTHER_SRC}; {src} = {CAPS_USAGE}; {dst} = {OTHER_DST};}})"),
+            ),
+            (
+                "a non-numeric usage",
+                format!("({{{src} = kHIDUsage_KeyboardA; {dst} = {OTHER_DST};}})"),
+            ),
+            (
+                "a field with no value",
+                format!("({{{src}; {dst} = {OTHER_DST};}})"),
+            ),
+            (
+                "an unexpected wrapper",
+                format!("[{{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}}]"),
+            ),
+            (
+                "stray text between entries",
+                format!("({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}} and more)"),
+            ),
+            (
+                "a missing field terminator",
+                format!("({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST}}})"),
+            ),
+            (
+                "an empty field",
+                format!("({{{src} = {OTHER_SRC};; {dst} = {OTHER_DST};}})"),
+            ),
+            ("a lone separator", "(,)".to_string()),
+            ("only separators", "(,,)".to_string()),
+            (
+                "a leading separator",
+                format!("(,{{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}})"),
+            ),
+            (
+                "a trailing separator",
+                format!("({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}},)"),
+            ),
+            (
+                "the same source mapped twice",
+                format!(
+                    "({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}} \
+                     {{{src} = {OTHER_SRC}; {dst} = {F18_USAGE};}})"
+                ),
+            ),
+            (
+                "the Caps Lock source mapped twice",
+                format!(
+                    "({{{src} = {CAPS_USAGE}; {dst} = {USER_CAPS_DST};}} \
+                     {{{src} = {CAPS_USAGE}; {dst} = {F18_USAGE};}})"
+                ),
+            ),
+            (
+                "no separator between entries",
+                format!(
+                    "({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}}\
+                     {{{src} = {CAPS_USAGE}; {dst} = {F18_USAGE};}})"
+                ),
+            ),
+            (
+                "a doubled separator",
+                format!(
+                    "({{{src} = {OTHER_SRC}; {dst} = {OTHER_DST};}},,\
+                     {{{src} = {CAPS_USAGE}; {dst} = {F18_USAGE};}})"
+                ),
+            ),
+        ] {
+            assert!(
+                parse_entries(&text).is_err(),
+                "{case} must not parse: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -819,8 +1036,7 @@ mod tests {
     #[test]
     fn apply_errors_when_the_list_cannot_be_read() {
         // Unreadable is not "empty": writing then would wipe the user's remaps.
-        let sys = FakeSys::new(&[]);
-        *sys.entries.borrow_mut() = None;
+        let sys = FakeSys::new(&[]).unreadable();
         assert!(apply_with(&sys).is_err());
         assert_eq!(sys.writes(), 0);
     }
@@ -993,7 +1209,7 @@ mod tests {
 
     /// The structural check behind [`caps_to_f18_live`], over parsed text.
     fn maps_caps_to_f18(text: &str) -> bool {
-        parse_entries(text).contains(&(CAPS_USAGE, F18_USAGE))
+        parse_entries(text).is_ok_and(|e| e.contains(&(CAPS_USAGE, F18_USAGE)))
     }
 
     #[test]

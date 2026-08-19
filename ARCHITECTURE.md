@@ -126,9 +126,14 @@ that the tap drives as the Caps Lock modifier. `eventtap::restart` reconciles th
 remap with whether an enabled rule manages Caps Lock, and quit takes it down.
 Because setting the property rewrites the whole list, both directions read the
 current `UserKeyMapping` first and add/remove only Tomari's Caps Lock → F18
-entry, leaving any mappings the user set themselves intact. The one mapping that
-cannot merely coexist is one the user put on the Caps Lock source itself (Caps →
-Escape, say): taking that slot over has to replace it, and `UserKeyMapping`
+entry, leaving any mappings the user set themselves intact. That read is what
+the whole property is rebuilt from, so `parse_entries` is strict — an output
+format it does not fully understand, an extra field, an unexpected number
+format, a missing separator, a source mapped twice or a truncated read is an
+error, never a partial list, since writing a partial list back would delete the
+entries it failed to read. The one mapping that cannot merely coexist is one the
+user put on the Caps Lock source itself (Caps → Escape, say): taking that slot
+over has to replace it, and `UserKeyMapping`
 records no provenance, so a live Caps Lock → F18 is equally plausibly the user's
 own. Ownership is therefore explicit, in a `capsmap.claim` record in the data
 directory. Nothing commits the record and the OS property together, so the
