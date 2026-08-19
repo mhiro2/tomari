@@ -174,6 +174,21 @@ rather than closing it.
   `TapDisabledByTimeout`/`TapDisabledByUserInput` — is itself centralized in
   `tap::spawn`/`tap::reenable` (`src-tauri/src/tap.rs`); only the tap name,
   `CGEventTapOptions`, watched event types, and the callback differ per tap.
+- Neither half of that lifecycle waits forever: starting waits at most
+  `START_DEADLINE` for the run loop to report in, stopping at most
+  `STOP_DEADLINE` for the thread to return. The callers are the settings save,
+  the wake handler and quit, and a callback stuck in an OS call it cannot cancel
+  must not turn any of those into a hang. Past a deadline the thread is
+  *detached*, so its `CGEventTap` can still be live when the next one starts —
+  which is why every tap carries a liveness flag that `RunningTap::drop` clears
+  before stopping the run loop, and the wrapper around the callback returns
+  early once it is clear. A detached tap still exists but handles nothing
+  further. An event it had already started on runs to completion and its verdict
+  stands — its side effects are committed by then, so discarding only the
+  verdict would hand the app an event whose consequences had happened anyway.
+  The startup hand-over and the caller's deadline go through one mutex, so a run
+  loop that starts at the very moment the caller gives up is told to stop rather
+  than left running with nobody holding it.
 
 Global shortcuts are a separate channel registered with Tauri's
 `global-shortcut` plugin (`shortcuts::register_all`). On fire, the handler
