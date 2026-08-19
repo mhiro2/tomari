@@ -333,6 +333,52 @@ and applies none of them.
   is on.
 - Storage location comes from `AppPaths` (`directories::ProjectDirs`,
   `tomari.sqlite`).
+- A *corrupt* database is moved aside under a `.broken-<unix-ms>` suffix and a
+  fresh one takes the original path, because for a resident tool losing settings
+  beats never starting again; a transient failure (a lock, a read-only or full
+  disk) exits with an alert instead, so a healthy database is never discarded.
+  `quarantine_database` aims to move the whole set or none of it: a stale `-wal`
+  beside a brand-new database is replayed into it, so an incompletely
+  quarantined set is worse than the corrupt one it was found as. The database
+  moves first, so the common failure — a directory that cannot be written —
+  stops before anything has; a sidecar that then cannot be moved rolls back
+  everything already moved, leaving the set as found for the next launch to
+  retry. That rollback stops at its own first failure rather than pressing on:
+  restoring the database while a sidecar stayed aside would leave one that
+  *looks* intact to be opened without it. Stopping gives the invariant the sweep
+  below relies on — if a rollback failed at all, the database is still aside, so
+  whatever the live sidecars happen to be, the next launch sees no database
+  beside them. Renaming is the only way files move:
+  deleting a sidecar would clear the way too, but it destroys content SQLite
+  refused to read (exactly what someone may want to recover by hand) and cannot
+  be rolled back.
+- Per-file renames are not a transaction, so a crash between two of them — or a
+  rollback that cannot finish — can still split the set. That state is
+  recognizable, and `sweep_orphan_sidecars` acts on it *before* anything is
+  opened: a sidecar with no database beside it is a reset that never finished,
+  since SQLite never leaves a WAL without its database. Those get their own
+  `.orphaned-<unix-ms>` names, because a fresh database created beside an orphan
+  would have SQLite either replay it or delete it, and deleting it takes the last
+  copy of whatever it held. Existence is checked through `FileOps::exists`, which
+  returns a `Result`: `Path::exists` reports a metadata error as "not there", and
+  treating a sidecar we merely failed to look at as absent is how one ends up
+  beside the replacement.
+- What none of it handles is two launches resetting at once. The database is
+  opened *before* the single-instance plugin is registered, so both can find the
+  same corruption; migrations survive that race with immediate transactions, this
+  reset has nothing equivalent. Nor is the damage confined to the copies kept for
+  inspection: the second process can arrive after the first has created the
+  replacement and move *that* aside, leaving one process writing to a database no
+  longer at the canonical path and the other to a second fresh one — so settings
+  saved in that session are gone by the next launch. `rename` replacing its
+  destination compounds it. Ruling any of this out needs a lock held across
+  processes from before the database is opened, which is a known gap.
+- A failed reset exits with an alert naming the files to move by hand, and a
+  fresh database that then cannot be created reports *its own* error rather than
+  the corruption that started it. The file operations sit behind a `FileOps`
+  trait so each failure ordering — a rollback that cannot finish, an orphan that
+  cannot be moved, a lookup that cannot be made — is unit tested without a real
+  corrupt database.
 - Every config mutation — each interactive save/delete — holds
   `AppState::config_mutation`, so they serialize and the in-memory engines
   never disagree with disk.
