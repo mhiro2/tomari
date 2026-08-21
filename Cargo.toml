@@ -7,7 +7,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/mhiro2/tomari"
 rust-version = "1.95"
-version = "0.1.0"
+version = "0.0.1"
 publish = false
 
 [workspace.dependencies]

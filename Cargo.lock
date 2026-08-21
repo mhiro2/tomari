@@ -4347,7 +4347,7 @@ dependencies = [
 
 [[package]]
 name = "tomari-app"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "block2",
  "core-foundation",
@@ -4377,7 +4377,7 @@ dependencies = [
 
 [[package]]
 name = "tomari-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "directories",
  "rusqlite",
@@ -4392,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "tomari-keyboard"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "thiserror 2.0.20",
  "tomari-core",
@@ -4400,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "tomari-window"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "core-foundation",
  "core-foundation-sys",
