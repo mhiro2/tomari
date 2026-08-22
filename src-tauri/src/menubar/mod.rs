@@ -14,6 +14,9 @@
 mod state;
 
 #[cfg(target_os = "macos")]
+mod inventory;
+
+#[cfg(target_os = "macos")]
 mod status;
 
 #[cfg(not(target_os = "macos"))]
@@ -22,6 +25,20 @@ mod status {
 
     pub fn apply(_app: &AppHandle, _enabled: bool, _collapsed: bool) {}
     pub fn teardown(_app: &AppHandle) {}
+}
+
+#[cfg(not(target_os = "macos"))]
+mod inventory {
+    use super::MenuBarInventory;
+
+    pub fn unsupported() -> MenuBarInventory {
+        MenuBarInventory {
+            supported: false,
+            permission_granted: false,
+            divider_available: false,
+            items: Vec::new(),
+        }
+    }
 }
 
 use std::time::Duration;
@@ -49,10 +66,105 @@ pub struct MenuBarStatus {
     pub collapsed: bool,
 }
 
+/// Which side of Tomari's divider a menu bar item currently occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuBarItemZone {
+    Hidden,
+    Visible,
+}
+
+/// A best-effort Accessibility snapshot of one menu bar item.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarItem {
+    /// Ephemeral render key. The Accessibility API exposes no durable item id.
+    pub id: String,
+    /// The most useful user-facing label available for this item.
+    pub name: String,
+    /// Owning application when the item label is more specific (for example,
+    /// Wi-Fi owned by Control Center).
+    pub owner_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub zone: MenuBarItemZone,
+    /// Physical order used inside the backend; not part of the command payload.
+    #[serde(skip)]
+    pub position: f64,
+}
+
+/// Result of scanning the currently active menu bar.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarInventory {
+    pub supported: bool,
+    pub permission_granted: bool,
+    pub divider_available: bool,
+    pub items: Vec<MenuBarItem>,
+}
+
 pub fn status(state: &AppState) -> MenuBarStatus {
     MenuBarStatus {
         enabled: state.settings.lock_safe().menu_bar_tidy_enabled,
         collapsed: state.menu_bar.lock_safe().is_collapsed(),
+    }
+}
+
+/// Inspect the real menu bar layout. The divider is expanded only for the scan
+/// and then restored to the live state; the physical arrangement remembered by
+/// macOS remains the source of truth, including changes made with ⌘-drag while
+/// the settings window is open.
+pub fn inventory(app: &AppHandle, state: &AppState) -> MenuBarInventory {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, state);
+        return inventory::unsupported();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let permission_granted = state.windows.permission_granted();
+        if !permission_granted {
+            return MenuBarInventory {
+                supported: true,
+                permission_granted: false,
+                divider_available: false,
+                items: Vec::new(),
+            };
+        }
+        if !state.settings.lock_safe().menu_bar_tidy_enabled {
+            return MenuBarInventory {
+                supported: true,
+                permission_granted: true,
+                divider_available: false,
+                items: Vec::new(),
+            };
+        }
+
+        let context = status::scan_context(app);
+        let Some(context) = context else {
+            let current = status(state);
+            status::finish_scan(app, current.enabled, current.collapsed);
+            return MenuBarInventory {
+                supported: true,
+                permission_granted: true,
+                divider_available: false,
+                items: Vec::new(),
+            };
+        };
+        // AppKit updates the status-item windows on the main run loop after the
+        // divider length changes. Give that layout one frame before asking the
+        // other processes for their AX positions; this runs on the command's
+        // worker thread, never on the UI thread.
+        std::thread::sleep(Duration::from_millis(40));
+        let items = inventory::scan(context);
+        let current = status(state);
+        status::finish_scan(app, current.enabled, current.collapsed);
+        MenuBarInventory {
+            supported: true,
+            permission_granted: true,
+            divider_available: true,
+            items,
+        }
     }
 }
 

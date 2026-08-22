@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider } from '../lib/settings';
-import type { AppSettings, MenuBarStatus } from '../lib/types';
+import type { AppSettings, MenuBarInventory, MenuBarStatus } from '../lib/types';
 import { MenuBarView } from './MenuBarView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
@@ -30,6 +30,28 @@ const SETTINGS: AppSettings = {
   menuBarAutoCollapseSecs: 0,
 };
 
+const INVENTORY: MenuBarInventory = {
+  supported: true,
+  permissionGranted: true,
+  dividerAvailable: true,
+  items: [
+    {
+      id: 'com.docker.docker:status:0',
+      name: 'Docker',
+      ownerName: null,
+      bundleId: 'com.docker.docker',
+      zone: 'hidden',
+    },
+    {
+      id: 'com.apple.controlcenter:wifi:0',
+      name: 'Wi-Fi',
+      ownerName: 'Control Center',
+      bundleId: 'com.apple.controlcenter',
+      zone: 'visible',
+    },
+  ],
+};
+
 function renderView(ui: ReactElement) {
   return render(<SettingsProvider>{ui}</SettingsProvider>);
 }
@@ -45,6 +67,8 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(SETTINGS);
       case 'get_menu_bar':
         return Promise.resolve({ enabled: true, collapsed: true } satisfies MenuBarStatus);
+      case 'list_menu_bar_items':
+        return Promise.resolve(INVENTORY);
       case 'set_menu_bar_collapsed':
         return Promise.resolve({ enabled: true, collapsed: false } satisfies MenuBarStatus);
       default:
@@ -138,6 +162,48 @@ describe('MenuBarView', () => {
       expect(mockInvoke).toHaveBeenCalledWith('save_settings', {
         settings: expect.objectContaining({ menuBarAutoCollapseSecs: 15 }),
       });
+    });
+  });
+
+  it('shows the real hidden and visible menu bar inventory', async () => {
+    renderView(<MenuBarView />);
+
+    expect(await screen.findByText('Docker')).toBeInTheDocument();
+    expect(screen.getByText('Wi-Fi')).toBeInTheDocument();
+    expect(screen.getByText('From Control Center')).toBeInTheDocument();
+    expect(screen.getByText('Hidden now')).toBeInTheDocument();
+    expect(screen.getByText('Always shown')).toBeInTheDocument();
+  });
+
+  it('refreshes the inventory after a Command-drag arrangement change', async () => {
+    renderView(<MenuBarView />);
+    const refresh = await screen.findByRole('button', { name: 'Refresh Items' });
+
+    fireEvent.click(refresh);
+
+    await waitFor(() => {
+      expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'list_menu_bar_items')).toHaveLength(
+        2,
+      );
+    });
+  });
+
+  it('offers Accessibility access when the inventory cannot be inspected', async () => {
+    mockCommands({
+      list_menu_bar_items: {
+        supported: true,
+        permissionGranted: false,
+        dividerAvailable: false,
+        items: [],
+      } satisfies MenuBarInventory,
+      request_accessibility: true,
+    });
+    renderView(<MenuBarView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Grant Access…' }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('request_accessibility');
     });
   });
 

@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSImage, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+use objc2_app_kit::{NSImage, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString, ns_string};
 use tauri::AppHandle;
 
@@ -77,6 +77,17 @@ struct Items {
     /// `NSControl.target` is a weak reference, so the handler has to be owned
     /// here. Drop it and the controller's clicks go nowhere.
     _target: Retained<ClickTarget>,
+}
+
+/// Geometry needed to classify Accessibility menu extras relative to Tomari's
+/// divider. Coordinates use the AX/Core Graphics top-left global space.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanContext {
+    pub divider_x: f64,
+    pub screen_left: f64,
+    pub screen_right: f64,
+    pub menu_top: f64,
+    pub menu_bottom: f64,
 }
 
 /// Reflect `enabled` / `collapsed` onto the status items, creating or removing
@@ -154,6 +165,59 @@ fn set_collapsed(items: &Items, collapsed: bool, mtm: MainThreadMarker) {
         }),
         mtm,
     );
+}
+
+/// Expand the divider and snapshot its screen-space boundary. Commands may run
+/// on a worker thread, so hop to AppKit's main thread when necessary.
+pub fn scan_context(app: &AppHandle) -> Option<ScanContext> {
+    if let Some(mtm) = MainThreadMarker::new() {
+        return scan_context_on_main(mtm);
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let value = MainThreadMarker::new().and_then(scan_context_on_main);
+        let _ = sender.send(value);
+    })
+    .ok()?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .ok()?
+}
+
+/// Restore the physical divider after an inventory scan. Going through
+/// [`apply`] claims a generation, so a later click or settings save still wins
+/// even if this main-thread hop has not landed yet.
+pub fn finish_scan(app: &AppHandle, enabled: bool, collapsed: bool) {
+    apply(app, enabled, collapsed);
+}
+
+fn scan_context_on_main(mtm: MainThreadMarker) -> Option<ScanContext> {
+    ITEMS.with(|cell| {
+        let items = cell.borrow();
+        let items = items.as_ref()?;
+        // The resting collapsed width puts the divider window off-screen. Put
+        // it back before reading the frame so the boundary is meaningful.
+        set_collapsed(items, false, mtm);
+        let window = items.divider.button(mtm)?.window()?;
+        let menu = window.frame();
+        let screen = window.screen()?.frame();
+        let screens = NSScreen::screens(mtm);
+        let main_height = (0..screens.count())
+            .map(|index| screens.objectAtIndex(index).frame())
+            .find(|frame| frame.origin.x == 0.0 && frame.origin.y == 0.0)
+            .or_else(|| (screens.count() > 0).then(|| screens.objectAtIndex(0).frame()))?
+            .size
+            .height;
+        let menu_top = main_height - (menu.origin.y + menu.size.height);
+        Some(ScanContext {
+            divider_x: menu.origin.x + menu.size.width / 2.0,
+            screen_left: screen.origin.x,
+            screen_right: screen.origin.x + screen.size.width,
+            menu_top,
+            menu_bottom: menu_top + menu.size.height,
+        })
+    })
 }
 
 fn make_items(mtm: MainThreadMarker, app: AppHandle) -> Items {

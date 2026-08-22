@@ -37,8 +37,9 @@ same foundation over time.
 ### Menu bar
 
 - Hide the status icons you rarely look at behind a divider, and bring them
-  back with a click, the tray, or a shortcut. Which icons those are is your own
-  ⌘-drag arrangement: macOS lets an app move only its own menu bar icons.
+  back with a click, the tray, or a shortcut. Settings mirrors the current
+  hidden and always-visible items; ⌘-drag remains the source of truth for
+  moving icons across the divider.
 
 ### Keep Awake
 

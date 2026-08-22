@@ -600,7 +600,7 @@ select.input {
   display: flex;
   align-items: stretch;
   gap: 4px;
-  margin-top: 8px;
+  margin: 10px 12px 4px;
   font-size: var(--fs-caption);
   color: var(--ink-dim);
 }
@@ -622,6 +622,110 @@ select.input {
   border: 1px solid var(--amber-line);
   color: var(--amber);
   font-weight: 600;
+}
+
+/* The inventory mirrors the menu bar's actual two-zone structure. The compact
+   boundary strip above the lists is the signature element: it keeps every row
+   grounded in the same physical left-of-divider/right-of-divider model the
+   user manipulates with ⌘-drag. */
+.mb-inventory__intro .btn {
+  white-space: nowrap;
+}
+
+.mb-inventory__state {
+  margin: 0;
+  padding: 13px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: var(--fs-small);
+}
+
+.mb-inventory__state--error {
+  color: var(--err);
+}
+
+.mb-inventory__permission {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 13px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: var(--fs-small);
+}
+
+.mb-inventory__permission > span {
+  flex: 1;
+}
+
+.mb-inventory__section + .mb-inventory__section {
+  border-top: 1px solid var(--line);
+}
+
+.mb-inventory__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 13px;
+  background: var(--surface-sunken);
+  color: var(--ink-dim);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.mb-inventory__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 7px 13px;
+}
+
+.mb-inventory__item + .mb-inventory__item {
+  border-top: 1px solid var(--line);
+}
+
+.mb-inventory__glyph {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  background: var(--field-bg);
+  color: var(--ink);
+  font-size: var(--fs-caption);
+  font-weight: 650;
+}
+
+.mb-inventory__identity {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.mb-inventory__name {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mb-inventory__owner {
+  overflow: hidden;
+  color: var(--ink-dim);
+  font-size: var(--fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mb-inventory__empty {
+  margin: 0;
+  padding: 10px 13px;
+  color: var(--ink-faint);
+  font-size: var(--fs-caption);
 }
 
 /* ===== Keycaps (Keyboard domain only) ================================== */

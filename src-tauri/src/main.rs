@@ -130,6 +130,7 @@ fn main() {
             commands::get_keep_awake,
             commands::set_keep_awake,
             commands::get_menu_bar,
+            commands::list_menu_bar_items,
             commands::set_menu_bar_collapsed,
         ])
         .setup(|app| {

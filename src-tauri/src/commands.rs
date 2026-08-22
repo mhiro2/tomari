@@ -818,6 +818,16 @@ pub fn get_menu_bar(state: State<'_, AppState>) -> crate::menubar::MenuBarStatus
     crate::menubar::status(state.inner())
 }
 
+/// Inspect the real menu bar arrangement. The Accessibility scan can message
+/// every running app that owns a status item, so keep it off the main thread.
+#[tauri::command]
+pub async fn list_menu_bar_items(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<crate::menubar::MenuBarInventory> {
+    Ok(crate::menubar::inventory(&app, state.inner()))
+}
+
 /// Expand or collapse the tidied menu bar items from the panel. A no-op while
 /// the feature is off, which the returned status reflects.
 #[tauri::command]

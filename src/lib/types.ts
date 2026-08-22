@@ -150,6 +150,25 @@ export interface MenuBarStatus {
   collapsed: boolean;
 }
 
+export type MenuBarItemZone = 'hidden' | 'visible';
+
+// One currently running menu bar item discovered through Accessibility. IDs
+// are snapshot-local because macOS does not expose a durable status-item id.
+export interface MenuBarItem {
+  id: string;
+  name: string;
+  ownerName: string | null;
+  bundleId: string | null;
+  zone: MenuBarItemZone;
+}
+
+export interface MenuBarInventory {
+  supported: boolean;
+  permissionGranted: boolean;
+  dividerAvailable: boolean;
+  items: MenuBarItem[];
+}
+
 export interface AcceleratorCheck {
   valid: boolean;
   normalized: string | null;

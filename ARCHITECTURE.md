@@ -563,14 +563,21 @@ Gather the status items you rarely look at behind a divider and push them off
 the edge of the screen until you ask for them — the job Bartender, Ice and
 Hidden Bar do.
 
-macOS offers no API to enumerate, identify or move another app's status item,
-so hiding one directly is impossible. What is possible is to own an item and
-make it enormous: the menu bar lays items out right to left, so an item
-stretched to a sentinel width (`10_000pt`, which macOS clamps to something a
-little over the screen) pushes everything to its left past the edge. **Which
-icons those are is the user's own ⌘-drag arrangement** — the app cannot do the
-sorting for them, and this is the feature's one hard limit rather than a gap to
-be closed later.
+AppKit offers no API to enumerate or move another app's status item, so hiding
+one directly is impossible. What is possible is to own an item and make it
+enormous: the menu bar lays items out right to left, so an item stretched to a
+sentinel width (`10_000pt`, which macOS clamps to something a little over the
+screen) pushes everything to its left past the edge. **Which icons those are is
+the user's own ⌘-drag arrangement** — the app cannot do the sorting for them.
+
+The settings panel can still *inspect* that arrangement. `inventory.rs` asks
+each running process for its Accessibility `AXExtrasMenuBar`, reads the child
+items' frames and classifies them relative to Tomari's divider. The divider is
+expanded only for the scan and restored to the latest live state immediately
+afterward. Item ids are snapshot-local: AX exposes neither a durable status-item
+identity nor a supported move operation, and item names vary in quality across
+applications. The physical ⌘-drag layout therefore remains the single source
+of truth; the panel is a live inventory, not a second configuration database.
 
 Two status items, with distinct jobs:
 
@@ -607,7 +614,7 @@ relaunch is still unproven.
 
 | Permission       | Required by                                        | Acquisition                                                                                                                            |
 | ---------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Accessibility    | Moving windows (AX), key synthesis (`keysend`)     | `AXIsProcessTrustedWithOptions` (with prompt)                                                                                          |
+| Accessibility    | Moving windows (AX), key synthesis (`keysend`), reading menu bar items | `AXIsProcessTrustedWithOptions` (with prompt)                                                                               |
 | Input Monitoring | The keyboard tap and the drag-to-snap tap          | `CGRequestListenEventAccess`. Attempting to create a tap without it adds Tomari to the Input Monitoring list so the user can enable it |
 | Administrator    | Keep-awake's lid-close veto (`pmset disablesleep`) | macOS auth dialog via `osascript … with administrator privileges`; required to turn Keep Awake on — the lid-close veto is part of the switch, so declining cancels it |
 

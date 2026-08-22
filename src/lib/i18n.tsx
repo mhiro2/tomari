@@ -200,6 +200,21 @@ const en = {
   'menubar.arrangeSection': 'Choosing what to hide',
   'menubar.arrangeBody':
     'Hold ⌘ and drag your menu bar icons so the ones you want tucked away sit left of the ≡ divider.',
+  'menubar.inventoryIntro':
+    'This is the current menu bar arrangement. Move an icon across the ≡ divider with ⌘-drag, then refresh.',
+  'menubar.inventoryLoading': 'Reading menu bar items…',
+  'menubar.inventoryEmpty': 'No items detected in this section.',
+  'menubar.inventoryError': 'Could not read the menu bar. Try refreshing after expanding it.',
+  'menubar.inventoryUnsupported': 'Menu bar inspection is available on macOS.',
+  'menubar.inventoryDividerMissing':
+    'The divider is not available yet. Turn menu bar tidying off and on, then refresh.',
+  'menubar.inventoryPermission': 'Accessibility access is required to identify menu bar items.',
+  'menubar.grantAccessibility': 'Grant Access…',
+  'menubar.refreshItems': 'Refresh Items',
+  'menubar.hiddenItems': 'Hidden now',
+  'menubar.visibleItems': 'Always shown',
+  'menubar.itemCount': '{count}',
+  'menubar.itemOwner': 'From {owner}',
   'menubar.zoneHidden': 'hidden',
   'menubar.zoneVisible': 'always shown',
   'menubar.limitNote':
@@ -458,6 +473,22 @@ const ja: Record<MessageKey, string> = {
   'menubar.arrangeSection': '隠すものを決める',
   'menubar.arrangeBody':
     '⌘ を押しながらメニューバーのアイコンをドラッグして、隠したいものを ≡ より左に並べます。',
+  'menubar.inventoryIntro':
+    '現在のメニューバー配置です。⌘ ドラッグでアイコンを ≡ の反対側へ移動し、更新してください。',
+  'menubar.inventoryLoading': 'メニューバー項目を読み取っています…',
+  'menubar.inventoryEmpty': 'この領域に項目は検出されませんでした。',
+  'menubar.inventoryError':
+    'メニューバーを読み取れませんでした。展開後にもう一度更新してください。',
+  'menubar.inventoryUnsupported': 'メニューバーの読み取りは macOS で利用できます。',
+  'menubar.inventoryDividerMissing':
+    '区切りを取得できません。メニューバー整理をオフにしてから再度オンにし、更新してください。',
+  'menubar.inventoryPermission': 'メニューバー項目の特定にはアクセシビリティ権限が必要です。',
+  'menubar.grantAccessibility': 'アクセスを許可…',
+  'menubar.refreshItems': '項目を更新',
+  'menubar.hiddenItems': '現在隠れる項目',
+  'menubar.visibleItems': '常に表示する項目',
+  'menubar.itemCount': '{count}',
+  'menubar.itemOwner': '{owner} から',
   'menubar.zoneHidden': '隠れる',
   'menubar.zoneVisible': '常に表示',
   'menubar.limitNote':

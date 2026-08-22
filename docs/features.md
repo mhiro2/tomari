@@ -122,6 +122,13 @@ you want tucked away sit to the left of the divider. macOS lets an app move only
 its own menu bar icons, so this part is yours to do — there is no way for Tomari
 to sort them for you.
 
+The **Menu Bar** settings show a live, best-effort inventory split into
+**Hidden now** and **Always shown**. After moving an icon across the divider with
+⌘-drag, choose **Refresh Items** to reread the physical arrangement. Reading
+item names requires Accessibility access; some applications expose only a
+generic owner name, and the list may be incomplete when macOS does not publish
+an item through Accessibility.
+
 - **Expand and collapse** — click the ‹ handle, use **Show Menu Bar Icons** in
   the tray menu, or bind the "Show/Hide Menu Bar Icons" action to a shortcut in
   the Keyboard section.

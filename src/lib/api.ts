@@ -10,6 +10,7 @@ import type {
   DisplayDirection,
   Hotkey,
   KeepAwakeStatus,
+  MenuBarInventory,
   MenuBarStatus,
   ModifierRule,
   SaveSettingsOutcome,
@@ -108,6 +109,9 @@ export const setKeepAwake = (enabled: boolean): Promise<KeepAwakeStatus> =>
 
 // Whether menu bar tidying is on and, if so, whether it is collapsed.
 export const getMenuBar = (): Promise<MenuBarStatus> => invoke('get_menu_bar');
+
+// Read the real hidden/visible item arrangement around Tomari's divider.
+export const listMenuBarItems = (): Promise<MenuBarInventory> => invoke('list_menu_bar_items');
 
 // Expand or collapse the tidied menu bar icons. Resolves to the resulting
 // status, which reports the feature still off if it was never switched on.
