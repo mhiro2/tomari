@@ -1,7 +1,7 @@
 //! Dispatch an [`AppAction`] coming from a hotkey, modifier tap, tray menu or
 //! the UI to its concrete effect.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tomari_core::{AppAction, ImeMode};
 
 use crate::error::CmdError;
@@ -11,7 +11,7 @@ use crate::state::AppState;
 /// back to the frontend (localized by code) or be logged from the shortcut
 /// handler.
 pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result<(), CmdError> {
-    match action {
+    let result = match action {
         AppAction::TogglePanel => toggle_panel(app),
         // Window ops funnel through `window_ops`, which honors the
         // window-management master switch and records undo history.
@@ -26,7 +26,12 @@ pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result
         AppAction::MoveWindowToDisplay(direction) => {
             crate::window_ops::move_to_display(state, *direction)
         }
-        AppAction::UndoWindow => crate::window_ops::undo(state),
+        AppAction::RecallWindowPlacement => crate::window_ops::recall_placement(state).map(|_| ()),
+        AppAction::MoveWindowToDisplayAndRecall(direction) => {
+            crate::window_ops::move_to_display_and_recall(state, *direction).map(|_| ())
+        }
+        AppAction::UndoWindow => crate::window_ops::undo(state).map(|_| ()),
+        AppAction::RedoWindow => crate::window_ops::redo(state).map(|_| ()),
         AppAction::SwitchIme(mode) => switch_ime(state, *mode),
         AppAction::SendKeystroke(accel) => send_keystroke(state, accel),
         AppAction::ToggleKeepAwake => {
@@ -38,7 +43,20 @@ pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result
             Ok(())
         }
         AppAction::NoOp => Ok(()),
+    };
+    if matches!(
+        action,
+        AppAction::SnapWindow(_)
+            | AppAction::SnapWindowExact(_)
+            | AppAction::MoveWindowToDisplay(_)
+            | AppAction::RecallWindowPlacement
+            | AppAction::MoveWindowToDisplayAndRecall(_)
+            | AppAction::UndoWindow
+            | AppAction::RedoWindow
+    ) {
+        crate::tray::refresh(app);
     }
+    result
 }
 
 /// Toggle the Tomari window: hide it only when it is the active (visible and
@@ -56,6 +74,7 @@ pub fn toggle_panel(app: &AppHandle) -> Result<(), CmdError> {
     } else {
         window.show().map_err(|e| CmdError::other(e.to_string()))?;
         let _ = window.set_focus();
+        let _ = app.emit("tomari:panel-shown", ());
         Ok(())
     }
 }
@@ -68,6 +87,7 @@ pub fn show_panel(app: &AppHandle) -> Result<(), CmdError> {
     };
     window.show().map_err(|e| CmdError::other(e.to_string()))?;
     let _ = window.set_focus();
+    let _ = app.emit("tomari:panel-shown", ());
     Ok(())
 }
 

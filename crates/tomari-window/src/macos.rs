@@ -25,11 +25,11 @@ use core_graphics::window::{
     kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
 };
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSScreen;
-use tomari_core::domain::window::Rect;
+use objc2_app_kit::{NSRunningApplication, NSScreen};
+use tomari_core::domain::window::{Rect, WindowApplication};
 
 use crate::error::{Error, Result};
-use crate::manager::{WindowHandle, WindowManager};
+use crate::manager::{FocusedWindow, WindowHandle, WindowManager};
 
 type AXError = i32;
 type AXValueType = u32;
@@ -261,6 +261,29 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
     Ok((system, app, window))
 }
 
+/// Resolve the stable bundle identifier and localized presentation name for an
+/// Accessibility application element. Applications without a bundle cannot
+/// participate in remembered placement because a process ID is not durable.
+///
+/// # Safety
+/// `application` must be a valid application `AXUIElementRef`.
+unsafe fn window_application(application: CFTypeRef) -> Result<WindowApplication> {
+    let pid = unsafe { element_pid(application) }.ok_or(Error::Unsupported)?;
+    let running = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .ok_or(Error::Unsupported)?;
+    let bundle_id = running
+        .bundleIdentifier()
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or(Error::Unsupported)?;
+    let name = running
+        .localizedName()
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| bundle_id.clone());
+    Ok(WindowApplication { bundle_id, name })
+}
+
 /// Read a window's frame (CG coordinates, top-left origin) by decoding its
 /// `AXPosition`/`AXSize` value objects.
 ///
@@ -411,7 +434,7 @@ impl WindowManager for AxWindowManager {
         unsafe { AXIsProcessTrusted() != 0 }
     }
 
-    fn focused_window(&self) -> Result<Box<dyn WindowHandle>> {
+    fn focused_window_context(&self) -> Result<FocusedWindow> {
         unsafe {
             if AXIsProcessTrusted() == 0 {
                 return Err(Error::PermissionDenied);
@@ -421,6 +444,25 @@ impl WindowManager for AxWindowManager {
             // This holds in the fallback path too: `_app` there is a fresh
             // `AXUIElementCreateApplication` handle for the frontmost other
             // process, and its `AXFocusedWindow` is copied (not borrowed) from it.
+            let (_system, app, window) = focused_window()?;
+            let application = window_application(app.0)?;
+            Ok(FocusedWindow {
+                handle: Box::new(DragWindow::new(window)),
+                application,
+            })
+        }
+    }
+
+    fn focused_window(&self) -> Result<Box<dyn WindowHandle>> {
+        unsafe {
+            if AXIsProcessTrusted() == 0 {
+                return Err(Error::PermissionDenied);
+            }
+            // Ordinary snap/move operations need only the retained window
+            // element. Do not resolve `NSRunningApplication` here: some
+            // movable GUI processes have no bundle identifier and therefore
+            // cannot participate in remembered placement, but their windows
+            // must remain usable by handle-only operations.
             let (_system, _app, window) = focused_window()?;
             Ok(Box::new(DragWindow::new(window)))
         }

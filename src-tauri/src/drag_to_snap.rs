@@ -317,11 +317,18 @@ fn handle_drag_to_snap(
                 if d.armed
                     && let Some((preset, visible)) = d.active
                 {
-                    crate::window_ops::apply_dragged(
+                    let changed = crate::window_ops::apply_dragged(
                         app_state,
                         &d.window,
+                        d.start_frame,
                         compute_frame(preset, visible),
                     );
+                    if changed {
+                        // This callback runs on the event-tap thread, while the
+                        // tray/menu APIs are main-thread-only.
+                        let handle = app.clone();
+                        let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
+                    }
                 }
             }
         }

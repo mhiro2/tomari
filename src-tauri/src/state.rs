@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tauri_plugin_global_shortcut::Shortcut;
-use tomari_core::{AppAction, AppSettings, Database, Rect, WindowPreset};
+use tomari_core::{
+    AppAction, AppSettings, Database, PlacementSlot, Rect, WindowPlacement, WindowPreset,
+};
 use tomari_keyboard::ModifierEngine;
 use tomari_window::{WindowHandle, WindowManager};
 
@@ -17,6 +19,9 @@ use crate::menubar::MenuBarState;
 
 /// How many window frames the undo history keeps before dropping the oldest.
 const WINDOW_HISTORY_CAP: usize = 50;
+
+/// How many remembered-position edits can be recovered from the panel.
+const PLACEMENT_EDIT_HISTORY_CAP: usize = 20;
 
 /// What the most recent preset snap did, so a repeated press of the same
 /// request can advance its cycle (1/2 → 1/3 → 2/3) instead of re-applying.
@@ -35,6 +40,39 @@ pub struct LastSnap {
     pub after: Rect,
 }
 
+/// What the most recent remembered-position action applied, so repeating it on
+/// the same unmoved window can alternate between Primary and Secondary.
+#[derive(Debug, Clone)]
+pub struct LastPlacement {
+    pub bundle_id: String,
+    pub slot: PlacementSlot,
+    pub window_hash: u64,
+    pub after: Rect,
+}
+
+/// One reversible window mutation. The handle retargets the window even after
+/// another app receives focus, so undo/redo acts on what actually moved.
+pub struct WindowChange {
+    pub window: Box<dyn WindowHandle>,
+    pub before: Rect,
+    pub after: Rect,
+}
+
+#[derive(Default)]
+struct WindowHistory {
+    undo: Vec<WindowChange>,
+    redo: Vec<WindowChange>,
+}
+
+/// One reversible edit to the persistent remembered-home data. This is kept
+/// separate from [`WindowChange`]: restoring a window frame and restoring a
+/// deleted/replaced saved home are different user intentions.
+#[derive(Debug, Clone)]
+pub struct PlacementEdit {
+    pub before: Option<WindowPlacement>,
+    pub after: Option<WindowPlacement>,
+}
+
 pub struct AppState {
     /// Persistent SQLite store.
     pub db: Database,
@@ -46,13 +84,16 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     /// Registered global shortcuts mapped to the action they fire.
     pub shortcuts: Mutex<HashMap<Shortcut, AppAction>>,
-    /// The windows moved by window actions paired with the frame each held
-    /// beforehand, newest last, so Undo restores the window that was actually
-    /// moved (not whatever is focused later). In-memory only: handles are
+    /// Reversible window mutations, in memory only because handles are
     /// meaningless across a relaunch.
-    window_history: Mutex<Vec<(Box<dyn WindowHandle>, Rect)>>,
+    window_history: Mutex<WindowHistory>,
+    /// Recent edits to remembered-home data, newest last. These values are
+    /// meaningful across window focus changes but not across app relaunches.
+    placement_edit_history: Mutex<Vec<PlacementEdit>>,
     /// The most recent preset snap, for hotkey-repeat cycling.
     last_snap: Mutex<Option<LastSnap>>,
+    /// The most recent remembered position, for Primary/Secondary cycling.
+    last_placement: Mutex<Option<LastPlacement>>,
     /// Cached display geometry — each display's `(full_frame, work_area)` in CG
     /// coordinates — for drag-to-snap. Refreshed from the main thread (the only
     /// place AppKit's per-display frames are readable) so the drag-to-snap tap
@@ -101,8 +142,10 @@ impl AppState {
             windows,
             settings: Mutex::new(settings),
             shortcuts: Mutex::new(HashMap::new()),
-            window_history: Mutex::new(Vec::new()),
+            window_history: Mutex::new(WindowHistory::default()),
+            placement_edit_history: Mutex::new(Vec::new()),
             last_snap: Mutex::new(None),
+            last_placement: Mutex::new(None),
             screen_geometry: Mutex::new(Vec::new()),
             config_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
@@ -151,18 +194,65 @@ impl AppState {
         }
     }
 
-    /// Record a window and the frame it held before a window action moved it.
-    pub fn push_window_history(&self, window: Box<dyn WindowHandle>, frame: Rect) {
+    /// Record a new user-visible change and discard the redo branch it replaces.
+    pub fn push_window_change(&self, change: WindowChange) {
         let mut history = self.window_history.lock_safe();
-        if history.len() == WINDOW_HISTORY_CAP {
-            history.remove(0);
+        if history.undo.len() == WINDOW_HISTORY_CAP {
+            history.undo.remove(0);
         }
-        history.push((window, frame));
+        history.undo.push(change);
+        history.redo.clear();
     }
 
-    /// Take the most recently recorded window/frame pair, if any.
-    pub fn pop_window_history(&self) -> Option<(Box<dyn WindowHandle>, Rect)> {
-        self.window_history.lock_safe().pop()
+    pub fn pop_undo(&self) -> Option<WindowChange> {
+        self.window_history.lock_safe().undo.pop()
+    }
+
+    pub fn restore_undo(&self, change: WindowChange) {
+        self.window_history.lock_safe().undo.push(change);
+    }
+
+    pub fn push_redo(&self, change: WindowChange) {
+        self.window_history.lock_safe().redo.push(change);
+    }
+
+    pub fn pop_redo(&self) -> Option<WindowChange> {
+        self.window_history.lock_safe().redo.pop()
+    }
+
+    pub fn restore_redo(&self, change: WindowChange) {
+        self.window_history.lock_safe().redo.push(change);
+    }
+
+    pub fn push_undo_from_redo(&self, change: WindowChange) {
+        let mut history = self.window_history.lock_safe();
+        if history.undo.len() == WINDOW_HISTORY_CAP {
+            history.undo.remove(0);
+        }
+        history.undo.push(change);
+    }
+
+    pub fn window_history_status(&self) -> (bool, bool) {
+        let history = self.window_history.lock_safe();
+        (!history.undo.is_empty(), !history.redo.is_empty())
+    }
+
+    /// Record a persistent home edit, keeping enough information to restore
+    /// the value that existed immediately before it.
+    pub fn push_placement_edit(&self, edit: PlacementEdit) {
+        let mut history = self.placement_edit_history.lock_safe();
+        if history.len() == PLACEMENT_EDIT_HISTORY_CAP {
+            history.remove(0);
+        }
+        history.push(edit);
+    }
+
+    pub fn pop_placement_edit(&self) -> Option<PlacementEdit> {
+        self.placement_edit_history.lock_safe().pop()
+    }
+
+    pub fn restore_placement_edit(&self, edit: PlacementEdit) {
+        self.placement_edit_history.lock_safe().push(edit);
     }
 
     /// The most recent preset snap, for hotkey-repeat cycling.
@@ -178,6 +268,18 @@ impl AppState {
     /// exact (non-cycling) snap, which sits outside the cycle.
     pub fn clear_last_snap(&self) {
         *self.last_snap.lock_safe() = None;
+    }
+
+    pub fn last_placement(&self) -> Option<LastPlacement> {
+        self.last_placement.lock_safe().clone()
+    }
+
+    pub fn set_last_placement(&self, placement: LastPlacement) {
+        *self.last_placement.lock_safe() = Some(placement);
+    }
+
+    pub fn clear_last_placement(&self) {
+        *self.last_placement.lock_safe() = None;
     }
 
     /// Milliseconds since this state was built — the clock both the event tap
@@ -231,7 +333,11 @@ mod tests {
     }
 
     fn push(state: &AppState, i: usize) {
-        state.push_window_history(Box::new(DummyHandle), frame_at(i));
+        state.push_window_change(WindowChange {
+            window: Box::new(DummyHandle),
+            before: frame_at(i),
+            after: frame_at(i + 100),
+        });
     }
 
     #[test]
@@ -241,10 +347,10 @@ mod tests {
         push(&state, 2);
         push(&state, 3);
 
-        assert_eq!(state.pop_window_history().unwrap().1, frame_at(3));
-        assert_eq!(state.pop_window_history().unwrap().1, frame_at(2));
-        assert_eq!(state.pop_window_history().unwrap().1, frame_at(1));
-        assert!(state.pop_window_history().is_none());
+        assert_eq!(state.pop_undo().unwrap().before, frame_at(3));
+        assert_eq!(state.pop_undo().unwrap().before, frame_at(2));
+        assert_eq!(state.pop_undo().unwrap().before, frame_at(1));
+        assert!(state.pop_undo().is_none());
     }
 
     #[test]
@@ -257,17 +363,29 @@ mod tests {
 
         // Newest first, exactly `WINDOW_HISTORY_CAP` entries, down to frame 1.
         assert_eq!(
-            state.pop_window_history().unwrap().1,
+            state.pop_undo().unwrap().before,
             frame_at(WINDOW_HISTORY_CAP)
         );
         let mut count = 1;
         let mut oldest = WINDOW_HISTORY_CAP;
-        while let Some((_, frame)) = state.pop_window_history() {
-            oldest = frame.x as usize;
+        while let Some(change) = state.pop_undo() {
+            oldest = change.before.x as usize;
             count += 1;
         }
         assert_eq!(count, WINDOW_HISTORY_CAP, "only the cap many are retained");
         assert_eq!(oldest, 1, "frame 0 was dropped as the oldest");
+    }
+
+    #[test]
+    fn a_new_change_discards_the_redo_branch() {
+        let state = state();
+        push(&state, 1);
+        let undone = state.pop_undo().unwrap();
+        state.push_redo(undone);
+        assert_eq!(state.window_history_status(), (false, true));
+
+        push(&state, 2);
+        assert_eq!(state.window_history_status(), (true, false));
     }
 
     #[test]

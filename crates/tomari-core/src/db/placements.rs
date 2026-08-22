@@ -21,22 +21,35 @@ impl Database {
         })
     }
 
-    /// Fetch one remembered position, if configured.
+    /// Fetch one remembered position, if configured and decodable. A malformed
+    /// stored value is treated as absent so callers can overwrite or remove it.
     pub fn get_window_placement(
         &self,
         bundle_id: &str,
         slot: PlacementSlot,
     ) -> Result<Option<WindowPlacement>> {
         self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT bundle_id, app_name, slot, frame
+            let result = conn
+                .query_row(
+                    "SELECT bundle_id, app_name, slot, frame
                  FROM window_placements
                  WHERE bundle_id = ?1 AND slot = ?2",
-                params![bundle_id, slot.as_str()],
-                decode_placement,
-            )
-            .optional()
-            .map_err(Into::into)
+                    params![bundle_id, slot.as_str()],
+                    decode_placement,
+                )
+                .optional();
+            match result {
+                Ok(placement) => Ok(placement),
+                Err(rusqlite::Error::FromSqlConversionFailure(_, _, error)) => {
+                    tracing::warn!(
+                        entity = "window placement",
+                        %error,
+                        "treating a stored row that does not deserialize as absent"
+                    );
+                    Ok(None)
+                }
+                Err(error) => Err(error.into()),
+            }
         })
     }
 
@@ -70,14 +83,15 @@ impl Database {
         })
     }
 
-    /// Forget one named position. Deleting an absent position is idempotent.
-    pub fn delete_window_placement(&self, bundle_id: &str, slot: PlacementSlot) -> Result<()> {
+    /// Forget one named position, returning whether a row existed. Deleting an
+    /// absent position is idempotent.
+    pub fn delete_window_placement(&self, bundle_id: &str, slot: PlacementSlot) -> Result<bool> {
         self.with_conn(|conn| {
-            conn.execute(
+            let deleted = conn.execute(
                 "DELETE FROM window_placements WHERE bundle_id = ?1 AND slot = ?2",
                 params![bundle_id, slot.as_str()],
             )?;
-            Ok(())
+            Ok(deleted != 0)
         })
     }
 }
@@ -166,5 +180,65 @@ mod tests {
             db.save_window_placement(&bad),
             Err(Error::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn malformed_positions_can_be_replaced_or_deleted() {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO window_placements (bundle_id, app_name, slot, frame)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "com.example.Editor",
+                    "Editor",
+                    PlacementSlot::Primary.as_str(),
+                    "not-json",
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            db.get_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap()
+                .is_none()
+        );
+
+        let replacement = placement(PlacementSlot::Primary);
+        db.save_window_placement(&replacement).unwrap();
+        assert_eq!(
+            db.get_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap(),
+            Some(replacement)
+        );
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE window_placements SET frame = ?1
+                 WHERE bundle_id = ?2 AND slot = ?3",
+                params![
+                    "still-not-json",
+                    "com.example.Editor",
+                    PlacementSlot::Primary.as_str(),
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.delete_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap()
+        );
+        assert!(
+            db.get_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !db.delete_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap()
+        );
     }
 }

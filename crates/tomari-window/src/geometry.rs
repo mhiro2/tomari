@@ -2,7 +2,7 @@
 //! screen's work area. Coordinates are points with a top-left origin (y grows
 //! downward), matching both `CGDisplay` bounds and the Accessibility API.
 
-use tomari_core::domain::window::{Rect, WindowPreset};
+use tomari_core::domain::window::{NormalizedRect, Rect, WindowPreset};
 
 /// How far (points) two frames may drift apart per edge and still count as the
 /// same placement. Some windows clamp to minimum sizes or size increments, so
@@ -70,6 +70,59 @@ pub fn remap_frame(frame: Rect, from: Rect, to: Rect) -> Rect {
         .min(to.y + to.height - height)
         .max(to.y);
     Rect::new(x, y, width, height)
+}
+
+/// Capture a safe display-relative position. A window partly outside the work
+/// area is clamped inside before normalization, so recalling it never restores
+/// an unreachable title bar or a size larger than the destination display.
+pub fn normalize_frame(frame: Rect, area: Rect) -> Option<NormalizedRect> {
+    if area.width <= 0.0
+        || area.height <= 0.0
+        || ![
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            area.x,
+            area.y,
+            area.width,
+            area.height,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return None;
+    }
+    let width = frame.width.clamp(f64::EPSILON, area.width);
+    let height = frame.height.clamp(f64::EPSILON, area.height);
+    let x = frame.x.clamp(area.x, area.x + area.width - width);
+    let y = frame.y.clamp(area.y, area.y + area.height - height);
+    Some(NormalizedRect::new(
+        (x - area.x) / area.width,
+        (y - area.y) / area.height,
+        width / area.width,
+        height / area.height,
+    ))
+}
+
+/// Expand a remembered display-relative position into one display's usable
+/// work area. Invalid stored values fail closed instead of moving a window.
+pub fn recall_frame(frame: NormalizedRect, area: Rect) -> Option<Rect> {
+    if !frame.is_valid()
+        || area.width <= 0.0
+        || area.height <= 0.0
+        || ![area.x, area.y, area.width, area.height]
+            .into_iter()
+            .all(f64::is_finite)
+    {
+        return None;
+    }
+    Some(Rect::new(
+        area.x + frame.x * area.width,
+        area.y + frame.y * area.height,
+        frame.width * area.width,
+        frame.height * area.height,
+    ))
 }
 
 /// The presets a half-snap cycles through on repeated activation:
@@ -462,6 +515,29 @@ mod tests {
         let frame = compute_frame(WindowPreset::LeftHalf, from);
         let remapped = remap_frame(frame, from, to);
         assert_eq!(remapped, Rect::new(1600.0, 0.0, 600.0, 800.0));
+    }
+
+    #[test]
+    fn remembered_frame_round_trips_across_differently_sized_work_areas() {
+        let source = Rect::new(0.0, 25.0, 1600.0, 975.0);
+        let target = Rect::new(-1200.0, 0.0, 1200.0, 800.0);
+        let left_half = compute_frame(WindowPreset::LeftHalf, source);
+        let remembered = normalize_frame(left_half, source).unwrap();
+
+        assert_eq!(
+            recall_frame(remembered, target),
+            Some(Rect::new(-1200.0, 0.0, 600.0, 800.0))
+        );
+    }
+
+    #[test]
+    fn capture_clamps_an_overhanging_window_to_a_safe_home() {
+        let area = Rect::new(0.0, 25.0, 1600.0, 975.0);
+        let overhanging = Rect::new(-300.0, -100.0, 2000.0, 1200.0);
+        let remembered = normalize_frame(overhanging, area).unwrap();
+
+        assert_eq!(remembered, NormalizedRect::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(recall_frame(remembered, area), Some(area));
     }
 
     #[test]

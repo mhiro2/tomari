@@ -33,8 +33,16 @@ pub enum AppAction {
     /// Move the focused window to a neighboring display, keeping its
     /// proportional position and size.
     MoveWindowToDisplay(DisplayDirection),
-    /// Restore the focused window to its frame before the last window action.
+    /// Restore the focused application to its remembered home on the current
+    /// display. Repeating cycles between Primary and Secondary when both exist.
+    RecallWindowPlacement,
+    /// Move the focused window to a neighboring display and place it in that
+    /// application's Primary home there as one undoable operation.
+    MoveWindowToDisplayAndRecall(DisplayDirection),
+    /// Restore the last moved window to its frame before the last window action.
     UndoWindow,
+    /// Reapply the last window action that was undone.
+    RedoWindow,
     /// Switch the active input method (英数 / かな).
     SwitchIme(ImeMode),
     /// Emit a keystroke described by an accelerator string, e.g. `"Escape"`.
@@ -57,7 +65,12 @@ impl AppAction {
                 format!("Snap: {}", preset.label())
             }
             Self::MoveWindowToDisplay(direction) => format!("Move to {}", direction.label()),
+            Self::RecallWindowPlacement => "Restore Remembered Position".into(),
+            Self::MoveWindowToDisplayAndRecall(direction) => {
+                format!("Move and Restore on {}", direction.label())
+            }
             Self::UndoWindow => "Undo Window Move".into(),
+            Self::RedoWindow => "Redo Window Move".into(),
             Self::SwitchIme(ImeMode::Alphanumeric) => "IME: 英数".into(),
             Self::SwitchIme(ImeMode::Kana) => "IME: かな".into(),
             Self::SendKeystroke(k) => format!("Send: {k}"),
@@ -91,7 +104,10 @@ mod tests {
                 AppAction::SnapWindow(_) => "snapWindow",
                 AppAction::SnapWindowExact(_) => "snapWindowExact",
                 AppAction::MoveWindowToDisplay(_) => "moveWindowToDisplay",
+                AppAction::RecallWindowPlacement => "recallWindowPlacement",
+                AppAction::MoveWindowToDisplayAndRecall(_) => "moveWindowToDisplayAndRecall",
                 AppAction::UndoWindow => "undoWindow",
+                AppAction::RedoWindow => "redoWindow",
                 AppAction::SwitchIme(_) => "switchIme",
                 AppAction::SendKeystroke(_) => "sendKeystroke",
                 AppAction::ToggleKeepAwake => "toggleKeepAwake",
@@ -105,7 +121,10 @@ mod tests {
             AppAction::SnapWindow(WindowPreset::LeftHalf),
             AppAction::SnapWindowExact(WindowPreset::LeftHalf),
             AppAction::MoveWindowToDisplay(DisplayDirection::Next),
+            AppAction::RecallWindowPlacement,
+            AppAction::MoveWindowToDisplayAndRecall(DisplayDirection::Next),
             AppAction::UndoWindow,
+            AppAction::RedoWindow,
             AppAction::SwitchIme(ImeMode::Kana),
             AppAction::SendKeystroke("Escape".into()),
             AppAction::ToggleKeepAwake,

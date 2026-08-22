@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tomari_core::domain::window::{DisplayDirection, Rect};
+use tomari_core::domain::window::{DisplayDirection, Rect, WindowApplication};
 
 use crate::error::{Error, Result};
 
@@ -24,12 +24,25 @@ pub trait WindowHandle: Send {
     fn stable_hash(&self) -> u64;
 }
 
+/// The focused window and the application that owns it, resolved together so
+/// focus cannot change between two independent Accessibility lookups.
+pub struct FocusedWindow {
+    pub handle: Box<dyn WindowHandle>,
+    pub application: WindowApplication,
+}
+
 /// Something that can resolve the focused window and describe the displays.
 pub trait WindowManager {
     /// Whether the OS-level permission required to move windows is granted.
     fn permission_granted(&self) -> bool;
 
-    /// A handle to the currently focused window.
+    /// A handle to the currently focused window and its owning application.
+    fn focused_window_context(&self) -> Result<FocusedWindow>;
+
+    /// A handle to the currently focused window when its application identity
+    /// is not needed. Implementations keep this lookup independent from
+    /// [`focused_window_context`](Self::focused_window_context), because a
+    /// window can be movable even when its application has no durable identity.
     fn focused_window(&self) -> Result<Box<dyn WindowHandle>>;
 
     /// The usable area of the display containing `window_frame` (the full
@@ -106,6 +119,8 @@ pub struct MockWindowManager {
     pub window: Arc<Mutex<Rect>>,
     /// The most recent frame applied through any handle.
     pub last_frame: Arc<Mutex<Option<Rect>>>,
+    /// Presentation-safe identity returned with the focused window.
+    pub application: WindowApplication,
 }
 
 impl MockWindowManager {
@@ -115,11 +130,22 @@ impl MockWindowManager {
             areas: vec![area],
             window: Arc::new(Mutex::new(Rect::new(0.0, 0.0, 100.0, 100.0))),
             last_frame: Arc::new(Mutex::new(None)),
+            application: WindowApplication {
+                bundle_id: "com.example.Mock".into(),
+                name: "Mock App".into(),
+            },
         }
     }
 
     pub fn set_window(&self, frame: Rect) {
         *self.window.lock().unwrap() = frame;
+    }
+
+    fn focused_handle(&self) -> Box<dyn WindowHandle> {
+        Box::new(MockWindowHandle {
+            window: self.window.clone(),
+            last_frame: self.last_frame.clone(),
+        })
     }
 }
 
@@ -152,11 +178,15 @@ impl WindowManager for MockWindowManager {
         self.granted
     }
 
+    fn focused_window_context(&self) -> Result<FocusedWindow> {
+        Ok(FocusedWindow {
+            handle: self.focused_handle(),
+            application: self.application.clone(),
+        })
+    }
+
     fn focused_window(&self) -> Result<Box<dyn WindowHandle>> {
-        Ok(Box::new(MockWindowHandle {
-            window: self.window.clone(),
-            last_frame: self.last_frame.clone(),
-        }))
+        Ok(self.focused_handle())
     }
 
     fn work_area(&self, window_frame: Rect) -> Result<Rect> {

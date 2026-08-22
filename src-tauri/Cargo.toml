@@ -76,3 +76,7 @@ objc2-quartz-core = { version = "0.3", features = [
 ] }
 block2 = "0.6"
 objc2 = "0.6"
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile = "3"

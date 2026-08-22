@@ -16,10 +16,11 @@ pub mod macos;
 pub use error::{Error, Result};
 pub use geometry::{
     MIN_DRAG_SIZE, compute_frame, drag_move_frame, drag_resize_frame, edge_snap_preset,
-    frames_match, next_in_cycle, remap_frame, screen_at_cursor,
+    frames_match, next_in_cycle, normalize_frame, recall_frame, remap_frame, screen_at_cursor,
 };
 pub use manager::{
-    MockWindowHandle, MockWindowManager, WindowHandle, WindowManager, adjacent_work_area,
+    FocusedWindow, MockWindowHandle, MockWindowManager, WindowHandle, WindowManager,
+    adjacent_work_area,
 };
 
 #[cfg(target_os = "macos")]

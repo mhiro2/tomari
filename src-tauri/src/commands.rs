@@ -3,7 +3,9 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
-use tomari_core::{AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, WindowPreset};
+use tomari_core::{
+    AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot, WindowPreset,
+};
 use tomari_keyboard::accelerator;
 
 use crate::actions;
@@ -154,9 +156,10 @@ pub async fn save_settings(
         apply_warnings.push("commandImeRules");
     }
 
-    // The tray menu renders in the configured language, so rebuild it (on the
-    // main thread, as the menu APIs require).
-    if language_changed {
+    // The tray menu renders the configured language and gates window recovery
+    // on the window-management switch, so either change requires a rebuild.
+    if language_changed || previous.window_management_enabled != settings.window_management_enabled
+    {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
     }
@@ -625,8 +628,86 @@ pub fn move_window_to_display(
 }
 
 #[tauri::command]
-pub fn undo_window(state: State<'_, AppState>) -> CmdResult<()> {
-    crate::window_ops::undo(state.inner())
+pub fn undo_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<crate::window_ops::HistoryActionResult> {
+    let result = crate::window_ops::undo(state.inner());
+    crate::tray::refresh(&app);
+    result
+}
+
+#[tauri::command]
+pub fn redo_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<crate::window_ops::HistoryActionResult> {
+    let result = crate::window_ops::redo(state.inner());
+    crate::tray::refresh(&app);
+    result
+}
+
+#[tauri::command]
+pub fn get_window_history_status(
+    state: State<'_, AppState>,
+) -> crate::window_ops::WindowHistoryStatus {
+    crate::window_ops::window_history_status(state.inner())
+}
+
+#[tauri::command]
+pub fn get_placement_context(
+    state: State<'_, AppState>,
+) -> CmdResult<crate::window_ops::PlacementContext> {
+    crate::window_ops::placement_context(state.inner())
+}
+
+#[tauri::command]
+pub fn capture_window_placement(
+    state: State<'_, AppState>,
+    target: crate::window_ops::WindowTarget,
+    slot: PlacementSlot,
+) -> CmdResult<crate::window_ops::PlacementEditResult> {
+    crate::window_ops::capture_placement(state.inner(), &target, slot)
+}
+
+#[tauri::command]
+pub fn forget_window_placement(
+    state: State<'_, AppState>,
+    target: crate::window_ops::WindowTarget,
+    slot: PlacementSlot,
+) -> CmdResult<crate::window_ops::PlacementEditResult> {
+    crate::window_ops::forget_placement(state.inner(), &target, slot)
+}
+
+#[tauri::command]
+pub fn undo_window_placement_edit(
+    state: State<'_, AppState>,
+) -> CmdResult<crate::window_ops::HistoryActionResult> {
+    crate::window_ops::undo_placement_edit(state.inner())
+}
+
+#[tauri::command]
+pub fn recall_window_placement(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target: crate::window_ops::WindowTarget,
+) -> CmdResult<PlacementSlot> {
+    let result = crate::window_ops::recall_placement_for(state.inner(), &target);
+    crate::tray::refresh(&app);
+    result
+}
+
+#[tauri::command]
+pub fn move_window_to_display_and_recall(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target: crate::window_ops::WindowTarget,
+    direction: DisplayDirection,
+) -> CmdResult<crate::window_ops::MoveRecallResult> {
+    let result =
+        crate::window_ops::move_to_display_and_recall_for(state.inner(), &target, direction);
+    crate::tray::refresh(&app);
+    result
 }
 
 /// Everything the frontend's setup checklist needs at startup, pulled with one

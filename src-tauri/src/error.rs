@@ -28,6 +28,14 @@ pub enum ErrorCode {
     /// A global shortcut could not be registered — typically a conflict with
     /// another app.
     ShortcutConflict,
+    /// The focused application has no remembered position to restore.
+    PlacementNotFound,
+    /// The panel still described a different focused window when an action was
+    /// requested; the UI should refresh instead of applying it elsewhere.
+    WindowTargetChanged,
+    /// The target application's Accessibility server did not answer the
+    /// message, even after the safe read-only retry.
+    WindowNotResponding,
     /// Anything else; `message` carries the detail.
     Other,
 }
@@ -61,6 +69,14 @@ impl CmdError {
 
     pub fn shortcut_conflict(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::ShortcutConflict, message)
+    }
+
+    pub fn placement_not_found(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::PlacementNotFound, message)
+    }
+
+    pub fn window_target_changed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::WindowTargetChanged, message)
     }
 }
 
@@ -96,6 +112,7 @@ impl From<tomari_window::Error> for CmdError {
         let code = match &e {
             Error::PermissionDenied => ErrorCode::PermissionRequired,
             Error::NoFocusedWindow => ErrorCode::NoFocusedWindow,
+            Error::Ax(-25204) => ErrorCode::WindowNotResponding,
             _ => ErrorCode::Other,
         };
         Self::new(code, e.to_string())
@@ -115,6 +132,9 @@ mod tests {
             ErrorCode::PermissionRequired => "permissionRequired",
             ErrorCode::NoFocusedWindow => "noFocusedWindow",
             ErrorCode::ShortcutConflict => "shortcutConflict",
+            ErrorCode::PlacementNotFound => "placementNotFound",
+            ErrorCode::WindowTargetChanged => "windowTargetChanged",
+            ErrorCode::WindowNotResponding => "windowNotResponding",
             ErrorCode::Other => "other",
         }
     }
@@ -129,7 +149,10 @@ mod tests {
             None => Some(ErrorCode::PermissionRequired),
             Some(ErrorCode::PermissionRequired) => Some(ErrorCode::NoFocusedWindow),
             Some(ErrorCode::NoFocusedWindow) => Some(ErrorCode::ShortcutConflict),
-            Some(ErrorCode::ShortcutConflict) => Some(ErrorCode::Other),
+            Some(ErrorCode::ShortcutConflict) => Some(ErrorCode::PlacementNotFound),
+            Some(ErrorCode::PlacementNotFound) => Some(ErrorCode::WindowTargetChanged),
+            Some(ErrorCode::WindowTargetChanged) => Some(ErrorCode::WindowNotResponding),
+            Some(ErrorCode::WindowNotResponding) => Some(ErrorCode::Other),
             Some(ErrorCode::Other) => None,
         }
     }
@@ -147,6 +170,12 @@ mod tests {
         // The exact count catches a chain that skips a variant (a lazily
         // added `=> None` arm would otherwise hide the new variant from the
         // loop above).
-        assert_eq!(visited, 4, "the chain must visit every variant once");
+        assert_eq!(visited, 7, "the chain must visit every variant once");
+    }
+
+    #[test]
+    fn ax_cannot_complete_becomes_an_actionable_window_error() {
+        let error = CmdError::from(tomari_window::Error::Ax(-25204));
+        assert_eq!(error.code, ErrorCode::WindowNotResponding);
     }
 }
