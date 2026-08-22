@@ -5,19 +5,20 @@ for adding new features.
 
 Tomari is a small utility that lives in the macOS menu bar. It currently
 provides **keyboard customization** (modifier tap/hold, remapping, hyper key,
-global shortcuts), **window management** (snapping to presets, moving across
-displays, undo, drag-to-snap), **menu bar tidying** (hiding status items behind
-a divider), and **sleep prevention** (keep awake, including with the lid
-closed).
+global shortcuts), **window management** (per-application remembered homes,
+reversible restore, quick tiling, drag-to-snap), **menu bar tidying** (hiding
+status items behind a divider), and **sleep prevention** (keep awake, including
+with the lid closed).
 
 ---
 
 ## 1. Design principles
 
-- **Keep decision logic pure.** Tap/hold detection (`ModifierEngine`) and snap
-  geometry (`geometry::compute_frame`) are pure implementations with zero OS
-  dependencies, verified by unit tests. OS hooks such as CGEventTap and the
-  Accessibility API stay thin: they feed events in and execute what comes out.
+- **Keep decision logic pure.** Tap/hold detection (`ModifierEngine`) and window
+  geometry (`compute_frame`, normalization, recall) are pure implementations
+  with zero OS dependencies, verified by unit tests. OS hooks such as CGEventTap
+  and the Accessibility API stay thin: they feed events in and execute what
+  comes out.
 - **One action vocabulary.** Global shortcuts, modifier taps, the tray menu,
   UI buttons — every input path resolves to the same `AppAction` enum and goes
   through the same dispatcher (`actions::dispatch`). Adding an input path does
@@ -76,9 +77,10 @@ platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
 - **`AppAction`** — the unified action vocabulary: `TogglePanel` /
   `SnapWindow(WindowPreset)` / `SnapWindowExact(WindowPreset)` (the exact
   variant applies the preset without the half→third→two-thirds cycle, so the
-  URL scheme is idempotent) / `MoveWindowToDisplay` / `UndoWindow` /
-  `SwitchIme(ImeMode)` / `SendKeystroke` / `ToggleKeepAwake` /
-  `ToggleMenuBar` / `NoOp`.
+  URL scheme is idempotent) / `MoveWindowToDisplay` /
+  `RecallWindowPlacement` / `MoveWindowToDisplayAndRecall` / `UndoWindow` /
+  `RedoWindow` / `SwitchIme(ImeMode)` / `SendKeystroke` /
+  `ToggleKeepAwake` / `ToggleMenuBar` / `NoOp`.
   Round-trips to the frontend as-is via
   `#[serde(tag = "type", content = "value")]`.
 - **`Hotkey`** — an accelerator string plus an `AppAction`.
@@ -86,8 +88,13 @@ platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
   `remap_to` (the role it plays while held), `hyper` (hold acts as ⌃⌥⇧⌘), and
   `tap` (the action fired on a solo tap).
 - **`WindowPreset`** (15 variants) / **`DisplayDirection`** / **`Rect`** —
-  window-management value types. Coordinates are points with a top-left origin,
-  matching both CGDisplay and the AX API.
+  immediate window-management value types. Coordinates are points with a
+  top-left origin, matching both CGDisplay and the AX API.
+- **`WindowApplication`** / **`PlacementSlot`** / **`NormalizedRect`** /
+  **`WindowPlacement`** — the privacy-safe remembered-home model. A bundle id
+  is the durable app identity, each app has only Primary and Secondary slots,
+  shown as Home 1 and Home 2 in the UI, and the frame is relative to one
+  display's usable work area. Window titles are neither required nor persisted.
 - **`AppSettings`** — feature master switches, drag-to-snap configuration, the
   left/right ⌘ IME-toggle switch (`command_ime_switch_enabled`), menu bar
   tidying (`menu_bar_tidy_enabled` plus its `menu_bar_auto_collapse_secs`), UI
@@ -201,11 +208,12 @@ returned as errors so the UI can surface them.
 Three layers:
 
 1. **Pure geometry** (`tomari-window::geometry`) — `compute_frame` (preset →
-   frame), `frames_match` (±2pt comparison tolerating windows that clamp to
-   minimum sizes), `next_in_cycle` (the 1/2 → 1/3 → 2/3 cycle), `remap_frame`
+   frame), `normalize_frame` / `recall_frame` (safe display-relative homes),
+   `frames_match` (±2pt comparison tolerating windows that clamp to minimum
+   sizes), `next_in_cycle` (the 1/2 → 1/3 → 2/3 cycle), `remap_frame`
    (proportional mapping across displays), and `edge_snap_preset` /
-   `screen_at_cursor` (drag-to-snap: which preset a cursor at a screen
-   border selects, on which display).
+   `screen_at_cursor` (drag-to-snap: which preset a cursor at a screen border
+   selects, on which display).
 2. **Platform abstraction** (`manager`) — `WindowManager` (permission check,
    focused-window resolution, work-area enumeration) and `WindowHandle`
    (`frame` / `set_frame` / `stable_hash`). A handle can re-target the same
@@ -215,15 +223,42 @@ Three layers:
    normally reads the system-wide `AXFocusedApplication`/`AXFocusedWindow`, but
    if that application turns out to be Tomari itself (e.g. a click landed on
    the settings window), it falls back to the frontmost *other* app's focused
-   window via the on-screen `CGWindowList`, so a snap triggered from Tomari's
-   own UI never targets Tomari's own window.
+   window via the on-screen `CGWindowList`, so an operation triggered from
+   Tomari's own UI never targets Tomari's own window. `FocusedWindow` also
+   carries the owning application's bundle id and localized name; it does not
+   read or expose the window title.
 3. **Orchestration** (`src-tauri/src/window_ops.rs`) — every input path goes
-   through here. It honors the master switch and pushes "handle + previous
-   frame" onto the undo history (`AppState::window_history`, capped at 50)
-   only when something actually moved (decided via `frames_match`). Snaps
-   remember a `LastSnap` (requested preset, applied preset, window identity
-   hash, post-move frame) and advance the cycle only when the same preset is
-   pressed again on the same, unmoved window.
+   through here. It honors the master switch and records a `WindowChange`
+   containing the handle plus both before and after frames only when something
+   actually moved (decided via `frames_match`). Undo and redo share this one
+   in-memory history, capped at 50, regardless of whether a change came from a
+   remembered home, display move, preset, or drag. A new change clears redo.
+   History availability is queried independently of focused-window context,
+   and undo/redo return whether they applied a frame, found no entry, or only
+   discarded handles for windows that have closed. Remembered-home data edits
+   use a separate capped recovery stack because restoring persisted data is a
+   different operation from restoring a live window frame.
+   Snaps separately remember a `LastSnap` and advance the cycle only for the
+   same preset on the same unmoved window.
+
+`window_placements` persists at most two homes per bundle id. Capture clamps a
+window inside its current usable work area and normalizes its frame to 0…1;
+recall expands that value into the current display's work area, so display
+reconnection or a different resolution does not reapply stale global pixels.
+The ordinary recall action chooses Primary first and alternates to Secondary
+when repeated on the same unmoved window. Move-and-recall selects the adjacent
+display and applies Primary there as one history entry, falling back to
+Secondary only when Primary is absent.
+
+The settings panel receives a `WindowTarget` containing the app bundle id and
+an opaque stable window identity with every placement context. Capture, forget,
+recall, and move-and-recall send that identity back; orchestration resolves the
+focused handle once, rejects a mismatch, and then operates on that exact handle.
+Panel-show and focus events still refresh the context promptly, while this
+backend check closes the focus-change race rather than relying on refresh timing.
+Focused-context reads retry `kAXErrorCannotComplete` once before returning a
+localized, actionable error; the retry remains before identity validation and
+before any window mutation.
 
 **Drag-to-snap** (`drag_to_snap.rs`) is a second, listen-only CGEventTap, opt-in
 and modifier-free: on mouse-down the window under the cursor is hit-tested; on
@@ -241,6 +276,9 @@ AppKit windows are not `Send` — driven from the tap thread through
 `overlay::show` / `hide`, which hop to the main thread. On release the window
 snaps to the previewed zone and the move is recorded for undo. A lost mouse-up
 (tap disabled by the system) drops the drag and tears down its preview.
+The mouse-down frame is retained as the history entry's `before` value, so Undo
+returns to the true drag origin rather than the temporary screen-edge frame at
+release.
 `overlay` gives every issued `show`/`hide` a fresh generation and applies a
 queued operation on the main thread only while its generation is still the
 current one — last writer wins, with no assumption about delivery order — so a
@@ -309,12 +347,13 @@ and applies none of them.
   launch resumes from it (covered by tests, including frozen per-version
   fixtures). Shipped entries are never edited; schema changes append a step.
 - Tables: `hotkeys` / `modifier_rules` / `settings` (a single `id = 1` row
-  holding the `AppSettings` JSON) / `meta` (app-internal key/value records —
-  currently the permission snapshot `regrant.rs` compares at launch to detect
-  update-caused revocations — kept out of `settings` so they never leak into
-  the settings object the frontend round-trips). Domain values are stored as
-  JSON strings in their columns, keeping the schema resilient to domain-type
-  evolution.
+  holding the `AppSettings` JSON) / `window_placements` (bundle id + one of two
+  slot names, with a normalized frame JSON value) / `meta` (app-internal
+  key/value records — currently the permission snapshot `regrant.rs` compares
+  at launch to detect update-caused revocations — kept out of `settings` so
+  they never leak into the settings object the frontend round-trips). Domain
+  values are stored as JSON strings in their columns, keeping the schema
+  resilient to domain-type evolution.
 - First-run seeding keys off the _absence of the settings row_
   (`seed_first_run_defaults` in `main.rs`). Keying off empty tables would
   resurrect defaults whenever a user deliberately clears everything. A launch
@@ -327,10 +366,11 @@ and applies none of them.
   never triggers it; a corruption reset that re-seeds a fresh database does,
   deliberately — the settings are back at defaults and the window shows the
   user that state. Defaults live in
-  `defaults.rs` (Caps Lock → Control — the one seeded modifier rule — plus the
-  snap hotkeys). The left/right ⌘ IME toggle is _not_ a stored rule: it is
-  assembled on demand from `command_ime_rules` when `command_ime_switch_enabled`
-  is on.
+  `defaults.rs` (Caps Lock → Control — the one seeded modifier rule — plus
+  focused window shortcuts for quick snaps, remembered-home restore,
+  move-and-restore, undo, and redo). The left/right ⌘ IME toggle is _not_ a
+  stored rule: it is assembled on demand from `command_ime_rules` when
+  `command_ime_switch_enabled` is on.
 - Storage location comes from `AppPaths` (`directories::ProjectDirs`,
   `tomari.sqlite`).
 - A *corrupt* database is moved aside under a `.broken-<unix-ms>` suffix and a
@@ -416,13 +456,16 @@ and applies none of them.
   transition also emits `tomari:permissions-changed` (`{ accessibility,
   inputMonitoring }`), which the frontend's permission banners listen for so
   they clear without the panel needing to be reopened.
-- **Tray** (`tray.rs`): setup items for missing permissions (at the very
-  top), window snaps, Settings, Check for Updates (both open the single
-  window; Check for Updates also emits `tomari:check-update`, which the UI
-  handles by switching to the General section and running the check). Rebuilt as
-  permission state changes. Labels are localized (English / Japanese) from
-  the language setting; `System` resolves via `NSLocale` and a language
-  change rebuilds the menu.
+- **Tray** (`tray.rs`): setup items for missing permissions (at the very top),
+  explicitly named Undo/Redo Window Change recovery actions, live Prevent
+  Sleep and menu-bar-icon state, Settings, and Check for Updates. It does not
+  expose the preset grid: window placement belongs to a focused-app shortcut
+  or the contextual Windows section. Check for Updates opens the single window
+  and emits `tomari:check-update`, which switches the UI to General and starts
+  the check. The tray is rebuilt as permission state changes. Labels are
+  localized (English / Japanese) from the language setting; `System` resolves
+  via `NSLocale` and a language change rebuilds the menu. Undo and Redo also
+  follow the window-management master switch and live history availability.
 - **Commands** (`commands.rs`): a thin CRUD + execution bridge invoked from
   the frontend. Save commands reflect changes into live state alongside
   persistence — saving a modifier rule calls the engine's `set_rules`, saving
@@ -443,10 +486,14 @@ and applies none of them.
   keys must match the Rust command parameter names; `lib/types.ts` mirrors
   the domain types. `lib/i18n.tsx` holds the typed English/Japanese message
   dictionaries and the `useT` hook; backend commands return ids (e.g.
-  `WindowPreset`) and the frontend renders the localized label. Shortcuts are
-  recorded by `components/ShortcutRecorder.tsx`, which suspends the
-  registered global shortcuts (`set_hotkeys_suspended`) while capturing a
-  chord.
+  `WindowPreset`) and the frontend renders the localized label. `WindowView`
+  renders the focused application's current and remembered normalized frames,
+  refreshes that context when the panel becomes active, exposes fixed-position
+  operation feedback, and owns shortcut editing for every window action without
+  restoring the old preset palette. `KeyboardView` owns general keyboard and
+  modifier tap actions, including optional remembered-position restore. Both reuse
+  `HotkeyEditor`; its `ShortcutRecorder` suspends registered global shortcuts
+  (`set_hotkeys_suspended`) while capturing a chord.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
   consumes it and relaunches. The endpoint is `latest.json` on GitHub

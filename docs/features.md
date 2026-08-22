@@ -64,15 +64,35 @@ consequences to be aware of:
 
 ## Window management
 
-- Snap the focused window to one of 15 presets: left/right halves, quarters,
-  thirds, maximize, centering, and more.
-- Trigger snapping from the menu bar menu, a global shortcut, or the grid in
-  the UI. Triggering it from the UI always targets the window you were using
-  before you opened Tomari, never the settings window itself.
-- **Default snap shortcuts** — `⌃⌥←` / `⌃⌥→` / `⌃⌥↑` for left half, right half,
-  and maximize. `⌃⌥` (Control + Option) is the Mac-native modifier pair used by
-  most window managers and does not collide with macOS's own `⌃`+arrow (Spaces
-  and Mission Control). All shortcuts are rebindable in the Keyboard section.
+- **Two remembered homes per app** — place a focused app where it belongs, then
+  save that position as Home 1 or Home 2 in the Windows section. Replacing a
+  home can be undone from the confirmation toast; forgetting one requires a
+  second click and can also be undone. Tomari identifies the app by bundle id
+  and never stores the window title.
+- **Display-safe restore** — homes are stored as position and size relative to
+  the usable display rather than as desktop pixels. Restoring applies the same
+  proportion to the current display, including after a display is disconnected,
+  reconnected, resized, or replaced.
+- **Restore from the working context** — use `⌃⌥↓` by default, bind the action
+  to another global shortcut, or assign Restore as a modifier-key tap under
+  Keyboard. Caps Lock → Control users can choose it as an optional accelerator:
+  a tap restores the window and a hold remains Control. Repeating restore on
+  the same unmoved window alternates Home 1 and Home 2. The panel refreshes its
+  focused-app context whenever it is shown, and each button verifies the exact
+  represented window before applying an action.
+- **Move and restore** — `⌃⌥⇧→` moves the focused window to the next display and
+  applies Home 1 there as one action. Home 2 is used when Home 1 is absent; all
+  window shortcuts are configured beside the workflow in the Windows section.
+- **Undo and redo** — `⌃⌥Z` and `⌃⌥⇧Z` reverse or reapply window changes,
+  including remembered-home restores, display moves, preset snaps, and drag
+  snaps. The tray names these actions explicitly as window changes so their
+  scope is clear outside the Windows screen, and enables them only when the
+  matching history is available.
+- **Quick tiling remains available** — `⌃⌥←` / `⌃⌥→` / `⌃⌥↑` snap to the left
+  half, right half, and maximize. Repeating a half shortcut cycles
+  1/2 → 1/3 → 2/3. All 15 presets, ordinary next/previous-display moves, and
+  move-and-restore actions can be added as shortcuts, while the main UI stays
+  centered on the focused app rather than a 15-zone palette.
 - **Drag-to-snap (optional)** — drag a window to a screen edge or corner to
   show a preview, then release to snap to a half, a corner, or full screen
   depending on where you let go.
@@ -82,15 +102,10 @@ consequences to be aware of:
   to click it first, and while a gesture is held the drag is consumed so the app
   underneath never sees it — including when there is no window to drag under the
   pointer, since holding the chord is taken as meaning the click is for Tomari.
-- **Multi-display** — move the focused window to the neighboring display,
-  placed proportionally.
-- **Cycling** — pressing the same snap hotkey repeatedly cycles through related
-  sizes (for example 1/2 → 1/3 → 2/3).
-- **Undo** — restore the window's previous position.
-
-Multi-display moves and undo have no buttons in the window: reaching for the
-mouse to place a window defeats the point. Bind them to shortcuts in the
-Keyboard section, or reach them from the menu bar menu.
+Opening Tomari from the menu bar temporarily gives the panel focus. The Windows
+section deliberately resolves the frontmost other application, so Remember,
+Restore, and the preview continue to target the app you were using rather than
+Tomari's own settings window.
 
 ## Menu bar tidying
 
@@ -152,11 +167,13 @@ machine plugged in is recommended.
 
 ## Menu bar and window
 
-Tomari runs as a menu bar app: clicking its menu bar icon opens a menu with
-quick actions plus a Settings entry that opens the window. A sidebar down the
-left lists the sections — Keyboard, Windows, Prevent Sleep, and General — and a
-muted dot marks a section whose feature is switched off. On the very first
-launch the settings window opens automatically (the main features need
+Tomari runs as a menu bar app: clicking its menu bar icon opens a compact menu
+for permission recovery, undo/redo of window changes, Prevent Sleep, menu-bar
+icons, and Settings. Placement choices live with their app context in the
+Windows section or on shortcuts rather than in a generic tray palette. A
+sidebar down the left lists the sections — Keyboard, Windows, Prevent Sleep,
+and General — and a muted dot marks a section whose feature is switched off.
+On the very first launch the settings window opens automatically (the main features need
 permissions you have not granted yet); after that Tomari starts silently in the
 menu bar. The same happens on the rare launch where Tomari had to reset an
 unreadable settings database — your settings are back at their defaults, so the

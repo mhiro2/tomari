@@ -23,11 +23,16 @@ same foundation over time.
 
 ### Window management
 
-- Snap the focused window to one of 15 presets — halves, quarters, thirds,
-  maximize, center, and more.
-- Trigger from the menu bar, a global shortcut, or the grid in the UI.
+- Remember two positions for each app and restore the focused app to its usual
+  place with a global shortcut or an optional modifier tap configured under
+  Keyboard.
+- Positions are stored relative to the usable display, so they adapt when the
+  display size or arrangement changes.
+- Move to another display and restore there in one step, with undo and redo for
+  every window change and recoverable edits to remembered positions.
 - Drag a window to a screen edge or corner to snap on release (optional).
-- Multi-display moves, size cycling, and undo.
+- Familiar left/right/maximize shortcuts remain available for quick tiling;
+  the menu bar stays focused on status and recovery instead of placement grids.
 
 ### Menu bar
 
