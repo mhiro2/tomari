@@ -48,6 +48,14 @@ const HOTKEY: Hotkey = {
   enabled: false,
 };
 
+const WINDOW_HOTKEY: Hotkey = {
+  id: 'hk-window',
+  label: 'Restore editor position',
+  accelerator: 'Ctrl+Alt+Down',
+  action: { type: 'recallWindowPlacement' },
+  enabled: true,
+};
+
 // KeyboardView reads the master switch from the shared settings provider.
 function renderView(ui: ReactElement) {
   return render(<SettingsProvider>{ui}</SettingsProvider>);
@@ -189,6 +197,23 @@ describe('KeyboardView', () => {
     resolveSave?.();
   });
 
+  it('assigns Restore as a generic modifier tap action', async () => {
+    renderView(<KeyboardView />);
+
+    fireEvent.change(await screen.findByLabelText('Tap action for Caps Lock'), {
+      target: { value: 'restoreWindow' },
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+        rule: expect.objectContaining({
+          id: RULE.id,
+          tap: { type: 'recallWindowPlacement' },
+        }),
+      }),
+    );
+  });
+
   it('disables a hotkey row while its save is in flight and re-enables it once persisted', async () => {
     let resolveToggleSave: (() => void) | undefined;
     mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
@@ -301,5 +326,14 @@ describe('KeyboardView', () => {
 
     expect(await screen.findByText('No modifier keys to configure.')).toBeInTheDocument();
     expect(await screen.findByText('No global shortcuts yet — add one below.')).toBeInTheDocument();
+  });
+
+  it('leaves window shortcuts to the contextual Windows section', async () => {
+    mockCommands({ list_hotkeys: [HOTKEY, WINDOW_HOTKEY] });
+
+    renderView(<KeyboardView />);
+
+    expect(await screen.findByText('Toggle panel')).toBeInTheDocument();
+    expect(screen.queryByText('Restore editor position')).not.toBeInTheDocument();
   });
 });

@@ -15,6 +15,9 @@ export const LOCALIZED_CODES = [
   'permissionRequired',
   'noFocusedWindow',
   'shortcutConflict',
+  'placementNotFound',
+  'windowTargetChanged',
+  'windowNotResponding',
 ] as const;
 type LocalizedCode = (typeof LOCALIZED_CODES)[number];
 

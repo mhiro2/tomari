@@ -227,7 +227,9 @@ function AppShell() {
           ) : (
             <>
               {section === 'keyboard' && <KeyboardView onOpenSetup={openSetup} />}
-              {section === 'window' && <WindowView onOpenSetup={openSetup} />}
+              {section === 'window' && (
+                <WindowView onOpenSetup={openSetup} onOpenKeyboard={() => setSection('keyboard')} />
+              )}
               {section === 'menubar' && <MenuBarView />}
               {section === 'session' && <SessionView />}
               {section === 'general' && (

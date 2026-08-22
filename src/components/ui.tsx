@@ -59,6 +59,7 @@ export function SwitchRow({
   checked,
   onChange,
   toggleLabel,
+  disabled,
 }: {
   title: string;
   desc?: ReactNode;
@@ -66,6 +67,7 @@ export function SwitchRow({
   checked: boolean;
   onChange: (next: boolean) => void;
   toggleLabel?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="item">
@@ -75,7 +77,12 @@ export function SwitchRow({
         {desc && <span className="item__desc">{desc}</span>}
       </div>
       <div className="item__trail">
-        <Toggle checked={checked} onChange={onChange} label={toggleLabel ?? title} />
+        <Toggle
+          checked={checked}
+          onChange={onChange}
+          label={toggleLabel ?? title}
+          disabled={disabled}
+        />
       </div>
     </div>
   );

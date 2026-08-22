@@ -1,60 +1,25 @@
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 
-import { ShortcutRecorder } from '../components/ShortcutRecorder';
+import { AddHotkeyForm, HotkeyRow, type HotkeyActionOption } from '../components/HotkeyEditor';
 import { Banner, EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel, modifierLabel, modifierWithSide, presetLabel } from '../lib/format';
+import { actionLabel, modifierLabel, modifierWithSide } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type {
-  AppAction,
-  Hotkey,
-  ModifierRule,
-  PermissionsChanged,
-  WindowPreset,
-} from '../lib/types';
+import type { AppAction, Hotkey, ModifierRule, PermissionsChanged } from '../lib/types';
 
-const SNAP_PRESETS = ['leftHalf', 'rightHalf', 'maximize', 'center'] satisfies WindowPreset[];
-
-const WINDOW_ACTIONS = [
-  { key: 'moveDisplayNext', action: { type: 'moveWindowToDisplay', value: 'next' } },
-  { key: 'moveDisplayPrev', action: { type: 'moveWindowToDisplay', value: 'prev' } },
-  { key: 'undoWindow', action: { type: 'undoWindow' } },
-] satisfies { key: string; action: AppAction }[];
-
-function actionFromKey(key: string): AppAction {
-  if (key === 'togglePanel') return { type: 'togglePanel' };
-  if (key === 'toggleKeepAwake') return { type: 'toggleKeepAwake' };
-  if (key === 'toggleMenuBar') return { type: 'toggleMenuBar' };
-  const windowAction = WINDOW_ACTIONS.find((a) => a.key === key);
-  if (windowAction) return windowAction.action;
-  // The <select> only ever offers SNAP_PRESETS' own values for any key that
-  // isn't one of the branches above, so this lookup is exhaustive without a
-  // cast; the fallback below only guards against a value tsc can't narrow.
-  const preset = SNAP_PRESETS.find((p) => p === key);
-  return { type: 'snapWindow', value: preset ?? 'center' };
-}
-
-function ActionOptions({ t }: { t: Translator }) {
-  return (
-    <>
-      <option value="togglePanel">{t('action.togglePanel')}</option>
-      <option value="toggleKeepAwake">{t('action.toggleKeepAwake')}</option>
-      <option value="toggleMenuBar">{t('action.toggleMenuBar')}</option>
-      {SNAP_PRESETS.map((p) => (
-        <option key={p} value={p}>
-          {t('action.snap', { target: presetLabel(p, t) })}
-        </option>
-      ))}
-      {WINDOW_ACTIONS.map((a) => (
-        <option key={a.key} value={a.key}>
-          {actionLabel(a.action, t)}
-        </option>
-      ))}
-    </>
-  );
+function isWindowAction(action: AppAction): boolean {
+  return [
+    'snapWindow',
+    'snapWindowExact',
+    'moveWindowToDisplay',
+    'recallWindowPlacement',
+    'moveWindowToDisplayAndRecall',
+    'undoWindow',
+    'redoWindow',
+  ].includes(action.type);
 }
 
 /** One-line description of what a modifier rule does, derived from the rule
@@ -73,6 +38,40 @@ function modifierDesc(rule: ModifierRule, t: Translator): string {
       : t('keyboard.usedAs', { modifier });
   }
   return hasTap ? t('keyboard.tapFor', { action: actionLabel(rule.tap, t) }) : '';
+}
+
+type TapActionKey = 'none' | 'panel' | 'restoreWindow' | 'preventSleep' | 'menuBar';
+
+function tapActionKey(action: AppAction): TapActionKey | 'custom' {
+  switch (action.type) {
+    case 'noOp':
+      return 'none';
+    case 'togglePanel':
+      return 'panel';
+    case 'recallWindowPlacement':
+      return 'restoreWindow';
+    case 'toggleKeepAwake':
+      return 'preventSleep';
+    case 'toggleMenuBar':
+      return 'menuBar';
+    default:
+      return 'custom';
+  }
+}
+
+function tapAction(key: TapActionKey): AppAction {
+  switch (key) {
+    case 'none':
+      return { type: 'noOp' };
+    case 'panel':
+      return { type: 'togglePanel' };
+    case 'restoreWindow':
+      return { type: 'recallWindowPlacement' };
+    case 'preventSleep':
+      return { type: 'toggleKeepAwake' };
+    case 'menuBar':
+      return { type: 'toggleMenuBar' };
+  }
 }
 
 // Removes a single id from a "saving" set — shared by the save functions
@@ -142,7 +141,7 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
     return () => void unlisten.then((fn) => fn());
   }, []);
 
-  async function toggleRule(id: string) {
+  async function saveRulePatch(id: string, patch: Partial<ModifierRule>) {
     // A second click while the first save is still in flight must not fire
     // another save — the row is disabled while saving, but guard here too
     // against any event queued just before that took effect.
@@ -155,7 +154,7 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
       clearSaving(setSavingRuleIds, id);
       return;
     }
-    const next = { ...current, enabled: !current.enabled };
+    const next = { ...current, ...patch };
     // Only reflect the toggle in the UI once the backend has persisted it and
     // reloaded the engine — a save failure must surface rather than leave the
     // row showing a state the runtime never adopted.
@@ -220,6 +219,20 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
   const on = settings.keyboardEnabled;
+  const keyboardHotkeys = hotkeys.filter((hotkey) => !isWindowAction(hotkey.action));
+  const shortcutOptions: HotkeyActionOption[] = [
+    { key: 'togglePanel', label: t('action.togglePanel'), action: { type: 'togglePanel' } },
+    {
+      key: 'toggleKeepAwake',
+      label: t('action.toggleKeepAwake'),
+      action: { type: 'toggleKeepAwake' },
+    },
+    {
+      key: 'toggleMenuBar',
+      label: t('action.toggleMenuBar'),
+      action: { type: 'toggleMenuBar' },
+    },
+  ];
 
   return (
     <div className="view">
@@ -272,7 +285,8 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
               key={rule.id}
               rule={rule}
               saving={savingRuleIds.has(rule.id)}
-              onToggle={() => void toggleRule(rule.id)}
+              onToggle={() => void saveRulePatch(rule.id, { enabled: !rule.enabled })}
+              onTapAction={(action) => void saveRulePatch(rule.id, { tap: action })}
             />
           ))}
           <EntityRow
@@ -299,8 +313,8 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
             ) : undefined
           }
         >
-          {hotkeys.length === 0 && <p className="hint">{t('keyboard.noHotkeys')}</p>}
-          {hotkeys.map((hk) => (
+          {keyboardHotkeys.length === 0 && <p className="hint">{t('keyboard.noHotkeys')}</p>}
+          {keyboardHotkeys.map((hk) => (
             <HotkeyRow
               key={hk.id}
               hotkey={hk}
@@ -310,7 +324,7 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
               onDelete={() => void removeHotkey(hk.id)}
             />
           ))}
-          <AddHotkeyForm onAdded={addHotkey} onError={setShortcutError} />
+          <AddHotkeyForm options={shortcutOptions} onAdded={addHotkey} onError={setShortcutError} />
         </Group>
       </div>
     </div>
@@ -321,17 +335,45 @@ function ModifierRow({
   rule,
   saving,
   onToggle,
+  onTapAction,
 }: {
   rule: ModifierRule;
   saving: boolean;
   onToggle: () => void;
+  onTapAction: (action: AppAction) => void;
 }) {
   const t = useT();
+  const selected = tapActionKey(rule.tap);
   return (
     <EntityRow
       lead={<div className="kbd-chip">{modifierWithSide(rule.modifier, rule.side, t)}</div>}
       title={modifierLabel(rule.modifier)}
-      sub={modifierDesc(rule, t)}
+      sub={
+        <span className="modifier-rule__details">
+          <span>{modifierDesc(rule, t)}</span>
+          <label>
+            <span>{t('keyboard.tapAction')}</span>
+            <select
+              className="input input--compact"
+              value={selected}
+              onChange={(event) => onTapAction(tapAction(event.target.value as TapActionKey))}
+              disabled={saving}
+              aria-label={t('keyboard.tapActionFor', { modifier: modifierLabel(rule.modifier) })}
+            >
+              {selected === 'custom' && (
+                <option value="custom" disabled>
+                  {actionLabel(rule.tap, t)}
+                </option>
+              )}
+              <option value="none">{t('action.noOp')}</option>
+              <option value="panel">{t('action.togglePanel')}</option>
+              <option value="restoreWindow">{t('action.recallPlacement')}</option>
+              <option value="preventSleep">{t('action.toggleKeepAwake')}</option>
+              <option value="menuBar">{t('action.toggleMenuBar')}</option>
+            </select>
+          </label>
+        </span>
+      }
       trail={
         <Toggle
           checked={rule.enabled}
@@ -341,152 +383,5 @@ function ModifierRow({
         />
       }
     />
-  );
-}
-
-function HotkeyRow({
-  hotkey,
-  saving,
-  onAccelerator,
-  onToggle,
-  onDelete,
-}: {
-  hotkey: Hotkey;
-  saving: boolean;
-  onAccelerator: (accelerator: string) => void;
-  onToggle: () => void;
-  onDelete: () => void;
-}) {
-  const t = useT();
-  // A bare ✕ right next to the enable toggle is one misclick away from
-  // deleting a hotkey with no way back, so the first click only arms a
-  // confirmation — the actual delete needs a second, deliberate click.
-  const [confirming, setConfirming] = useState(false);
-
-  function handleDeleteClick() {
-    if (confirming) {
-      onDelete();
-      setConfirming(false);
-    } else {
-      setConfirming(true);
-    }
-  }
-
-  return (
-    <EntityRow
-      lead={
-        // ShortcutRecorder has no disabled prop of its own; `inert` keeps it
-        // out of the tab order and blocks pointer/keyboard input while a save
-        // for this row is in flight, the same technique used for the gated
-        // master-switch content above.
-        <span inert={saving}>
-          <ShortcutRecorder
-            value={hotkey.accelerator}
-            onCapture={onAccelerator}
-            ariaLabel={t('keyboard.changeShortcut', { label: hotkey.label })}
-          />
-        </span>
-      }
-      title={hotkey.label}
-      sub={actionLabel(hotkey.action, t)}
-      trail={
-        <>
-          <button
-            type="button"
-            className={`btn btn--ghost ${confirming ? 'btn--warn' : ''}`}
-            onClick={handleDeleteClick}
-            onBlur={() => setConfirming(false)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape' && confirming) {
-                e.stopPropagation();
-                setConfirming(false);
-              }
-            }}
-            disabled={saving}
-            aria-label={
-              confirming
-                ? t('common.deleteConfirm', { label: hotkey.label })
-                : t('keyboard.deleteShortcut', { label: hotkey.label })
-            }
-          >
-            {confirming ? t('common.deleteConfirmShort') : '✕'}
-          </button>
-          <Toggle
-            checked={hotkey.enabled}
-            onChange={onToggle}
-            disabled={saving}
-            label={t('common.enable', { label: hotkey.label })}
-          />
-        </>
-      }
-    />
-  );
-}
-
-function AddHotkeyForm({
-  onAdded,
-  onError,
-}: {
-  onAdded: (hk: Hotkey) => void;
-  onError: (msg: string) => void;
-}) {
-  const t = useT();
-  const [label, setLabel] = useState('');
-  const [accelerator, setAccelerator] = useState('');
-  const [actionKey, setActionKey] = useState('togglePanel');
-  const [busy, setBusy] = useState(false);
-
-  // The recorder only emits backend-normalized accelerators.
-  const canSubmit = label.trim() !== '' && accelerator !== '' && !busy;
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!canSubmit) return;
-    setBusy(true);
-    try {
-      const hk: Hotkey = {
-        id: `hk-${crypto.randomUUID()}`,
-        label: label.trim(),
-        accelerator,
-        action: actionFromKey(actionKey),
-        enabled: true,
-      };
-      await api.saveHotkey(hk);
-      onAdded(hk);
-      setLabel('');
-      setAccelerator('');
-    } catch (e) {
-      onError(formatCmdError(e, t));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="add-form" onSubmit={(e) => void submit(e)}>
-      <input
-        className="input"
-        placeholder={t('common.label')}
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        aria-label={t('keyboard.shortcutLabelAria')}
-      />
-      <ShortcutRecorder
-        value={accelerator}
-        onCapture={setAccelerator}
-        ariaLabel={t('keyboard.recordShortcut')}
-      />
-      <select
-        className="input"
-        value={actionKey}
-        onChange={(e) => setActionKey(e.target.value)}
-        aria-label={t('keyboard.actionAria')}
-      >
-        <ActionOptions t={t} />
-      </select>
-      <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
-        {t('common.add')}
-      </button>
-    </form>
   );
 }

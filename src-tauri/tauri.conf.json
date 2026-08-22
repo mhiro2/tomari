@@ -45,7 +45,7 @@
     },
     "category": "Productivity",
     "shortDescription": "Keyboard customization and window management for macOS.",
-    "longDescription": "Tomari redefines your modifier keys with taps and hotkeys, and snaps windows around your screen — all from a single menu-bar icon."
+    "longDescription": "Tomari redefines modifier keys with taps and hotkeys, remembers where each app belongs, and keeps small macOS utilities in one quiet menu-bar app."
   },
   "plugins": {
     "deep-link": {

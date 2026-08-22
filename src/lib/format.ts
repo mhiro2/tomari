@@ -106,8 +106,14 @@ export function actionLabel(action: AppAction, t: Translator): string {
       return t('action.snap', { target: presetLabel(action.value, t) });
     case 'moveWindowToDisplay':
       return t('action.moveToDisplay', { display: displayDirectionLabel(action.value, t) });
+    case 'recallWindowPlacement':
+      return t('action.recallPlacement');
+    case 'moveWindowToDisplayAndRecall':
+      return t('action.moveAndRecall', { display: displayDirectionLabel(action.value, t) });
     case 'undoWindow':
       return t('action.undoWindow');
+    case 'redoWindow':
+      return t('action.redoWindow');
     case 'switchIme':
       return t('action.ime', { mode: imeLabel(action.value) });
     case 'sendKeystroke':

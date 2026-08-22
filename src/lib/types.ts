@@ -20,6 +20,54 @@ export type WindowPreset =
 
 export type DisplayDirection = 'next' | 'prev';
 
+export type PlacementSlot = 'primary' | 'secondary';
+
+export interface NormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface WindowApplication {
+  bundleId: string;
+  name: string;
+}
+
+export interface WindowPlacement {
+  application: WindowApplication;
+  slot: PlacementSlot;
+  frame: NormalizedRect;
+}
+
+export interface WindowTarget {
+  bundleId: string;
+  windowId: string;
+}
+
+export interface PlacementContext {
+  target: WindowTarget;
+  application: WindowApplication;
+  currentFrame: NormalizedRect;
+  placements: WindowPlacement[];
+  canMoveToDisplay: boolean;
+}
+
+export interface WindowHistoryStatus {
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+export type HistoryActionResult = 'applied' | 'empty' | 'staleEntriesDiscarded';
+
+export type MoveRecallResult =
+  | { status: 'moved'; slot: PlacementSlot }
+  | { status: 'noAdjacentDisplay' };
+
+export interface PlacementEditResult {
+  changed: boolean;
+}
+
 export type ModifierKey = 'capsLock' | 'control' | 'option' | 'command' | 'shift' | 'function';
 
 export type KeySide = 'left' | 'right' | 'either';
@@ -37,7 +85,10 @@ export type AppAction =
   // Like snapWindow but never cycles — emitted by the tomari:// URL scheme.
   | { type: 'snapWindowExact'; value: WindowPreset }
   | { type: 'moveWindowToDisplay'; value: DisplayDirection }
+  | { type: 'recallWindowPlacement' }
+  | { type: 'moveWindowToDisplayAndRecall'; value: DisplayDirection }
   | { type: 'undoWindow' }
+  | { type: 'redoWindow' }
   | { type: 'switchIme'; value: ImeMode }
   | { type: 'sendKeystroke'; value: string }
   | { type: 'toggleKeepAwake' }
@@ -126,7 +177,14 @@ export interface SetupStatus {
 // Error shape a #[tauri::command] rejects with. `code` classifies the frequent,
 // localizable failures; `message` is the developer-facing English fallback for
 // everything else (`code: "other"`).
-export type CmdErrorCode = 'permissionRequired' | 'noFocusedWindow' | 'shortcutConflict' | 'other';
+export type CmdErrorCode =
+  | 'permissionRequired'
+  | 'noFocusedWindow'
+  | 'shortcutConflict'
+  | 'placementNotFound'
+  | 'windowTargetChanged'
+  | 'windowNotResponding'
+  | 'other';
 
 export interface CmdError {
   code: CmdErrorCode;

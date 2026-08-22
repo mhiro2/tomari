@@ -69,8 +69,8 @@ impl AppAction {
             Self::MoveWindowToDisplayAndRecall(direction) => {
                 format!("Move and Restore on {}", direction.label())
             }
-            Self::UndoWindow => "Undo Window Move".into(),
-            Self::RedoWindow => "Redo Window Move".into(),
+            Self::UndoWindow => "Undo Window Change".into(),
+            Self::RedoWindow => "Redo Window Change".into(),
             Self::SwitchIme(ImeMode::Alphanumeric) => "IME: 英数".into(),
             Self::SwitchIme(ImeMode::Kana) => "IME: かな".into(),
             Self::SendKeystroke(k) => format!("Send: {k}"),

@@ -3,9 +3,7 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
-use tomari_core::{
-    AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot, WindowPreset,
-};
+use tomari_core::{AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot};
 use tomari_keyboard::accelerator;
 
 use crate::actions;
@@ -596,35 +594,6 @@ fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     #[cfg(not(target_os = "macos"))]
     let caps_ok = true;
     Ok(caps_ok)
-}
-
-#[tauri::command]
-pub fn list_window_presets() -> Vec<WindowPreset> {
-    WindowPreset::ALL.to_vec()
-}
-
-/// Snap the focused window. Returns the preset actually applied — a repeated
-/// half-snap cycles 1/2 → 1/3 → 2/3, so it can differ from the request — so
-/// the frontend can label it in the UI language. `None` when window management
-/// is disabled.
-#[tauri::command]
-pub fn snap_window(
-    state: State<'_, AppState>,
-    preset: WindowPreset,
-) -> CmdResult<Option<WindowPreset>> {
-    crate::window_ops::snap(
-        state.inner(),
-        preset,
-        crate::window_ops::SnapBehavior::Cycle,
-    )
-}
-
-#[tauri::command]
-pub fn move_window_to_display(
-    state: State<'_, AppState>,
-    direction: DisplayDirection,
-) -> CmdResult<()> {
-    crate::window_ops::move_to_display(state.inner(), direction)
 }
 
 #[tauri::command]

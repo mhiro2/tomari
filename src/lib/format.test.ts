@@ -23,7 +23,7 @@ describe('actionLabel', () => {
     expect(actionLabel({ type: 'moveWindowToDisplay', value: 'prev' }, t)).toBe(
       'Move to Previous Display',
     );
-    expect(actionLabel({ type: 'undoWindow' }, t)).toBe('Undo Window Move');
+    expect(actionLabel({ type: 'undoWindow' }, t)).toBe('Undo Window Change');
   });
 
   it('labels IME switching with Japanese glyphs', () => {

@@ -1,6 +1,6 @@
-//! Factory data used to seed a fresh install with sensible default bindings:
-//! Caps Lock → Control, and tapping the left/right ⌘ to flip between 英数 and
-//! かな (the latter pair gated by `command_ime_switch_enabled`).
+//! Factory data used to seed a fresh install with sensible keyboard and window
+//! workflow bindings. The left/right ⌘ IME pair is assembled separately when
+//! `command_ime_switch_enabled` is on.
 
 use crate::domain::action::{AppAction, ImeMode};
 use crate::domain::keyboard::{Hotkey, KeySide, ModifierKey, ModifierRule};
@@ -35,6 +35,36 @@ pub fn default_hotkeys() -> Vec<Hotkey> {
             label: "Maximize window".into(),
             accelerator: "Ctrl+Alt+Up".into(),
             action: AppAction::SnapWindow(WindowPreset::Maximize),
+            enabled: true,
+        },
+        Hotkey {
+            id: "hk-restore-home".into(),
+            label: "Restore remembered position".into(),
+            accelerator: "Ctrl+Alt+Down".into(),
+            action: AppAction::RecallWindowPlacement,
+            enabled: true,
+        },
+        Hotkey {
+            id: "hk-move-restore-next".into(),
+            label: "Move to next display and restore".into(),
+            accelerator: "Ctrl+Alt+Shift+Right".into(),
+            action: AppAction::MoveWindowToDisplayAndRecall(
+                crate::domain::window::DisplayDirection::Next,
+            ),
+            enabled: true,
+        },
+        Hotkey {
+            id: "hk-undo-window".into(),
+            label: "Undo window change".into(),
+            accelerator: "Ctrl+Alt+Z".into(),
+            action: AppAction::UndoWindow,
+            enabled: true,
+        },
+        Hotkey {
+            id: "hk-redo-window".into(),
+            label: "Redo window change".into(),
+            accelerator: "Ctrl+Alt+Shift+Z".into(),
+            action: AppAction::RedoWindow,
             enabled: true,
         },
     ]

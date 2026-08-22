@@ -7,6 +7,7 @@ import type {
   AcceleratorCheck,
   AppAction,
   AppSettings,
+  DisplayDirection,
   Hotkey,
   KeepAwakeStatus,
   MenuBarStatus,
@@ -14,7 +15,13 @@ import type {
   SaveSettingsOutcome,
   SetupStatus,
   UpdateInfo,
-  WindowPreset,
+  PlacementContext,
+  PlacementEditResult,
+  PlacementSlot,
+  WindowTarget,
+  WindowHistoryStatus,
+  HistoryActionResult,
+  MoveRecallResult,
 } from './types';
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
@@ -38,17 +45,35 @@ export const saveModifierRule = (rule: ModifierRule): Promise<void> =>
 export const deleteModifierRule = (id: string): Promise<void> =>
   invoke('delete_modifier_rule', { id });
 
-export const listWindowPresets = (): Promise<WindowPreset[]> => invoke('list_window_presets');
+export const getPlacementContext = (): Promise<PlacementContext> => invoke('get_placement_context');
 
-// Resolves to the preset actually applied (repeated half-snaps cycle
-// 1/2 → 1/3 → 2/3), or null when window management is disabled.
-export const snapWindow = (preset: WindowPreset): Promise<WindowPreset | null> =>
-  invoke('snap_window', { preset });
+export const captureWindowPlacement = (
+  target: WindowTarget,
+  slot: PlacementSlot,
+): Promise<PlacementEditResult> => invoke('capture_window_placement', { target, slot });
 
-// Moving between displays and undoing a move have no wrapper here: the panel
-// offers no buttons for them (reaching for the mouse to move a window defeats
-// the point), so they are driven by hotkey, the tray, or the URL scheme, all of
-// which go through the backend's own dispatch.
+export const forgetWindowPlacement = (
+  target: WindowTarget,
+  slot: PlacementSlot,
+): Promise<PlacementEditResult> => invoke('forget_window_placement', { target, slot });
+
+export const undoWindowPlacementEdit = (): Promise<HistoryActionResult> =>
+  invoke('undo_window_placement_edit');
+
+export const recallWindowPlacement = (target: WindowTarget): Promise<PlacementSlot> =>
+  invoke('recall_window_placement', { target });
+
+export const moveWindowToDisplayAndRecall = (
+  target: WindowTarget,
+  direction: DisplayDirection,
+): Promise<MoveRecallResult> => invoke('move_window_to_display_and_recall', { target, direction });
+
+export const getWindowHistoryStatus = (): Promise<WindowHistoryStatus> =>
+  invoke('get_window_history_status');
+
+export const undoWindow = (): Promise<HistoryActionResult> => invoke('undo_window');
+
+export const redoWindow = (): Promise<HistoryActionResult> => invoke('redo_window');
 
 // Startup pull for the setup checklist: whether this is a first run, whether an
 // update looks to have revoked permissions, and the current permission states.

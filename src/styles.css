@@ -687,55 +687,286 @@ kbd {
   font-size: var(--fs-caption);
 }
 
-/* ===== Window presets & glyphs (frame / landing region) =============== */
+/* ===== Remembered window placement ==================================== */
 
-.preset-grid {
+/* The one expressive surface in this section: a small desktop where the
+   focused window and its two remembered homes visibly overlap. It explains
+   the feature without becoming a free-form layout editor. */
+.placement-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 13px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.placement-stage__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.placement-stage__identity > div {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.placement-stage__identity strong,
+.placement-stage__identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.placement-stage__identity small,
+.placement-stage__eyebrow {
+  color: var(--ink-faint);
+  font-size: var(--fs-caption);
+}
+
+.placement-stage__eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 650;
+}
+
+.placement-stage__initial {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line-strong);
+  color: var(--amber-bright);
+  font-weight: 700;
+}
+
+.work-area-wrap {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.work-area {
+  position: relative;
+  height: 116px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(90deg, transparent 49.8%, var(--line) 50%, transparent 50.2%),
+    linear-gradient(var(--surface-sunken), var(--surface-sunken));
+}
+
+.work-area::before {
+  content: '';
+  position: absolute;
+  inset: 6px 45% auto;
+  height: 2px;
+  border-radius: 99px;
+  background: var(--line-strong);
+}
+
+.work-area__home,
+.work-area__current,
+.placement-slot__frame {
+  position: absolute;
+  border-radius: 5px;
+}
+
+.work-area__home {
+  border: 1px dashed var(--line-strong);
+  background: var(--field-bg);
+}
+
+.work-area__home--secondary {
+  border-style: dotted;
+  border-color: var(--ink-faint);
+}
+
+.work-area__home--active {
+  border-color: var(--amber-bright);
+  background: var(--amber-soft);
+  box-shadow: 0 0 0 1px var(--amber-bright);
+}
+
+.work-area__current {
+  border: 2px solid var(--amber);
+  background: var(--amber-soft);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 24%);
+}
+
+.work-area__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  color: var(--ink-dim);
+  font-size: var(--fs-small);
+}
+
+.work-area__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-mark {
+  width: 13px;
+  height: 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 2px;
+}
+
+.legend-mark--current {
+  border: 2px solid var(--amber);
+  background: var(--amber-soft);
+}
+
+.legend-mark--secondary {
+  border-style: dotted;
+  border-color: var(--ink-faint);
+}
+
+.placement-stage__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.placement-stage__history {
+  display: flex;
+  margin-left: auto;
+}
+
+.placement-slots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.placement-slot {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px 10px;
   padding: 11px;
 }
 
-.preset {
+.placement-slot--active {
+  background: var(--amber-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 46%, transparent);
+}
+
+.placement-slot--active .placement-slot__frame {
+  border-color: var(--amber-bright);
+  box-shadow: 0 0 0 1px var(--amber-bright);
+}
+
+.placement-slot + .placement-slot {
+  border-left: 1px solid var(--line);
+}
+
+.placement-slot__preview {
+  position: relative;
+  grid-row: span 2;
+  width: 44px;
+  height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface-sunken);
+}
+
+.placement-slot__frame {
+  border: 1px solid var(--amber);
+  background: var(--amber-soft);
+}
+
+.placement-slot__copy {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 4px;
-  background: var(--field-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+}
+
+.placement-slot__copy span {
+  color: var(--ink-faint);
   font-size: var(--fs-caption);
+  line-height: 1.25;
+}
+
+.placement-slot__actions {
+  display: flex;
+  gap: 4px;
+}
+
+.placement-slot__actions > .btn {
+  width: max-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  font-size: var(--fs-caption);
+}
+
+.modifier-rule__details {
+  display: grid;
+  gap: 7px;
+}
+
+.modifier-rule__details label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ink-dim);
-  transition:
-    border-color 0.12s ease,
-    background 0.12s ease;
+  font-size: var(--fs-small);
 }
 
-.preset:hover {
-  border-color: var(--amber);
+.input--compact {
+  min-width: 156px;
+  padding-block: 4px;
+}
+
+.window-toast {
+  position: fixed;
+  z-index: 20;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(430px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--solid) 92%, transparent);
   color: var(--ink);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 38%);
+  backdrop-filter: blur(10px);
 }
 
-.preset:active {
-  filter: brightness(0.9);
+.window-toast--err {
+  border-color: color-mix(in srgb, var(--err) 55%, var(--line));
+  color: var(--err);
 }
 
-.preset__glyph {
-  width: 36px;
-  height: 24px;
+.window-toast > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.preset__frame {
-  fill: none;
-  stroke: var(--line-strong);
-  stroke-width: 1.5;
+.window-toast > .btn {
+  flex: 0 0 auto;
 }
 
-/* The region the window settles into. */
-.preset__fill {
-  fill: var(--amber);
+.empty-row {
+  margin: 0;
+  padding: 11px 13px;
+  color: var(--ink-dim);
+  font-size: var(--fs-caption);
 }
 
 /* ===== Add form ======================================================== */

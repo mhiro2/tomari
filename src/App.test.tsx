@@ -52,7 +52,6 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(ALL_GRANTED);
       case 'list_modifier_rules':
       case 'list_hotkeys':
-      case 'list_window_presets':
         return Promise.resolve([]);
       case 'input_monitoring_status':
       case 'accessibility_status':
@@ -242,7 +241,7 @@ describe('App sidebar', () => {
     await screen.findByText('Keyboard customization');
 
     fireEvent.click(nav('Windows'));
-    expect(await screen.findByText('Snap focused window')).toBeInTheDocument();
+    expect(await screen.findByText('Remembered positions')).toBeInTheDocument();
     expect(screen.queryByText('Keyboard customization')).not.toBeInTheDocument();
     expect(nav('Windows')).toHaveAttribute('aria-current', 'true');
     expect(nav('Keyboard')).not.toHaveAttribute('aria-current');

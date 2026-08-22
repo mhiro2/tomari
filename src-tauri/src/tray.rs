@@ -1,11 +1,12 @@
 //! The menu-bar tray icon. Clicking it opens a native menu that surfaces a
-//! permission setup affordance (when needed), quick window snaps, and a Settings
-//! entry that opens the window. The menu is rebuilt as permission state changes.
+//! permission setup affordance (when needed), reversible recovery actions, and
+//! a Settings entry that opens the window. Direct placement stays on keyboard
+//! and drag workflows instead of turning the tray into a window palette.
 
-use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Emitter, Manager};
-use tomari_core::{AppAction, Language, WindowPreset};
+use tomari_core::{AppAction, Language};
 
 use crate::actions;
 use crate::locks::MutexExt;
@@ -19,12 +20,8 @@ const TRAY_ID: &str = "tomari-tray";
 struct Text {
     grant_accessibility: &'static str,
     grant_input: &'static str,
-    left_half: &'static str,
-    right_half: &'static str,
-    maximize: &'static str,
-    center: &'static str,
-    snap_window: &'static str,
     undo: &'static str,
+    redo: &'static str,
     keep_awake: &'static str,
     expand_menu_bar: &'static str,
     open_settings: &'static str,
@@ -35,12 +32,8 @@ struct Text {
 const TEXT_EN: Text = Text {
     grant_accessibility: "Grant Accessibility Access…",
     grant_input: "Grant Input Monitoring Access…",
-    left_half: "Left Half",
-    right_half: "Right Half",
-    maximize: "Maximize",
-    center: "Center",
-    snap_window: "Snap Window",
-    undo: "Undo Move",
+    undo: "Undo Window Change",
+    redo: "Redo Window Change",
     keep_awake: "Prevent Sleep",
     expand_menu_bar: "Show Menu Bar Icons",
     open_settings: "Settings…",
@@ -51,12 +44,8 @@ const TEXT_EN: Text = Text {
 const TEXT_JA: Text = Text {
     grant_accessibility: "アクセシビリティへのアクセスを許可…",
     grant_input: "入力監視へのアクセスを許可…",
-    left_half: "左半分",
-    right_half: "右半分",
-    maximize: "最大化",
-    center: "中央",
-    snap_window: "ウィンドウをスナップ",
-    undo: "元に戻す",
+    undo: "ウィンドウ操作を元に戻す",
+    redo: "ウィンドウ操作をやり直す",
     keep_awake: "スリープ防止",
     expand_menu_bar: "メニューバーのアイコンを表示",
     open_settings: "設定…",
@@ -110,7 +99,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
 }
 
 /// Build the tray menu for the given permission state. Missing permissions get
-/// an emphasized setup item at the very top; window snaps are disabled until
+/// an emphasized setup item at the very top; recovery is disabled until
 /// Accessibility is granted.
 fn build_menu(
     app: &AppHandle,
@@ -134,30 +123,18 @@ fn build_menu(
         menu = menu.separator();
     }
 
-    let snap_left = MenuItemBuilder::with_id("snap:leftHalf", text.left_half)
-        .enabled(ax_granted)
-        .build(app)?;
-    let snap_right = MenuItemBuilder::with_id("snap:rightHalf", text.right_half)
-        .enabled(ax_granted)
-        .build(app)?;
-    let snap_max = MenuItemBuilder::with_id("snap:maximize", text.maximize)
-        .enabled(ax_granted)
-        .build(app)?;
-    let snap_center = MenuItemBuilder::with_id("snap:center", text.center)
-        .enabled(ax_granted)
-        .build(app)?;
-    // Undo sits with the snaps: the natural reach right after a missed snap.
+    let state = app.state::<AppState>();
+    let window_enabled = state.settings.lock_safe().window_management_enabled;
+    let (can_undo, can_redo) = state.window_history_status();
     let undo = MenuItemBuilder::with_id("undo", text.undo)
-        .enabled(ax_granted)
+        .enabled(ax_granted && window_enabled && can_undo)
         .build(app)?;
-    let snap = SubmenuBuilder::new(app, text.snap_window)
-        .items(&[&snap_left, &snap_right, &snap_max, &snap_center])
-        .separator()
-        .item(&undo)
-        .build()?;
+    let redo = MenuItemBuilder::with_id("redo", text.redo)
+        .enabled(ax_granted && window_enabled && can_redo)
+        .build(app)?;
 
     // A checkmark reflects the live keep-awake state; clicking toggles it.
-    let keep_awake_active = crate::keepawake::status(app.state::<AppState>().inner()).active;
+    let keep_awake_active = crate::keepawake::status(state.inner()).active;
     let keep_awake = CheckMenuItemBuilder::with_id("keep-awake", text.keep_awake)
         .checked(keep_awake_active)
         .build(app)?;
@@ -175,7 +152,7 @@ fn build_menu(
     let check_update = MenuItemBuilder::with_id("check-update", text.check_updates).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", text.quit).build(app)?;
 
-    let mut menu = menu.item(&snap).separator().item(&keep_awake);
+    let mut menu = menu.item(&undo).item(&redo).separator().item(&keep_awake);
     if let Some(item) = expand_menu_bar {
         menu = menu.item(&item?);
     }
@@ -243,51 +220,42 @@ fn on_menu(app: &AppHandle, id: &str) {
         "setup:accessibility" => {
             request_accessibility();
             refresh(app);
-            return;
         }
         "setup:input" => {
             request_input_monitoring();
             refresh(app);
-            return;
         }
         "open" => {
             let _ = actions::show_panel(app);
-            return;
         }
         "check-update" => {
             let _ = actions::show_panel(app);
             let _ = app.emit("tomari:check-update", ());
-            return;
         }
         "keep-awake" => {
             // `toggle` rebuilds the menu (so the checkmark reflects the new
             // state) and emits the change event for the panel.
             crate::keepawake::toggle(app);
-            return;
         }
         "menu-bar-expand" => {
             // Same contract as keep-awake above: the toggle republishes, which
             // rebuilds this menu and notifies the panel.
             crate::menubar::toggle(app);
-            return;
         }
         "undo" => {
             if let Some(state) = app.try_state::<AppState>() {
                 let _ = actions::dispatch(&AppAction::UndoWindow, app, state.inner());
             }
-            return;
+        }
+        "redo" => {
+            if let Some(state) = app.try_state::<AppState>() {
+                let _ = actions::dispatch(&AppAction::RedoWindow, app, state.inner());
+            }
         }
         "quit" => {
             app.exit(0);
-            return;
         }
         _ => {}
-    }
-
-    if let Some(rest) = id.strip_prefix("snap:")
-        && let (Some(preset), Some(state)) = (preset_from_id(rest), app.try_state::<AppState>())
-    {
-        let _ = actions::dispatch(&AppAction::SnapWindow(preset), app, state.inner());
     }
 }
 
@@ -303,14 +271,4 @@ fn request_input_monitoring() {
     {
         crate::eventtap::request_input_monitoring();
     }
-}
-
-fn preset_from_id(id: &str) -> Option<WindowPreset> {
-    Some(match id {
-        "leftHalf" => WindowPreset::LeftHalf,
-        "rightHalf" => WindowPreset::RightHalf,
-        "maximize" => WindowPreset::Maximize,
-        "center" => WindowPreset::Center,
-        _ => return None,
-    })
 }
