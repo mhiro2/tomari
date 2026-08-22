@@ -9,7 +9,10 @@ pub mod window;
 pub use action::{AppAction, ImeMode};
 pub use keyboard::{Hotkey, KeySide, ModifierKey, ModifierRule};
 pub use settings::{AppSettings, Language};
-pub use window::{DisplayDirection, Rect, WindowPreset};
+pub use window::{
+    DisplayDirection, NormalizedRect, PlacementSlot, Rect, WindowApplication, WindowPlacement,
+    WindowPreset,
+};
 
 /// Generate a fresh random identifier for a new domain entity.
 pub fn new_id() -> String {

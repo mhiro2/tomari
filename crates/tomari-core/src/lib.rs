@@ -20,5 +20,6 @@ pub use paths::AppPaths;
 // Re-export the domain surface at the crate root for ergonomic downstream use.
 pub use domain::{
     AppAction, AppSettings, DisplayDirection, Hotkey, ImeMode, KeySide, Language, ModifierKey,
-    ModifierRule, Rect, WindowPreset, new_id,
+    ModifierRule, NormalizedRect, PlacementSlot, Rect, WindowApplication, WindowPlacement,
+    WindowPreset, new_id,
 };

@@ -4,6 +4,83 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One of the two remembered homes an application can use. Two positions are
+/// enough to cover the common "working" and "reference" contexts without
+/// turning placement into a custom-layout editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlacementSlot {
+    Primary,
+    Secondary,
+}
+
+impl PlacementSlot {
+    pub const ALL: [Self; 2] = [Self::Primary, Self::Secondary];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+        }
+    }
+}
+
+/// A rectangle relative to a display's usable work area. Values normally sit
+/// inside `0..=1`, but width/height may exceed one briefly while decoding bad
+/// stored data; callers must validate before applying it to a real window.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl NormalizedRect {
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Whether every component is finite and describes a non-empty rectangle
+    /// fully inside the normalized work area.
+    pub fn is_valid(self) -> bool {
+        [self.x, self.y, self.width, self.height]
+            .into_iter()
+            .all(f64::is_finite)
+            && self.x >= 0.0
+            && self.y >= 0.0
+            && self.width > 0.0
+            && self.height > 0.0
+            && self.x + self.width <= 1.0 + f64::EPSILON
+            && self.y + self.height <= 1.0 + f64::EPSILON
+    }
+}
+
+/// Presentation-safe identity of the application owning a focused window.
+/// The bundle identifier is the durable key; the localized name is a cached
+/// label for settings UI and may change with the system language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowApplication {
+    pub bundle_id: String,
+    pub name: String,
+}
+
+/// One remembered position for an application.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowPlacement {
+    pub application: WindowApplication,
+    pub slot: PlacementSlot,
+    pub frame: NormalizedRect,
+}
+
 /// A named target position/size for the focused window, relative to its screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,5 +227,18 @@ impl Rect {
             width,
             height,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_rect_rejects_non_finite_empty_and_out_of_bounds_values() {
+        assert!(NormalizedRect::new(0.1, 0.2, 0.6, 0.7).is_valid());
+        assert!(!NormalizedRect::new(f64::NAN, 0.0, 0.5, 0.5).is_valid());
+        assert!(!NormalizedRect::new(0.0, 0.0, 0.0, 0.5).is_valid());
+        assert!(!NormalizedRect::new(0.6, 0.0, 0.5, 0.5).is_valid());
     }
 }

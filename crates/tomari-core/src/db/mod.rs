@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 
 mod keyboard;
 mod meta;
+mod placements;
 mod settings;
 
 /// A thread-safe handle to the on-disk SQLite database.
@@ -204,7 +205,7 @@ fn collect_valid_rows<T>(
 /// batch (and never edit an existing entry — released builds have already
 /// applied those); the schema version a binary writes is simply the list's
 /// length, so it needs no separate bump.
-const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2];
+const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2, MIGRATION_V3];
 
 /// `0 → 1`: the initial schema. `hyper` defaults to `0` so callers can omit it
 /// and get the "not a hyper key" behaviour. `IF NOT EXISTS` tolerates a
@@ -243,6 +244,19 @@ const MIGRATION_V2: &str = r#"
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+"#;
+
+/// `2 → 3`: two named, display-relative homes per application. The frame is
+/// stored as JSON because it is already a domain value crossing the frontend
+/// boundary, while the application and slot remain queryable columns.
+const MIGRATION_V3: &str = r#"
+CREATE TABLE window_placements (
+    bundle_id TEXT NOT NULL,
+    app_name  TEXT NOT NULL,
+    slot      TEXT NOT NULL CHECK (slot IN ('primary', 'secondary')),
+    frame     TEXT NOT NULL,
+    PRIMARY KEY (bundle_id, slot)
 );
 "#;
 
@@ -320,6 +334,47 @@ CREATE TABLE meta (
 );
 
 PRAGMA user_version = 2;
+"#,
+        // v3: v2 plus remembered per-application window positions.
+        r#"
+CREATE TABLE hotkeys (
+    id          TEXT    PRIMARY KEY,
+    label       TEXT    NOT NULL,
+    accelerator TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    enabled     INTEGER NOT NULL
+);
+
+CREATE TABLE modifier_rules (
+    id        TEXT    PRIMARY KEY,
+    label     TEXT    NOT NULL,
+    modifier  TEXT    NOT NULL,
+    side      TEXT    NOT NULL,
+    remap_to  TEXT,
+    tap       TEXT    NOT NULL,
+    enabled   INTEGER NOT NULL,
+    hyper     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT    NOT NULL
+);
+
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE window_placements (
+    bundle_id TEXT NOT NULL,
+    app_name  TEXT NOT NULL,
+    slot      TEXT NOT NULL CHECK (slot IN ('primary', 'secondary')),
+    frame     TEXT NOT NULL,
+    PRIMARY KEY (bundle_id, slot)
+);
+
+PRAGMA user_version = 3;
 "#,
     ];
 
@@ -399,6 +454,11 @@ PRAGMA user_version = 2;
         let db = Database::open_in_memory().expect("open");
         assert!(db.list_hotkeys().expect("hotkeys").is_empty());
         assert!(db.list_modifier_rules().expect("modifier rules").is_empty());
+        assert!(
+            db.list_window_placements("com.example.Empty")
+                .expect("window placements")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -497,6 +557,11 @@ PRAGMA user_version = 2;
             assert!(db.list_modifier_rules().expect("rules").is_empty());
             assert!(!db.settings_exist().expect("settings probe"));
             assert_eq!(db.get_meta("probe").expect("meta probe"), None);
+            assert!(
+                db.list_window_placements("com.example.Empty")
+                    .expect("window placements")
+                    .is_empty()
+            );
         }
     }
 
