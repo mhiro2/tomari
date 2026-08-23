@@ -1,11 +1,18 @@
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 
-import { AddHotkeyForm, HotkeyRow, type HotkeyActionOption } from '../components/HotkeyEditor';
-import { Banner, Group, MasterSwitchHeader, SwitchRow } from '../components/ui';
+import { AddHotkeyForm, type HotkeyActionOption } from '../components/HotkeyEditor';
+import { ShortcutRecorder } from '../components/ShortcutRecorder';
+import {
+  FeatureContent,
+  FeaturePageHeader,
+  SegmentedPageNav,
+  SettingsList,
+  Toggle,
+} from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { presetLabel } from '../lib/format';
+import { actionLabel, presetLabel } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
 import type {
@@ -13,7 +20,6 @@ import type {
   HistoryActionResult,
   Hotkey,
   NormalizedRect,
-  PermissionsChanged,
   PlacementContext,
   PlacementSlot,
   WindowHistoryStatus,
@@ -25,6 +31,8 @@ import type {
 const STATUS_CLEAR_MS = 4000;
 const RECOVERABLE_STATUS_CLEAR_MS = 8000;
 const EMPTY_HISTORY: WindowHistoryStatus = { canUndo: false, canRedo: false };
+const EMPTY_KEYCAPS: readonly string[] = [];
+const PRIMARY_SHORTCUT_COUNT = 5;
 const WINDOW_PRESETS: WindowPreset[] = [
   'leftHalf',
   'rightHalf',
@@ -43,7 +51,45 @@ const WINDOW_PRESETS: WindowPreset[] = [
   'maximize',
 ];
 
-type Status = { message: string; isError: boolean; undoPlacement: boolean };
+type StatusSource = 'contextLoad' | 'other';
+type Status = {
+  message: string;
+  isError: boolean;
+  undoPlacement: boolean;
+  source: StatusSource;
+};
+type WindowTab = 'saved' | 'shortcuts' | 'mouse';
+
+const WINDOW_TABS: WindowTab[] = ['saved', 'shortcuts', 'mouse'];
+
+function shortcutRank(action: AppAction): number {
+  if (action.type === 'snapWindow' || action.type === 'snapWindowExact') {
+    switch (action.value) {
+      case 'leftHalf':
+        return 0;
+      case 'rightHalf':
+        return 1;
+      case 'maximize':
+        return 2;
+      default:
+        return 20 + WINDOW_PRESETS.indexOf(action.value);
+    }
+  }
+  switch (action.type) {
+    case 'recallWindowPlacement':
+      return 3;
+    case 'moveWindowToDisplayAndRecall':
+      return action.value === 'next' ? 4 : 30;
+    case 'moveWindowToDisplay':
+      return action.value === 'next' ? 31 : 32;
+    case 'undoWindow':
+      return 40;
+    case 'redoWindow':
+      return 41;
+    default:
+      return 100;
+  }
+}
 
 function sameTarget(a: WindowTarget | undefined, b: WindowTarget | undefined): boolean {
   return a?.bundleId === b?.bundleId && a?.windowId === b?.windowId;
@@ -117,20 +163,16 @@ function clearSaving(
   });
 }
 
-export function WindowView({
-  onOpenSetup,
-  onOpenKeyboard,
-}: {
-  onOpenSetup?: () => void;
-  onOpenKeyboard?: () => void;
-}) {
+export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) {
   const t = useT();
   const { settings, update } = useSettings();
   const [context, setContext] = useState<PlacementContext | null>(null);
   const [history, setHistory] = useState<WindowHistoryStatus>(EMPTY_HISTORY);
   const [activeSlot, setActiveSlot] = useState<PlacementSlot | null>(null);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
-  const [granted, setGranted] = useState(true);
+  const [tab, setTab] = useState<WindowTab>('saved');
+  const [showOtherShortcuts, setShowOtherShortcuts] = useState(false);
+  const [showAddShortcut, setShowAddShortcut] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [savingHotkeyIds, setSavingHotkeyIds] = useState<ReadonlySet<string>>(new Set());
@@ -142,9 +184,14 @@ export function WindowView({
     hotkeysRef.current = hotkeys;
   }, [hotkeys]);
 
-  function showStatus(message: string, isError: boolean, undoPlacement = false) {
+  function showStatus(
+    message: string,
+    isError: boolean,
+    undoPlacement = false,
+    source: StatusSource = 'other',
+  ) {
     if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
-    setStatus({ message, isError, undoPlacement });
+    setStatus({ message, isError, undoPlacement, source });
     clearTimerRef.current = isError
       ? null
       : setTimeout(
@@ -159,6 +206,9 @@ export function WindowView({
   const reportLoadError = useEffectEvent((error: unknown) =>
     showStatus(formatCmdError(error, t), true),
   );
+  const reportContextLoadError = useEffectEvent((error: unknown) =>
+    showStatus(formatCmdError(error, t), true, false, 'contextLoad'),
+  );
 
   async function refreshContext(resetActive: boolean, reportError = true) {
     const request = contextRequestRef.current ?? api.getPlacementContext();
@@ -167,11 +217,12 @@ export function WindowView({
       const next = await request;
       setContext(next);
       if (resetActive) setActiveSlot(null);
+      setStatus((current) => (current?.source === 'contextLoad' ? null : current));
       return next;
     } catch (error) {
       setContext(null);
       setActiveSlot(null);
-      if (reportError) reportLoadError(error);
+      if (reportError) reportContextLoadError(error);
       return null;
     } finally {
       if (contextRequestRef.current === request) contextRequestRef.current = null;
@@ -204,27 +255,18 @@ export function WindowView({
   });
 
   useEffect(() => {
-    void api.accessibilityStatus().then(setGranted).catch(reportLoadError);
     refreshForPanelFocus();
     void api
       .listHotkeys()
       .then((items) => setHotkeys(items.filter((item) => isWindowAction(item.action))))
       .catch(reportLoadError);
 
-    const permissionsUnlisten = listen<PermissionsChanged>(
-      'tomari:permissions-changed',
-      (event) => {
-        setGranted(event.payload.accessibility);
-        if (event.payload.accessibility) refreshForPanelFocus();
-      },
-    );
     const panelUnlisten = listen('tomari:panel-shown', refreshForPanelFocus);
     const onFocus = () => refreshForPanelFocus();
     window.addEventListener('focus', onFocus);
     return () => {
       if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
       window.removeEventListener('focus', onFocus);
-      void permissionsUnlisten.then((fn) => fn());
       void panelUnlisten.then((fn) => fn());
     };
   }, []);
@@ -289,7 +331,7 @@ export function WindowView({
         ? t('window.remembered', { slot: t(`window.slot.${slot}`) })
         : t('window.alreadyRemembered', { slot: t(`window.slot.${slot}`) }),
       false,
-      outcome.result.changed,
+      outcome.result.undoable,
     );
   }
 
@@ -299,7 +341,7 @@ export function WindowView({
     showStatus(
       t('window.forgotten', { slot: t(`window.slot.${slot}`) }),
       false,
-      outcome.result.changed,
+      outcome.result.undoable,
     );
   }
 
@@ -369,87 +411,84 @@ export function WindowView({
     }
   }
 
-  async function grant() {
-    try {
-      const ok = await api.requestAccessibility();
-      setGranted(ok);
-      if (ok) await refreshWorkflow(true);
-    } catch (error) {
-      showStatus(formatCmdError(error, t), true);
-    }
-  }
-
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
   const on = settings.windowManagementEnabled;
+  const orderedHotkeys = hotkeys.toSorted(
+    (left, right) => shortcutRank(left.action) - shortcutRank(right.action),
+  );
+  const primaryHotkeys = orderedHotkeys.slice(0, PRIMARY_SHORTCUT_COUNT);
+  const otherHotkeys = orderedHotkeys.slice(PRIMARY_SHORTCUT_COUNT);
 
   return (
     <div className="view">
-      <MasterSwitchHeader
-        title={t('settings.windowManagement')}
+      <FeaturePageHeader
+        title={t('app.nav.window')}
+        description={t('window.pageDescription')}
         checked={on}
         onChange={(value) => update({ windowManagementEnabled: value })}
-        offNote={t('window.offNote')}
-        enableLabel={t('common.turnOn')}
         toggleLabel={t('common.enable', { label: t('settings.windowManagement') })}
+        onLabel={t('common.on')}
+        offLabel={t('common.off')}
       />
 
-      <div className={`view ${on ? '' : 'gated'}`} aria-disabled={!on} inert={!on}>
-        {!granted && (
-          <Banner tone="warn">
-            <div className="banner__body">
-              <strong>{t('window.axNeeded')}</strong>
-              <p>{t('window.axBody')}</p>
-            </div>
-            {onOpenSetup && (
-              <button type="button" className="btn btn--ghost" onClick={onOpenSetup}>
-                {t('setup.openSetup')}
-              </button>
-            )}
-            <button type="button" className="btn btn--primary" onClick={() => void grant()}>
-              {t('window.grantAccess')}
-            </button>
-          </Banner>
-        )}
+      <SegmentedPageNav
+        label={t('window.tabsLabel')}
+        idBase="window-tabs"
+        value={tab}
+        onChange={setTab}
+        items={WINDOW_TABS.map((value) => ({ value, label: t(`window.tab.${value}`) }))}
+      />
 
-        <PlacementStage
-          context={context}
-          history={history}
-          activeSlot={activeSlot}
-          busy={busy}
-          onRefresh={() => void refreshWorkflow(true)}
-          onRecall={() => void recall()}
-          onMove={() => void moveAndRecall()}
-          onUndo={() => void changeHistory(api.undoWindow, 'undo')}
-          onRedo={() => void changeHistory(api.redoWindow, 'redo')}
-        />
-
-        <MouseControls
-          dragToSnapEnabled={settings.dragToSnapEnabled}
-          dragToMoveEnabled={settings.dragToMoveEnabled}
-          onDragToSnap={(value) => update({ dragToSnapEnabled: value })}
-          onDragToMove={(value) => update({ dragToMoveEnabled: value })}
-        />
-
-        <RememberedPositions
-          context={context}
-          activeSlot={activeSlot}
-          busy={busy}
-          onCapture={(slot) => void capture(slot)}
-          onForget={(slot) => void forget(slot)}
-        />
-
-        <WindowControls
-          keyboardEnabled={settings.keyboardEnabled}
-          onOpenKeyboard={onOpenKeyboard}
-          hotkeys={hotkeys}
-          savingHotkeyIds={savingHotkeyIds}
-          onSave={(id, patch) => void saveHotkeyPatch(id, patch)}
-          onRemove={(id) => void removeHotkey(id)}
-          onAdded={(hotkey) => setHotkeys((items) => [...items, hotkey])}
-          onError={(message) => showStatus(message, true)}
-        />
-      </div>
+      <FeatureContent enabled={on}>
+        <div
+          id="window-tabs-panel"
+          className="window-tab-panel"
+          role="tabpanel"
+          aria-labelledby={`window-tabs-${tab}-tab`}
+        >
+          {tab === 'saved' && (
+            <WindowSavedPanel
+              context={context}
+              history={history}
+              activeSlot={activeSlot}
+              busy={busy}
+              onRefresh={() => void refreshWorkflow(true)}
+              onRecall={() => void recall()}
+              onMove={() => void moveAndRecall()}
+              onUndo={() => void changeHistory(api.undoWindow, 'undo')}
+              onRedo={() => void changeHistory(api.redoWindow, 'redo')}
+              onCapture={(slot) => void capture(slot)}
+              onForget={(slot) => void forget(slot)}
+            />
+          )}
+          {tab === 'shortcuts' && (
+            <WindowShortcutsPanel
+              keyboardEnabled={settings.keyboardEnabled}
+              onOpenKeyboard={onOpenKeyboard}
+              primaryHotkeys={primaryHotkeys}
+              otherHotkeys={otherHotkeys}
+              savingHotkeyIds={savingHotkeyIds}
+              showOther={showOtherShortcuts}
+              onShowOther={setShowOtherShortcuts}
+              showAdd={showAddShortcut}
+              onShowAdd={setShowAddShortcut}
+              onSave={(id, patch) => void saveHotkeyPatch(id, patch)}
+              onRemove={(id) => void removeHotkey(id)}
+              onAdded={(hotkey) => setHotkeys((items) => [...items, hotkey])}
+              onError={(message) => showStatus(message, true)}
+            />
+          )}
+          {tab === 'mouse' && (
+            <MouseControls
+              dragToSnapEnabled={settings.dragToSnapEnabled}
+              dragToMoveEnabled={settings.dragToMoveEnabled}
+              onDragToSnap={(value) => update({ dragToSnapEnabled: value })}
+              onDragToMove={(value) => update({ dragToMoveEnabled: value })}
+            />
+          )}
+        </div>
+      </FeatureContent>
 
       {status && (
         <div
@@ -473,6 +512,55 @@ export function WindowView({
   );
 }
 
+function WindowSavedPanel({
+  context,
+  history,
+  activeSlot,
+  busy,
+  onRefresh,
+  onRecall,
+  onMove,
+  onUndo,
+  onRedo,
+  onCapture,
+  onForget,
+}: {
+  context: PlacementContext | null;
+  history: WindowHistoryStatus;
+  activeSlot: PlacementSlot | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onRecall: () => void;
+  onMove: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onCapture: (slot: PlacementSlot) => void;
+  onForget: (slot: PlacementSlot) => void;
+}) {
+  return (
+    <div className="window-saved">
+      <PlacementStage
+        context={context}
+        history={history}
+        activeSlot={activeSlot}
+        busy={busy}
+        onRefresh={onRefresh}
+        onRecall={onRecall}
+        onMove={onMove}
+        onUndo={onUndo}
+        onRedo={onRedo}
+      />
+      <RememberedPositions
+        context={context}
+        activeSlot={activeSlot}
+        busy={busy}
+        onCapture={onCapture}
+        onForget={onForget}
+      />
+    </div>
+  );
+}
+
 function RememberedPositions({
   context,
   activeSlot,
@@ -488,7 +576,10 @@ function RememberedPositions({
 }) {
   const t = useT();
   return (
-    <Group label={t('window.rememberedHomes')} note={t('window.rememberedHomesHint')}>
+    <section className="window-saved__positions">
+      <header className="settings-section-heading">
+        <h2>{t('window.rememberedHomes')}</h2>
+      </header>
       <div className="placement-slots">
         {(['primary', 'secondary'] as const).map((slot) => (
           <PlacementSlotCard
@@ -502,15 +593,20 @@ function RememberedPositions({
           />
         ))}
       </div>
-    </Group>
+    </section>
   );
 }
 
-function WindowControls({
+function WindowShortcutsPanel({
   keyboardEnabled,
   onOpenKeyboard,
-  hotkeys,
+  primaryHotkeys,
+  otherHotkeys,
   savingHotkeyIds,
+  showOther,
+  onShowOther,
+  showAdd,
+  onShowAdd,
   onSave,
   onRemove,
   onAdded,
@@ -518,17 +614,71 @@ function WindowControls({
 }: {
   keyboardEnabled: boolean;
   onOpenKeyboard?: () => void;
-  hotkeys: Hotkey[];
+  primaryHotkeys: Hotkey[];
+  otherHotkeys: Hotkey[];
   savingHotkeyIds: ReadonlySet<string>;
+  showOther: boolean;
+  onShowOther: (show: boolean) => void;
+  showAdd: boolean;
+  onShowAdd: (show: boolean) => void;
   onSave: (id: string, patch: Partial<Hotkey>) => void;
   onRemove: (id: string) => void;
   onAdded: (hotkey: Hotkey) => void;
   onError: (message: string) => void;
 }) {
   const t = useT();
+
+  useEffect(() => {
+    if (!keyboardEnabled && showAdd) onShowAdd(false);
+  }, [keyboardEnabled, onShowAdd, showAdd]);
+
+  const shortcutRows = (items: Hotkey[]) =>
+    items.map((hotkey) => (
+      <WindowShortcutRow
+        key={hotkey.id}
+        hotkey={hotkey}
+        saving={savingHotkeyIds.has(hotkey.id)}
+        onAccelerator={(accelerator) => onSave(hotkey.id, { accelerator })}
+        onToggle={() => onSave(hotkey.id, { enabled: !hotkey.enabled })}
+        onDelete={() => onRemove(hotkey.id)}
+      />
+    ));
+
   return (
-    <Group label={t('window.controls')} note={t('window.controlsHint')}>
-      <div className="item">
+    <section className="window-shortcuts">
+      <FeatureContent enabled={keyboardEnabled}>
+        <div className="window-shortcuts">
+          <header className="settings-section-heading">
+            <h2>{t('window.basicShortcuts')}</h2>
+            <button type="button" className="btn" onClick={() => onShowAdd(true)}>
+              {t('window.addShortcut')}
+            </button>
+          </header>
+
+          <SettingsList>
+            {primaryHotkeys.length === 0 && otherHotkeys.length === 0 ? (
+              <p className="empty-row">{t('window.noShortcuts')}</p>
+            ) : (
+              shortcutRows(primaryHotkeys)
+            )}
+            {showOther && shortcutRows(otherHotkeys)}
+            {otherHotkeys.length > 0 && (
+              <button
+                type="button"
+                className="settings-list__disclosure"
+                aria-expanded={showOther}
+                onClick={() => onShowOther(!showOther)}
+              >
+                {showOther
+                  ? t('window.hideMoreShortcuts')
+                  : t('window.moreShortcuts', { count: otherHotkeys.length })}
+              </button>
+            )}
+          </SettingsList>
+        </div>
+      </FeatureContent>
+
+      <div className="window-shortcuts__keyboard-link">
         <div className="item__body">
           <span className="item__title">{t('window.modifierTapActions')}</span>
           <span className="item__desc">
@@ -543,19 +693,162 @@ function WindowControls({
           </button>
         )}
       </div>
-      {hotkeys.length === 0 && <p className="empty-row">{t('window.noShortcuts')}</p>}
-      {hotkeys.map((hotkey) => (
-        <HotkeyRow
-          key={hotkey.id}
-          hotkey={hotkey}
-          saving={savingHotkeyIds.has(hotkey.id)}
-          onAccelerator={(accelerator) => onSave(hotkey.id, { accelerator })}
-          onToggle={() => onSave(hotkey.id, { enabled: !hotkey.enabled })}
-          onDelete={() => onRemove(hotkey.id)}
+
+      {showAdd && keyboardEnabled && (
+        <AddWindowShortcutDialog
+          options={shortcutOptions(t)}
+          onDismiss={() => onShowAdd(false)}
+          onAdded={(hotkey) => {
+            onAdded(hotkey);
+            onShowAdd(false);
+          }}
+          onError={onError}
         />
-      ))}
-      <AddHotkeyForm options={shortcutOptions(t)} onAdded={onAdded} onError={onError} />
-    </Group>
+      )}
+    </section>
+  );
+}
+
+function AddWindowShortcutDialog({
+  options,
+  onDismiss,
+  onAdded,
+  onError,
+}: {
+  options: HotkeyActionOption[];
+  onDismiss: () => void;
+  onAdded: (hotkey: Hotkey) => void;
+  onError: (message: string) => void;
+}) {
+  const t = useT();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
+    dialog.querySelector<HTMLInputElement>('input')?.focus();
+
+    return () => {
+      if (typeof dialog.close === 'function' && dialog.open) {
+        dialog.close();
+      } else {
+        dialog.removeAttribute('open');
+      }
+    };
+  }, []);
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="settings-sheet"
+      aria-labelledby="window-add-shortcut-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onDismiss();
+      }}
+    >
+      <header className="settings-sheet__header">
+        <h2 id="window-add-shortcut-title">{t('window.addShortcut')}</h2>
+        <button type="button" className="btn btn--ghost" onClick={onDismiss}>
+          {t('common.cancel')}
+        </button>
+      </header>
+      <AddHotkeyForm options={options} onAdded={onAdded} onError={onError} />
+    </dialog>
+  );
+}
+
+function WindowShortcutRow({
+  hotkey,
+  saving,
+  onAccelerator,
+  onToggle,
+  onDelete,
+}: {
+  hotkey: Hotkey;
+  saving: boolean;
+  onAccelerator: (accelerator: string) => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const action = actionLabel(hotkey.action, t);
+  const title = hotkey.label === action ? action : `${hotkey.label} — ${action}`;
+
+  function deleteHotkey() {
+    if (confirmingDelete) {
+      setConfirmingDelete(false);
+      onDelete();
+    } else {
+      setConfirmingDelete(true);
+    }
+  }
+
+  return (
+    <div className="window-shortcut-row">
+      <WindowActionIcon action={hotkey.action} />
+      <span className="window-shortcut-row__title">{title}</span>
+      <span inert={saving}>
+        <ShortcutRecorder
+          value={hotkey.accelerator}
+          onCapture={onAccelerator}
+          ariaLabel={t('keyboard.changeShortcut', { label: title })}
+        />
+      </span>
+      <button
+        type="button"
+        className={`btn btn--ghost ${confirmingDelete ? 'btn--warn' : ''}`}
+        onClick={deleteHotkey}
+        onBlur={() => setConfirmingDelete(false)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') setConfirmingDelete(false);
+        }}
+        disabled={saving}
+        aria-label={
+          confirmingDelete
+            ? t('common.deleteConfirm', { label: title })
+            : t('keyboard.deleteShortcut', { label: title })
+        }
+      >
+        {confirmingDelete ? t('common.deleteConfirmShort') : '✕'}
+      </button>
+      <Toggle
+        checked={hotkey.enabled}
+        onChange={onToggle}
+        disabled={saving}
+        label={t('common.enable', { label: title })}
+      />
+    </div>
+  );
+}
+
+function WindowActionIcon({ action }: { action: AppAction }) {
+  let kind: string = action.type;
+  let mark = '↔';
+  if (action.type === 'snapWindow' || action.type === 'snapWindowExact') {
+    kind = `snap-${action.value}`;
+    mark = '';
+  } else if (action.type === 'recallWindowPlacement') {
+    mark = '⌑';
+  } else if (action.type === 'moveWindowToDisplayAndRecall') {
+    mark = action.value === 'next' ? '→⌑' : '←⌑';
+  } else if (action.type === 'moveWindowToDisplay') {
+    mark = action.value === 'next' ? '→' : '←';
+  } else if (action.type === 'undoWindow') {
+    mark = '↶';
+  } else if (action.type === 'redoWindow') {
+    mark = '↷';
+  }
+  return (
+    <span className={`window-action-icon window-action-icon--${kind}`} aria-hidden="true">
+      {mark}
+    </span>
   );
 }
 
@@ -572,22 +865,65 @@ function MouseControls({
 }) {
   const t = useT();
   return (
-    <Group label={t('window.mouse')}>
-      <SwitchRow
-        title={t('window.dragToSnapToggle')}
-        desc={t('window.dragToSnapHint')}
-        checked={dragToSnapEnabled}
-        onChange={onDragToSnap}
-        toggleLabel={t('window.enableDragToSnap')}
-      />
-      <SwitchRow
-        title={t('window.dragToMoveToggle')}
-        desc={t('window.dragToMoveHint')}
-        checked={dragToMoveEnabled}
-        onChange={onDragToMove}
-        toggleLabel={t('window.enableDragToMove')}
-      />
-    </Group>
+    <section className="window-mouse">
+      <header className="settings-section-heading">
+        <h2>{t('window.mouse')}</h2>
+      </header>
+      <div className="window-mouse__grid">
+        <MouseGestureCard
+          visual="snap"
+          title={t('window.dragGesture')}
+          description={t('window.dragToSnapHint')}
+          checked={dragToSnapEnabled}
+          onChange={onDragToSnap}
+          toggleLabel={t('window.enableDragToSnap')}
+        />
+        <MouseGestureCard
+          visual="move-resize"
+          keycaps={['⌃', '⌥']}
+          title={t('window.resizeGesture')}
+          description={t('window.dragToMoveHint')}
+          checked={dragToMoveEnabled}
+          onChange={onDragToMove}
+          toggleLabel={t('window.enableDragToMove')}
+        />
+      </div>
+    </section>
+  );
+}
+
+function MouseGestureCard({
+  visual,
+  keycaps = EMPTY_KEYCAPS,
+  title,
+  description,
+  checked,
+  onChange,
+  toggleLabel,
+}: {
+  visual: 'snap' | 'move-resize';
+  keycaps?: readonly string[];
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (enabled: boolean) => void;
+  toggleLabel: string;
+}) {
+  return (
+    <article className={`mouse-gesture mouse-gesture--${visual}`}>
+      <div className="mouse-gesture__visual" aria-hidden="true">
+        {keycaps.map((keycap) => (
+          <kbd key={keycap}>{keycap}</kbd>
+        ))}
+        <span className="mouse-gesture__pointer" />
+        <span className="mouse-gesture__window" />
+      </div>
+      <div className="mouse-gesture__copy">
+        <strong>{title}</strong>
+        <span>{description}</span>
+      </div>
+      <Toggle checked={checked} onChange={onChange} label={toggleLabel} />
+    </article>
   );
 }
 
@@ -616,60 +952,65 @@ function PlacementStage({
   const initial = context?.application.name.trim().charAt(0).toLocaleUpperCase() || '–';
   const remembered = context?.placements.length ?? 0;
   return (
-    <section className="placement-stage">
-      <div className="placement-stage__identity">
-        <span className="placement-stage__initial" aria-hidden="true">
-          {initial}
-        </span>
-        <div>
-          <span className="placement-stage__eyebrow">{t('window.focusedApp')}</span>
-          <strong title={context?.application.bundleId}>
-            {context?.application.name ?? t('window.noFocusedApp')}
-          </strong>
-          {context && <small>{t('window.rememberedCount', { count: remembered })}</small>}
-        </div>
+    <section className="window-saved__current">
+      <header className="settings-section-heading">
+        <h2>{t('window.currentWindow')}</h2>
         <button type="button" className="btn btn--ghost" onClick={onRefresh} disabled={busy}>
           {t('common.refresh')}
         </button>
-      </div>
-      <WorkAreaPreview context={context} activeSlot={activeSlot} />
-      <div className="placement-stage__actions">
-        <button
-          type="button"
-          className="btn btn--amber"
-          onClick={onRecall}
-          disabled={busy || !context || context.placements.length === 0}
-        >
-          {t('window.restoreHome')}
-        </button>
-        <button
-          type="button"
-          className="btn"
-          onClick={onMove}
-          disabled={
-            busy || !context || !context.canMoveToDisplay || context.placements.length === 0
-          }
-        >
-          {t('window.moveAndRestore')}
-        </button>
-        <span className="placement-stage__history">
+      </header>
+      <div className="placement-stage">
+        <div className="placement-stage__identity">
+          <span className="placement-stage__initial" aria-hidden="true">
+            {initial}
+          </span>
+          <div>
+            <span className="placement-stage__eyebrow">{t('window.focusedApp')}</span>
+            <strong title={context?.application.bundleId}>
+              {context?.application.name ?? t('window.noFocusedApp')}
+            </strong>
+            {context && <small>{t('window.rememberedCount', { count: remembered })}</small>}
+          </div>
+        </div>
+        <WorkAreaPreview context={context} activeSlot={activeSlot} />
+        <div className="placement-stage__actions">
           <button
             type="button"
-            className="btn btn--ghost"
-            onClick={onUndo}
-            disabled={busy || !history.canUndo}
+            className="btn btn--amber"
+            onClick={onRecall}
+            disabled={busy || !context || context.placements.length === 0}
           >
-            {t('common.undo')}
+            {t('window.restoreHome')}
           </button>
           <button
             type="button"
-            className="btn btn--ghost"
-            onClick={onRedo}
-            disabled={busy || !history.canRedo}
+            className="btn"
+            onClick={onMove}
+            disabled={
+              busy || !context || !context.canMoveToDisplay || context.placements.length === 0
+            }
           >
-            {t('common.redo')}
+            {t('window.moveAndRestore')}
           </button>
-        </span>
+          <span className="placement-stage__history">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={onUndo}
+              disabled={busy || !history.canUndo}
+            >
+              {t('common.undo')}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={onRedo}
+              disabled={busy || !history.canRedo}
+            >
+              {t('common.redo')}
+            </button>
+          </span>
+        </div>
       </div>
     </section>
   );

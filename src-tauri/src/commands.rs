@@ -119,6 +119,23 @@ pub async fn save_settings(
         previous.command_ime_switch_enabled != settings.command_ime_switch_enabled;
     *state.settings.lock_safe() = settings.clone();
 
+    // Global shortcuts belong to keyboard customization too. Rebuild them
+    // immediately when the master switch changes so turning it off releases
+    // every system registration and turning it on restores the saved set.
+    if keyboard_toggled {
+        let shortcut_result = shortcuts::register_all(&app, state.inner());
+        if let Err(error) = &shortcut_result {
+            tracing::warn!(%error, "failed to reconcile global shortcuts after keyboard toggle");
+        }
+    }
+    // Keep reporting a previous mismatch on unrelated saves. The warning is
+    // cleared only by a later successful registration pass (keyboard toggle,
+    // shortcut save/delete, or recorder resume), not merely because this save
+    // happened not to touch shortcuts.
+    if state.shortcut_registration_incomplete() {
+        apply_warnings.push("globalShortcuts");
+    }
+
     // Broadcast the new settings so the window's provider adopts them — keeping
     // its snapshot in step with any change applied out of band (e.g. a future
     // tray-driven toggle) rather than only the optimistic update it just made.

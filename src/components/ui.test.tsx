@@ -1,10 +1,16 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { MasterSwitchHeader, SwitchRow } from './ui';
+import {
+  FeatureContent,
+  FeaturePageHeader,
+  PermissionStatus,
+  SegmentedPageNav,
+  SwitchRow,
+} from './ui';
 
 describe('SwitchRow', () => {
-  it('shows the title and description and toggles to the opposite value', () => {
+  it('associates its explanation with the switch and toggles the value', () => {
     const onChange = vi.fn();
     render(
       <SwitchRow
@@ -15,45 +21,153 @@ describe('SwitchRow', () => {
       />,
     );
 
-    expect(screen.getByText('Launch at login')).toBeInTheDocument();
-    expect(screen.getByText('Open on sign-in')).toBeInTheDocument();
-
-    // The switch borrows the title as its accessible name when none is given.
     const toggle = screen.getByRole('switch', { name: 'Launch at login' });
+    expect(toggle).toHaveAccessibleDescription('Open on sign-in');
     fireEvent.click(toggle);
     expect(onChange).toHaveBeenCalledWith(true);
   });
 });
 
-describe('MasterSwitchHeader', () => {
-  it('offers a way back to the active path when off', () => {
+describe('FeaturePageHeader', () => {
+  it('shows one concise introduction and uses only the master switch to turn a feature on', () => {
     const onChange = vi.fn();
     render(
-      <MasterSwitchHeader
-        title="Keyboard customization"
+      <FeaturePageHeader
+        title="Windows"
+        description="Configure saved positions, shortcuts, and mouse controls."
         checked={false}
         onChange={onChange}
-        offNote="Keyboard customization is off."
-        enableLabel="Turn on"
+        toggleLabel="Enable window placement"
+        onLabel="On"
+        offLabel="Off"
       />,
     );
 
-    expect(screen.getByText('Keyboard customization is off.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Turn on' }));
+    expect(screen.getByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(
+      screen.getByText('Configure saved positions, shortcuts, and mouse controls.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Off')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Turn On' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable window placement' }));
     expect(onChange).toHaveBeenCalledWith(true);
   });
+});
 
-  it('hides the off note when on', () => {
+describe('SegmentedPageNav', () => {
+  const items = [
+    { value: 'saved', label: 'Saved Positions' },
+    { value: 'shortcuts', label: 'Shortcuts' },
+    { value: 'mouse', label: 'Mouse' },
+  ] as const;
+
+  it('exposes the selected segment as a tab and changes it on click', () => {
+    const onChange = vi.fn();
     render(
-      <MasterSwitchHeader
-        title="Window management"
-        checked={true}
-        onChange={vi.fn()}
-        offNote="Window management is off."
-        enableLabel="Turn on"
+      <SegmentedPageNav
+        label="Window settings"
+        idBase="window-tabs"
+        value="saved"
+        onChange={onChange}
+        items={items}
       />,
     );
 
-    expect(screen.queryByText('Window management is off.')).not.toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: 'Window settings' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Saved Positions' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('tab', { name: 'Saved Positions' })).toHaveAttribute(
+      'aria-controls',
+      'window-tabs-panel',
+    );
+    expect(screen.getByRole('tab', { name: 'Shortcuts' })).toHaveAttribute(
+      'aria-selected',
+      'false',
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Shortcuts' }));
+    expect(onChange).toHaveBeenCalledWith('shortcuts');
+  });
+
+  it('moves and wraps with arrow keys while moving focus to the next segment', () => {
+    const onChange = vi.fn();
+    render(
+      <SegmentedPageNav
+        label="Window settings"
+        idBase="window-tabs"
+        value="saved"
+        onChange={onChange}
+        items={items}
+      />,
+    );
+
+    const saved = screen.getByRole('tab', { name: 'Saved Positions' });
+    const shortcuts = screen.getByRole('tab', { name: 'Shortcuts' });
+    const mouse = screen.getByRole('tab', { name: 'Mouse' });
+
+    saved.focus();
+    fireEvent.keyDown(saved, { key: 'ArrowRight' });
+    expect(onChange).toHaveBeenLastCalledWith('shortcuts');
+    expect(shortcuts).toHaveFocus();
+
+    saved.focus();
+    fireEvent.keyDown(saved, { key: 'ArrowLeft' });
+    expect(onChange).toHaveBeenLastCalledWith('mouse');
+    expect(mouse).toHaveFocus();
+  });
+});
+
+describe('FeatureContent', () => {
+  it('keeps an off feature visible while disabling its controls', () => {
+    const { rerender } = render(
+      <FeatureContent enabled={false}>
+        <p>Saved positions remain visible</p>
+        <button type="button">Replace position</button>
+      </FeatureContent>,
+    );
+
+    expect(screen.getByText('Saved positions remain visible')).toBeInTheDocument();
+    expect(screen.getByRole('group')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: 'Replace position' })).toBeDisabled();
+
+    rerender(
+      <FeatureContent enabled>
+        <p>Saved positions remain visible</p>
+        <button type="button">Replace position</button>
+      </FeatureContent>,
+    );
+    expect(screen.getByRole('group')).toHaveAttribute('aria-disabled', 'false');
+    expect(screen.getByRole('button', { name: 'Replace position' })).toBeEnabled();
+  });
+});
+
+describe('PermissionStatus', () => {
+  it('distinguishes ready from attention and opens details from the attention state', () => {
+    const onClick = vi.fn();
+    const { rerender } = render(
+      <PermissionStatus
+        ready
+        readyLabel="Permissions: Ready"
+        attentionLabel="Permissions: Needs attention"
+        onClick={onClick}
+      />,
+    );
+
+    expect(screen.getByText('Permissions: Ready')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+
+    rerender(
+      <PermissionStatus
+        ready={false}
+        readyLabel="Permissions: Ready"
+        attentionLabel="Permissions: Needs attention"
+        onClick={onClick}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions: Needs attention' }));
+    expect(onClick).toHaveBeenCalledOnce();
   });
 });

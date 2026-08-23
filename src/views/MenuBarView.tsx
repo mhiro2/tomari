@@ -1,60 +1,99 @@
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { Chip, Group, MasterSwitchHeader, Toggle } from '../components/ui';
+import {
+  FeatureContent,
+  FeaturePageHeader,
+  SegmentedPageNav,
+  SettingsList,
+  SettingsRow,
+  StatusLabel,
+} from '../components/ui';
 import * as api from '../lib/api';
 import { useT } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
 import type { MenuBarInventory, MenuBarItem, MenuBarStatus } from '../lib/types';
 
-/** The auto-collapse delays offered; 0 means the timer is off. */
 const AUTO_COLLAPSE_CHOICES = [0, 5, 15, 30] as const;
+type MenuBarTab = 'items' | 'behavior';
 
 export function MenuBarView() {
   const t = useT();
   const { settings, update } = useSettings();
+  const [tab, setTab] = useState<MenuBarTab>('items');
   const [collapsed, setCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
   const [inventory, setInventory] = useState<MenuBarInventory | null>(null);
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [inventoryError, setInventoryError] = useState(false);
+  const runtimeEnabled = useRef<boolean | null>(null);
+  const inventoryRequest = useRef(0);
+  const activeInventoryRequest = useRef<number | null>(null);
 
-  // The state also changes from the menu bar item itself, the tray and a
-  // hotkey, so pull once on mount and follow the event after that.
-  useEffect(() => {
-    void api
-      .getMenuBar()
-      .then((s) => setCollapsed(s.collapsed))
-      .catch(() => {});
-    const unlisten = listen<MenuBarStatus>('tomari:menu-bar-changed', (e) =>
-      setCollapsed(e.payload.collapsed),
-    );
-    return () => void unlisten.then((fn) => fn());
+  const refreshInventory = useCallback(async () => {
+    const request = ++inventoryRequest.current;
+    activeInventoryRequest.current = request;
+    setInventoryBusy(true);
+    setInventoryError(false);
+    try {
+      const next = await api.listMenuBarItems();
+      if (request === inventoryRequest.current) setInventory(next);
+    } catch {
+      if (request === inventoryRequest.current) setInventoryError(true);
+    } finally {
+      if (activeInventoryRequest.current === request) activeInventoryRequest.current = null;
+      setInventoryBusy(activeInventoryRequest.current !== null);
+    }
   }, []);
 
   useEffect(() => {
-    if (!settings?.menuBarTidyEnabled) {
-      setInventory(null);
-      return;
-    }
     let cancelled = false;
-    setInventoryBusy(true);
-    setInventoryError(false);
-    async function loadInventory() {
-      try {
-        const next = await api.listMenuBarItems();
-        if (!cancelled) setInventory(next);
-      } catch {
-        if (!cancelled) setInventoryError(true);
-      } finally {
-        if (!cancelled) setInventoryBusy(false);
+    let eventApplied = false;
+    const applyStatus = (status: MenuBarStatus) => {
+      if (cancelled) return;
+      setCollapsed(status.collapsed);
+      const wasEnabled = runtimeEnabled.current;
+      runtimeEnabled.current = status.enabled;
+      if (status.enabled && wasEnabled !== true) {
+        void refreshInventory();
+      } else if (!status.enabled) {
+        // An in-flight scan belongs to the old runtime. Invalidate it so an
+        // off/on cycle never exposes inventory from before the new divider.
+        inventoryRequest.current += 1;
+        activeInventoryRequest.current = null;
+        setInventory(null);
+        setInventoryBusy(false);
+        setInventoryError(false);
       }
-    }
-    void loadInventory();
+    };
+
+    const unlisten = listen<MenuBarStatus>('tomari:menu-bar-changed', (event) => {
+      eventApplied = true;
+      applyStatus(event.payload);
+    });
+    const pullStatus = () => {
+      if (cancelled) return;
+      void api
+        .getMenuBar()
+        .then((status) => {
+          // A runtime event is newer than this startup pull even if the command
+          // response happens to arrive last.
+          if (!eventApplied) applyStatus(status);
+          return undefined;
+        })
+        .catch(() => {});
+    };
+    // Establish the event stream before taking the initial snapshot. Otherwise
+    // an enable published between the pull and listener registration is lost.
+    void unlisten.then(pullStatus, pullStatus);
     return () => {
       cancelled = true;
+      runtimeEnabled.current = null;
+      inventoryRequest.current += 1;
+      activeInventoryRequest.current = null;
+      void unlisten.then((fn) => fn());
     };
-  }, [settings?.menuBarTidyEnabled]);
+  }, [refreshInventory]);
 
   async function show(next: boolean) {
     if (busy) return;
@@ -63,122 +102,129 @@ export function MenuBarView() {
       const status = await api.setMenuBarCollapsed(!next);
       setCollapsed(status.collapsed);
     } catch {
-      // The backend owns the state and broadcasts every change; a failed call
-      // leaves the last known value in place rather than a guess.
+      // Runtime state remains backend-owned; keep the last confirmed value.
     } finally {
       setBusy(false);
     }
   }
 
-  async function refreshInventory() {
-    if (inventoryBusy) return;
-    setInventoryBusy(true);
-    setInventoryError(false);
-    try {
-      const next = await api.listMenuBarItems();
-      setInventory(next);
-    } catch {
-      setInventoryError(true);
-    } finally {
-      setInventoryBusy(false);
-    }
-  }
-
-  async function grantAccessibility() {
-    try {
-      await api.requestAccessibility();
-      await refreshInventory();
-    } catch {
-      setInventoryError(true);
-    }
-  }
-
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
-  const on = settings.menuBarTidyEnabled;
-
+  const enabled = settings.menuBarTidyEnabled;
   return (
     <div className="view">
-      <MasterSwitchHeader
+      <FeaturePageHeader
         title={t('menubar.title')}
-        checked={on}
-        onChange={(v) => update({ menuBarTidyEnabled: v })}
-        offNote={t('menubar.offNote')}
-        enableLabel={t('common.turnOn')}
+        description={t('menubar.pageDescription')}
+        checked={enabled}
+        onChange={(next) => update({ menuBarTidyEnabled: next })}
         toggleLabel={t('menubar.enable')}
+        onLabel={t('common.on')}
+        offLabel={t('common.off')}
       />
 
-      <div className={`view ${on ? '' : 'gated'}`} aria-disabled={!on} inert={!on}>
-        {/* How it is operated. No group label: it sits directly under the
-            master switch, which already says what this section is. */}
-        <Group>
-          {/* SwitchRow has no `disabled` prop, so this row is inlined to pass
-              `disabled` through and keep the busy guard from being bypassed. */}
-          <div className="item">
-            <div className="item__body">
-              <span className="item__title">{t('menubar.showToggle')}</span>
-              <span className="item__desc">{t('menubar.showDesc')}</span>
-            </div>
-            <div className="item__trail">
-              <Toggle
-                checked={!collapsed}
-                onChange={(v) => void show(v)}
-                disabled={busy}
-                label={t('menubar.showToggle')}
-              />
-            </div>
-          </div>
-          <div className="item">
-            <div className="item__body">
-              <span className="item__title">{t('menubar.autoCollapse')}</span>
-            </div>
-            <div className="item__trail">
-              <select
-                className="input"
-                value={settings.menuBarAutoCollapseSecs}
-                onChange={(e) => update({ menuBarAutoCollapseSecs: Number(e.target.value) })}
-                aria-label={t('menubar.autoCollapse')}
-              >
-                {AUTO_COLLAPSE_CHOICES.map((secs) => (
-                  <option key={secs} value={secs}>
-                    {secs === 0
-                      ? t('menubar.autoCollapseNever')
-                      : t('menubar.autoCollapseSecs', { secs: String(secs) })}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </Group>
+      <SegmentedPageNav
+        label={t('menubar.tabsLabel')}
+        idBase="menubar-tabs"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { value: 'items', label: t('menubar.tab.items') },
+          { value: 'behavior', label: t('menubar.tab.behavior') },
+        ]}
+      />
 
-        {/* The physical arrangement stays authoritative. Accessibility lets the
-            settings panel mirror it without pretending another app's status
-            items can be moved through a supported AppKit API. */}
-        <Group label={t('menubar.arrangeSection')} note={t('menubar.limitNote')}>
-          <div className="item mb-inventory__intro">
-            <div className="item__body">
-              <span className="item__desc">{t('menubar.inventoryIntro')}</span>
-            </div>
-            <div className="item__trail">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => void refreshInventory()}
-                disabled={inventoryBusy}
-              >
-                {t('menubar.refreshItems')}
-              </button>
-            </div>
-          </div>
-          <InventoryBody
+      <FeatureContent enabled={enabled}>
+        {tab === 'items' ? (
+          <MenuBarItemsPanel
             inventory={inventory}
             busy={inventoryBusy}
             failed={inventoryError}
-            onGrant={() => void grantAccessibility()}
+            onRefresh={() => void refreshInventory()}
           />
-        </Group>
-      </div>
+        ) : (
+          <MenuBarBehaviorPanel
+            collapsed={collapsed}
+            busy={busy}
+            autoCollapseSecs={settings.menuBarAutoCollapseSecs}
+            onShow={(next) => void show(next)}
+            onAutoCollapse={(seconds) => update({ menuBarAutoCollapseSecs: seconds })}
+          />
+        )}
+      </FeatureContent>
     </div>
+  );
+}
+
+function MenuBarItemsPanel({
+  inventory,
+  busy,
+  failed,
+  onRefresh,
+}: {
+  inventory: MenuBarInventory | null;
+  busy: boolean;
+  failed: boolean;
+  onRefresh: () => void;
+}) {
+  const t = useT();
+  const usable = inventory?.supported && inventory.permissionGranted && inventory.dividerAvailable;
+  const hidden = usable ? inventory.items.filter((item) => item.zone === 'hidden') : [];
+  const visible = usable ? inventory.items.filter((item) => item.zone === 'visible') : [];
+
+  return (
+    <div
+      id="menubar-tabs-panel"
+      className="tab-panel"
+      role="tabpanel"
+      aria-labelledby="menubar-tabs-items-tab"
+    >
+      <MenuBarDiagram hidden={hidden} visible={visible} />
+
+      <div className="arrangement-action">
+        <kbd>⌘</kbd>
+        <span>{t('menubar.arrangeInstruction')}</span>
+        <button type="button" className="btn" onClick={onRefresh} disabled={busy}>
+          {t('menubar.refreshItems')}
+        </button>
+      </div>
+
+      <InventoryBody inventory={inventory} busy={busy} failed={failed} />
+    </div>
+  );
+}
+
+function MenuBarDiagram({ hidden, visible }: { hidden: MenuBarItem[]; visible: MenuBarItem[] }) {
+  const t = useT();
+  return (
+    <figure className="menu-bar-stage" aria-label={t('menubar.diagramLabel')}>
+      <figcaption>{t('menubar.diagramLabel')}</figcaption>
+      <div className="menu-bar-strip">
+        <div className="menu-bar-strip__zone menu-bar-strip__zone--hidden">
+          <span className="menu-bar-strip__zone-label">{t('menubar.zoneHidden')}</span>
+          {hidden.slice(0, 4).map((item) => (
+            <MenuBarGlyph item={item} key={item.id} />
+          ))}
+        </div>
+        <span className="menu-bar-divider" aria-label="Tomari">
+          ≡
+        </span>
+        <div className="menu-bar-strip__zone menu-bar-strip__zone--visible">
+          {visible.slice(0, 5).map((item) => (
+            <MenuBarGlyph item={item} key={item.id} />
+          ))}
+          <span className="menu-bar-strip__zone-label">{t('menubar.zoneVisible')}</span>
+        </div>
+      </div>
+    </figure>
+  );
+}
+
+function MenuBarGlyph({ item }: { item: MenuBarItem }) {
+  return (
+    <span className="menu-bar-glyph" title={item.name}>
+      {Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? '•'}
+    </span>
   );
 }
 
@@ -186,57 +232,29 @@ function InventoryBody({
   inventory,
   busy,
   failed,
-  onGrant,
 }: {
   inventory: MenuBarInventory | null;
   busy: boolean;
   failed: boolean;
-  onGrant: () => void;
 }) {
   const t = useT();
-  if (busy && !inventory) {
-    return <p className="mb-inventory__state">{t('menubar.inventoryLoading')}</p>;
-  }
-  if (failed) {
-    return (
-      <p className="mb-inventory__state mb-inventory__state--error">
-        {t('menubar.inventoryError')}
-      </p>
-    );
-  }
+  if (busy && !inventory) return <p className="inventory-state">{t('menubar.inventoryLoading')}</p>;
+  if (failed)
+    return <p className="inventory-state inventory-state--error">{t('menubar.inventoryError')}</p>;
   if (!inventory) return null;
-  if (!inventory.supported) {
-    return <p className="mb-inventory__state">{t('menubar.inventoryUnsupported')}</p>;
-  }
-  if (!inventory.permissionGranted) {
-    return (
-      <div className="mb-inventory__permission">
-        <span>{t('menubar.inventoryPermission')}</span>
-        <button type="button" className="btn btn--amber" onClick={onGrant}>
-          {t('menubar.grantAccessibility')}
-        </button>
-      </div>
-    );
-  }
-  if (!inventory.dividerAvailable) {
-    return <p className="mb-inventory__state">{t('menubar.inventoryDividerMissing')}</p>;
-  }
+  if (!inventory.supported)
+    return <p className="inventory-state">{t('menubar.inventoryUnsupported')}</p>;
+  if (!inventory.permissionGranted)
+    return <p className="inventory-state">{t('menubar.inventoryPermission')}</p>;
+  if (!inventory.dividerAvailable)
+    return <p className="inventory-state">{t('menubar.inventoryDividerMissing')}</p>;
 
   const hidden = inventory.items.filter((item) => item.zone === 'hidden');
   const visible = inventory.items.filter((item) => item.zone === 'visible');
   return (
-    <div className="mb-inventory" aria-live="polite">
-      <div className="mb-map" aria-hidden="true">
-        <span className="mb-map__zone">
-          {t('menubar.zoneHidden')} · {hidden.length}
-        </span>
-        <span className="mb-map__divider">≡</span>
-        <span className="mb-map__zone">
-          {t('menubar.zoneVisible')} · {visible.length}
-        </span>
-      </div>
-      <InventorySection title={t('menubar.hiddenItems')} items={hidden} hidden />
-      <InventorySection title={t('menubar.visibleItems')} items={visible} />
+    <div className="inventory-grid" aria-live="polite">
+      <InventorySection title={t('menubar.hiddenItems')} items={hidden} tone="active" />
+      <InventorySection title={t('menubar.visibleItems')} items={visible} tone="muted" />
     </div>
   );
 }
@@ -244,41 +262,104 @@ function InventoryBody({
 function InventorySection({
   title,
   items,
-  hidden = false,
+  tone,
 }: {
   title: string;
   items: MenuBarItem[];
-  hidden?: boolean;
+  tone: 'active' | 'muted';
 }) {
   const t = useT();
   return (
-    <section className="mb-inventory__section">
-      <header className="mb-inventory__header">
-        <span>{title}</span>
+    <section className="inventory-column">
+      <header>
+        <h2>{title}</h2>
         <span>{t('menubar.itemCount', { count: String(items.length) })}</span>
       </header>
-      {items.length === 0 ? (
-        <p className="mb-inventory__empty">{t('menubar.inventoryEmpty')}</p>
-      ) : (
-        items.map((item) => (
-          <div className="mb-inventory__item" key={item.id}>
-            <span className="mb-inventory__glyph" aria-hidden="true">
-              {Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? '•'}
-            </span>
-            <span className="mb-inventory__identity">
-              <span className="mb-inventory__name">{item.name}</span>
-              {item.ownerName && (
-                <span className="mb-inventory__owner">
-                  {t('menubar.itemOwner', { owner: item.ownerName })}
-                </span>
-              )}
-            </span>
-            <Chip tone={hidden ? 'on' : 'muted'}>
-              {t(hidden ? 'menubar.zoneHidden' : 'menubar.zoneVisible')}
-            </Chip>
-          </div>
-        ))
-      )}
+      <div className="inventory-column__body">
+        {items.length === 0 ? (
+          <p className="inventory-empty">{t('menubar.inventoryEmpty')}</p>
+        ) : (
+          items.map((item) => (
+            <div className="inventory-item" key={item.id}>
+              <span className="inventory-item__glyph" aria-hidden="true">
+                {Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? '•'}
+              </span>
+              <span className="inventory-item__copy">
+                <strong>{item.name}</strong>
+                {item.ownerName && (
+                  <small>{t('menubar.itemOwner', { owner: item.ownerName })}</small>
+                )}
+              </span>
+              <StatusLabel tone={tone}>
+                {t(tone === 'active' ? 'menubar.zoneHidden' : 'menubar.zoneVisible')}
+              </StatusLabel>
+            </div>
+          ))
+        )}
+      </div>
     </section>
+  );
+}
+
+function MenuBarBehaviorPanel({
+  collapsed,
+  busy,
+  autoCollapseSecs,
+  onShow,
+  onAutoCollapse,
+}: {
+  collapsed: boolean;
+  busy: boolean;
+  autoCollapseSecs: number;
+  onShow: (next: boolean) => void;
+  onAutoCollapse: (seconds: number) => void;
+}) {
+  const t = useT();
+  return (
+    <div
+      id="menubar-tabs-panel"
+      className="tab-panel"
+      role="tabpanel"
+      aria-labelledby="menubar-tabs-behavior-tab"
+    >
+      <div className={`visibility-stage ${collapsed ? 'visibility-stage--collapsed' : ''}`}>
+        <div className="visibility-stage__bar">
+          <span className="visibility-stage__hidden">•••</span>
+          <span className="menu-bar-divider">≡</span>
+          <span>Wi-Fi&nbsp;&nbsp;◒&nbsp;&nbsp;12:34</span>
+        </div>
+        <strong>{t(collapsed ? 'menubar.iconsHidden' : 'menubar.iconsVisible')}</strong>
+      </div>
+
+      <SettingsList>
+        <SettingsRow
+          title={t(collapsed ? 'menubar.iconsHidden' : 'menubar.iconsVisible')}
+          trail={
+            <button type="button" className="btn" disabled={busy} onClick={() => onShow(collapsed)}>
+              {t(collapsed ? 'menubar.showAction' : 'menubar.hideAction')}
+            </button>
+          }
+        />
+        <SettingsRow
+          title={t('menubar.autoCollapse')}
+          trail={
+            <select
+              className="input"
+              value={autoCollapseSecs}
+              onChange={(event) => onAutoCollapse(Number(event.target.value))}
+              aria-label={t('menubar.autoCollapse')}
+            >
+              {AUTO_COLLAPSE_CHOICES.map((seconds) => (
+                <option key={seconds} value={seconds}>
+                  {seconds === 0
+                    ? t('menubar.autoCollapseNever')
+                    : t('menubar.autoCollapseSecs', { secs: String(seconds) })}
+                </option>
+              ))}
+            </select>
+          }
+        />
+      </SettingsList>
+    </div>
   );
 }

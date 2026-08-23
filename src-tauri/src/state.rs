@@ -84,6 +84,11 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     /// Registered global shortcuts mapped to the action they fire.
     pub shortcuts: Mutex<HashMap<Shortcut, AppAction>>,
+    /// Whether the most recent registration pass left the OS shortcut set out
+    /// of step with the stored keyboard configuration. Kept separately from
+    /// the dispatch map because an unregister failure can leave registrations
+    /// live while dispatch is still blocked by the keyboard master switch.
+    shortcut_registration_incomplete: AtomicBool,
     /// Reversible window mutations, in memory only because handles are
     /// meaningless across a relaunch.
     window_history: Mutex<WindowHistory>,
@@ -142,6 +147,7 @@ impl AppState {
             windows,
             settings: Mutex::new(settings),
             shortcuts: Mutex::new(HashMap::new()),
+            shortcut_registration_incomplete: AtomicBool::new(false),
             window_history: Mutex::new(WindowHistory::default()),
             placement_edit_history: Mutex::new(Vec::new()),
             last_snap: Mutex::new(None),
@@ -172,6 +178,16 @@ impl AppState {
     /// the in-memory engines never disagree with the database.
     pub fn lock_config_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
         self.config_mutation.lock_safe()
+    }
+
+    pub(crate) fn set_shortcut_registration_incomplete(&self, incomplete: bool) {
+        self.shortcut_registration_incomplete
+            .store(incomplete, Ordering::Relaxed);
+    }
+
+    pub(crate) fn shortcut_registration_incomplete(&self) -> bool {
+        self.shortcut_registration_incomplete
+            .load(Ordering::Relaxed)
     }
 
     /// The cached display geometry for drag-to-snap (`(full_frame, work_area)`

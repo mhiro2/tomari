@@ -1,20 +1,15 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider } from '../lib/settings';
-import type { AppSettings, Hotkey, ModifierRule, PermissionsChanged } from '../lib/types';
+import type { AppSettings, Hotkey, ModifierRule } from '../lib/types';
 import { KeyboardView } from './KeyboardView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
-
-// vitest.setup.ts stubs `listen` as a permanent no-op; capture the callback
-// here so tests can drive the "tomari:permissions-changed" event directly.
-const { listen } = await import('@tauri-apps/api/event');
-const mockListen = vi.mocked(listen);
 
 const SETTINGS: AppSettings = {
   launchAtLogin: false,
@@ -35,6 +30,7 @@ const RULE: ModifierRule = {
   label: 'Caps Lock',
   modifier: 'capsLock',
   side: 'either',
+  remapTo: 'control',
   hyper: false,
   tap: { type: 'noOp' },
   enabled: false,
@@ -59,6 +55,11 @@ const WINDOW_HOTKEY: Hotkey = {
 // KeyboardView reads the master switch from the shared settings provider.
 function renderView(ui: ReactElement) {
   return render(<SettingsProvider>{ui}</SettingsProvider>);
+}
+
+async function openShortcuts() {
+  const tabs = await screen.findByRole('tablist');
+  fireEvent.click(within(tabs).getByRole('tab', { name: 'Shortcuts' }));
 }
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
@@ -88,24 +89,56 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
 }
 
 describe('KeyboardView', () => {
-  let permissionsChanged: ((payload: PermissionsChanged) => void) | undefined;
-
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
-    permissionsChanged = undefined;
-    mockListen.mockReset();
-    mockListen.mockImplementation((event, handler) => {
-      if (event === 'tomari:permissions-changed') {
-        permissionsChanged = (payload) =>
-          (handler as (e: { event: string; id: number; payload: unknown }) => void)({
-            event,
-            id: 0,
-            payload,
-          });
-      }
-      return Promise.resolve(() => {});
-    });
+  });
+
+  it('presents modifier behavior as a four-column mapping and shows the Command-key map', async () => {
+    renderView(<KeyboardView />);
+
+    const table = await screen.findByRole('table');
+    expect(within(table).getByRole('columnheader', { name: 'Key' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: 'Tap' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: 'Hold' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: 'On' })).toBeInTheDocument();
+    expect(within(table).getByRole('rowheader', { name: /Caps Lock/ })).toBeInTheDocument();
+    expect(within(table).getByText('Used as Control')).toBeInTheDocument();
+
+    expect(screen.getByRole('heading', { name: 'Input switching' })).toBeInTheDocument();
+    expect(screen.getByText('Left Command')).toBeInTheDocument();
+    expect(screen.getByText('English')).toBeInTheDocument();
+    expect(screen.getByText('Right Command')).toBeInTheDocument();
+    expect(screen.getByText('Japanese')).toBeInTheDocument();
+  });
+
+  it('keeps the modifier map visible but disables its inputs when Keyboard is off', async () => {
+    mockCommands({ get_settings: { ...SETTINGS, keyboardEnabled: false } });
+
+    renderView(<KeyboardView />);
+
+    const table = await screen.findByRole('table');
+    expect(within(table).getByRole('rowheader', { name: /Caps Lock/ })).toBeInTheDocument();
+    expect(await screen.findByLabelText('Tap action for Caps Lock')).toBeDisabled();
+    expect(screen.getByLabelText('Enable Caps Lock')).toBeDisabled();
+    expect(screen.getByLabelText('Enable Modifier keys and shortcuts')).not.toBeDisabled();
+    expect(screen.getByLabelText('Enable Modifier keys and shortcuts')).toHaveAttribute(
+      'aria-checked',
+      'false',
+    );
+  });
+
+  it('opens the shortcut builder only after the add-shortcut action', async () => {
+    renderView(<KeyboardView />);
+    await openShortcuts();
+
+    expect(screen.queryByRole('textbox', { name: 'Shortcut label' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Shortcut' }));
+    expect(screen.getByRole('textbox', { name: 'Shortcut label' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel adding shortcut' }));
+    expect(screen.queryByRole('textbox', { name: 'Shortcut label' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Shortcut' })).toBeInTheDocument();
   });
 
   it('shows an error when the initial modifier rules and hotkeys load fails', async () => {
@@ -117,6 +150,7 @@ describe('KeyboardView', () => {
     renderView(<KeyboardView />);
 
     expect(await screen.findByText('boom')).toBeInTheDocument();
+    await openShortcuts();
     expect(await screen.findByText('kaboom')).toBeInTheDocument();
   });
 
@@ -235,7 +269,8 @@ describe('KeyboardView', () => {
     });
 
     renderView(<KeyboardView />);
-    const toggle = await screen.findByLabelText('Enable Toggle panel');
+    await openShortcuts();
+    const toggle = await screen.findByLabelText('Enable Toggle Tomari');
     fireEvent.click(toggle);
     expect(toggle).toBeDisabled();
 
@@ -248,71 +283,27 @@ describe('KeyboardView', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
-  it('shows the Input Monitoring banner when it is not granted', async () => {
-    mockCommands({ input_monitoring_status: false });
-
-    renderView(<KeyboardView />);
-
-    expect(await screen.findByText('Input Monitoring access needed')).toBeInTheDocument();
-  });
-
-  it('does not show the Input Monitoring banner once it is granted', async () => {
-    mockCommands({ input_monitoring_status: true });
-
-    renderView(<KeyboardView />);
-
-    // Wait for the initial load to settle before asserting the banner's absence.
-    await screen.findByText('Caps Lock');
-    expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
-  });
-
-  it('hides the Input Monitoring banner once "tomari:permissions-changed" reports it granted', async () => {
-    mockCommands({ input_monitoring_status: false });
-
-    renderView(<KeyboardView />);
-    expect(await screen.findByText('Input Monitoring access needed')).toBeInTheDocument();
-
-    permissionsChanged?.({ accessibility: true, inputMonitoring: true });
-
-    await waitFor(() => {
-      expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
-    });
-  });
-
-  it('requests Input Monitoring access when the grant button is clicked', async () => {
-    mockCommands({ input_monitoring_status: false, request_input_monitoring: true });
-
-    renderView(<KeyboardView />);
-    fireEvent.click(await screen.findByText('Grant Access'));
-
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('request_input_monitoring');
-    });
-    await waitFor(() => {
-      expect(screen.queryByText('Input Monitoring access needed')).not.toBeInTheDocument();
-    });
-  });
-
   it('requires a second click to delete a hotkey, and the first click can be backed out of', async () => {
     mockCommands();
     renderView(<KeyboardView />);
+    await openShortcuts();
 
-    const deleteButton = await screen.findByLabelText('Delete Toggle panel');
+    const deleteButton = await screen.findByLabelText('Delete Toggle Tomari');
     fireEvent.click(deleteButton);
 
     // Armed, but not yet deleted.
     expect(mockInvoke.mock.calls.filter((c) => c[0] === 'delete_hotkey')).toHaveLength(0);
-    const confirmButton = await screen.findByLabelText('Delete Toggle panel?');
+    const confirmButton = await screen.findByLabelText('Delete Toggle Tomari?');
     expect(confirmButton).toHaveTextContent('Delete?');
 
     // Escape backs out without deleting.
     fireEvent.keyDown(confirmButton, { key: 'Escape' });
-    expect(await screen.findByLabelText('Delete Toggle panel')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Delete Toggle Tomari')).toBeInTheDocument();
     expect(mockInvoke.mock.calls.filter((c) => c[0] === 'delete_hotkey')).toHaveLength(0);
 
     // Arm again, then confirm.
-    fireEvent.click(await screen.findByLabelText('Delete Toggle panel'));
-    fireEvent.click(await screen.findByLabelText('Delete Toggle panel?'));
+    fireEvent.click(await screen.findByLabelText('Delete Toggle Tomari'));
+    fireEvent.click(await screen.findByLabelText('Delete Toggle Tomari?'));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('delete_hotkey', { id: HOTKEY.id });
@@ -325,13 +316,17 @@ describe('KeyboardView', () => {
     renderView(<KeyboardView />);
 
     expect(await screen.findByText('No modifier keys to configure.')).toBeInTheDocument();
-    expect(await screen.findByText('No global shortcuts yet — add one below.')).toBeInTheDocument();
+    await openShortcuts();
+    expect(
+      await screen.findByText('No global shortcuts yet. Use Add Shortcut to create one.'),
+    ).toBeInTheDocument();
   });
 
   it('leaves window shortcuts to the contextual Windows section', async () => {
     mockCommands({ list_hotkeys: [HOTKEY, WINDOW_HOTKEY] });
 
     renderView(<KeyboardView />);
+    await openShortcuts();
 
     expect(await screen.findByText('Toggle panel')).toBeInTheDocument();
     expect(screen.queryByText('Restore editor position')).not.toBeInTheDocument();

@@ -1,5 +1,5 @@
-// The permission-setup checklist, shown in place of the tabs while a
-// permission is missing. Permission state lives in App (fed by the initial
+// The focused permission checklist, opened from the persistent reminder while
+// a permission is missing. Permission state lives in App (fed by the initial
 // setup_status pull and "tomari:permissions-changed"); this view only renders
 // it and forwards grant requests, reporting an immediate grant back up so the
 // row flips without waiting for the backend's next poll tick.
@@ -35,8 +35,10 @@ export function SetupView({
   const t = useT();
   const { settings } = useSettings();
   const [error, setError] = useState<string | null>(null);
+  const [requesting, setRequesting] = useState<keyof SetupPermissions | null>(null);
+  const [requested, setRequested] = useState<Partial<Record<keyof SetupPermissions, boolean>>>({});
   const allGranted = permissions.accessibility && permissions.inputMonitoring;
-  // The view replaces the tabs (often unmounting the very button that opened
+  // The view replaces the shell (often unmounting the very button that opened
   // it), so move focus to the heading — otherwise keyboard and screen-reader
   // users are left focused on nothing.
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -67,12 +69,17 @@ export function SetupView({
   }, []);
 
   async function request(key: keyof SetupPermissions, call: () => Promise<boolean>) {
+    if (requesting !== null) return;
+    setRequesting(key);
+    setError(null);
     try {
       const ok = await call();
       if (ok) onGranted({ [key]: true });
-      setError(null);
+      else setRequested((current) => ({ ...current, [key]: true }));
     } catch (e) {
       setError(formatCmdError(e, t));
+    } finally {
+      setRequesting(null);
     }
   }
 
@@ -100,12 +107,18 @@ export function SetupView({
           granted={permissions.accessibility}
           title={t('setup.accessibility')}
           why={t('setup.accessibilityWhy')}
+          busy={requesting === 'accessibility'}
+          disabled={requesting !== null}
+          requested={requested.accessibility === true}
           onRequest={() => void request('accessibility', api.requestAccessibility)}
         />
         <PermissionRow
           granted={permissions.inputMonitoring}
           title={t('setup.inputMonitoring')}
           why={t('setup.inputMonitoringWhy')}
+          busy={requesting === 'inputMonitoring'}
+          disabled={requesting !== null}
+          requested={requested.inputMonitoring === true}
           onRequest={() => void request('inputMonitoring', api.requestInputMonitoring)}
         />
       </Group>
@@ -161,11 +174,17 @@ function PermissionRow({
   granted,
   title,
   why,
+  busy,
+  disabled,
+  requested,
   onRequest,
 }: {
   granted: boolean;
   title: string;
   why: string;
+  busy: boolean;
+  disabled: boolean;
+  requested: boolean;
   onRequest: () => void;
 }) {
   const t = useT();
@@ -174,20 +193,24 @@ function PermissionRow({
       <div className="item__body">
         <span className="item__title">{title}</span>
         <span className="item__desc">{why}</span>
+        {!granted && requested && (
+          <span className="item__desc permission-row__followup">{t('setup.returnHint')}</span>
+        )}
       </div>
       <div className="item__trail">
         {!granted && (
           <button
             type="button"
             className="btn btn--primary"
-            // Both rows share the visible "Grant Access" label; the accessible
+            // Both rows share the visible System Settings action; the accessible
             // name keeps that label verbatim (so voice control still matches
             // it) and appends the permission so the buttons stay
             // distinguishable out of context.
             aria-label={t('setup.grantFor', { name: title })}
             onClick={onRequest}
+            disabled={disabled}
           >
-            {t('setup.grant')}
+            {t(busy ? 'setup.requesting' : requested ? 'setup.openAgain' : 'setup.grant')}
           </button>
         )}
         {/* The live region (<output> = role "status") is mounted empty from

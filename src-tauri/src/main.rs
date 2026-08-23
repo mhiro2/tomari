@@ -83,8 +83,8 @@ fn main() {
                     let Some(state) = app.try_state::<AppState>() else {
                         return;
                     };
-                    let entry = state.shortcuts.lock_safe().get(shortcut).cloned();
-                    let Some(action) = entry else {
+                    let Some(action) = shortcuts::action_for_shortcut(state.inner(), shortcut)
+                    else {
                         return;
                     };
 

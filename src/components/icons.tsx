@@ -52,10 +52,16 @@ const SHAPES: Record<SectionName, ReactNode> = {
 };
 
 /** The icon for one sidebar section. Decorative: the row carries the name. */
-export function SectionIcon({ name }: { name: SectionName }) {
+export function SectionIcon({
+  name,
+  className = 'nav-item__icon',
+}: {
+  name: SectionName;
+  className?: string;
+}) {
   return (
     <svg
-      className="nav-item__icon"
+      className={className}
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
@@ -65,6 +71,24 @@ export function SectionIcon({ name }: { name: SectionName }) {
       aria-hidden="true"
     >
       {SHAPES[name]}
+    </svg>
+  );
+}
+
+/** A compact version of the app icon's four resting frames and amber marker. */
+export function BrandIcon() {
+  return (
+    <svg className="brand__icon" viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="3" y="3" width="26" height="26" rx="8" fill="currentColor" opacity="0.08" />
+      <path
+        d="M8 14V8h6M18 8h6v6M24 18v6h-6M14 24H8v-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <rect className="brand__icon-marker" x="14" y="14" width="6" height="6" rx="1.8" />
     </svg>
   );
 }

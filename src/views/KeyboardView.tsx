@@ -1,14 +1,19 @@
-import { listen } from '@tauri-apps/api/event';
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 
 import { AddHotkeyForm, HotkeyRow, type HotkeyActionOption } from '../components/HotkeyEditor';
-import { Banner, EntityRow, Group, MasterSwitchHeader, Toggle } from '../components/ui';
+import {
+  FeatureContent,
+  FeaturePageHeader,
+  SegmentedPageNav,
+  SettingsList,
+  Toggle,
+} from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { actionLabel, modifierLabel, modifierWithSide } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { AppAction, Hotkey, ModifierRule, PermissionsChanged } from '../lib/types';
+import type { AppAction, Hotkey, ModifierRule } from '../lib/types';
 
 function isWindowAction(action: AppAction): boolean {
   return [
@@ -22,23 +27,17 @@ function isWindowAction(action: AppAction): boolean {
   ].includes(action.type);
 }
 
-/** One-line description of what a modifier rule does, derived from the rule
- * itself (not a stored label) so it reads naturally in either language. */
-function modifierDesc(rule: ModifierRule, t: Translator): string {
-  const hasTap = rule.tap.type !== 'noOp';
+/** The role a key keeps while held or used in a chord. */
+function heldModifierLabel(rule: ModifierRule, t: Translator): string {
   if (rule.hyper) {
-    return hasTap
-      ? t('keyboard.tapHold', { action: actionLabel(rule.tap, t), modifier: 'Hyper (⌃⌥⇧⌘)' })
-      : t('keyboard.usedAsHyper');
+    return t('keyboard.usedAsHyper');
   }
-  if (rule.remapTo) {
-    const modifier = modifierLabel(rule.remapTo);
-    return hasTap
-      ? t('keyboard.tapHold', { action: actionLabel(rule.tap, t), modifier })
-      : t('keyboard.usedAs', { modifier });
-  }
-  return hasTap ? t('keyboard.tapFor', { action: actionLabel(rule.tap, t) }) : '';
+  return t('keyboard.usedAs', {
+    modifier: modifierLabel(rule.remapTo ?? rule.modifier),
+  });
 }
+
+type KeyboardTab = 'modifiers' | 'shortcuts';
 
 type TapActionKey = 'none' | 'panel' | 'restoreWindow' | 'preventSleep' | 'menuBar';
 
@@ -87,16 +86,17 @@ function clearSaving(
   });
 }
 
-// `onOpenSetup` swaps the tabs for the permission-setup checklist; the banner
-// only offers it when the shell provides one (it renders standalone in tests).
-export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
+export function KeyboardView() {
   const t = useT();
   const { settings, update } = useSettings();
   const [rules, setRules] = useState<ModifierRule[]>([]);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
+  const [rulesLoaded, setRulesLoaded] = useState(false);
+  const [hotkeysLoaded, setHotkeysLoaded] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [modifierError, setModifierError] = useState<string | null>(null);
-  const [inputMonitoringGranted, setInputMonitoringGranted] = useState(true);
+  const [tab, setTab] = useState<KeyboardTab>('modifiers');
+  const [addingShortcut, setAddingShortcut] = useState(false);
   // Ids with a save in flight, so their row's controls can be disabled — this
   // both prevents a second click racing the first save and, since the base
   // for a patch is always read from these refs (not a render-captured prop),
@@ -124,21 +124,13 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
     void api
       .listModifierRules()
       .then(setRules)
-      .catch((e: unknown) => setModifierError(formatLoadError(e)));
+      .catch((e: unknown) => setModifierError(formatLoadError(e)))
+      .finally(() => setRulesLoaded(true));
     void api
       .listHotkeys()
       .then(setHotkeys)
-      .catch((e: unknown) => setShortcutError(formatLoadError(e)));
-    void api
-      .inputMonitoringStatus()
-      .then(setInputMonitoringGranted)
-      .catch((e: unknown) => setShortcutError(formatLoadError(e)));
-    // Accessibility/Input Monitoring are granted in System Settings, outside
-    // the app, so follow the backend's poll rather than requiring a reopen.
-    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (e) =>
-      setInputMonitoringGranted(e.payload.inputMonitoring),
-    );
-    return () => void unlisten.then((fn) => fn());
+      .catch((e: unknown) => setShortcutError(formatLoadError(e)))
+      .finally(() => setHotkeysLoaded(true));
   }, []);
 
   async function saveRulePatch(id: string, patch: Partial<ModifierRule>) {
@@ -205,15 +197,7 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   function addHotkey(hk: Hotkey) {
     setHotkeys((hs) => [...hs, hk]);
     setShortcutError(null);
-  }
-
-  async function grantInputMonitoring() {
-    try {
-      const ok = await api.requestInputMonitoring();
-      setInputMonitoringGranted(ok);
-    } catch (e) {
-      setShortcutError(formatCmdError(e, t));
-    }
+    setAddingShortcut(false);
   }
 
   if (!settings) return <div className="view">{t('common.loading')}</div>;
@@ -235,99 +219,236 @@ export function KeyboardView({ onOpenSetup }: { onOpenSetup?: () => void }) {
   ];
 
   return (
-    <div className="view">
-      <MasterSwitchHeader
-        title={t('settings.keyboardCustomization')}
+    <div className="view keyboard-view">
+      <FeaturePageHeader
+        title={t('app.nav.keyboard')}
+        description={t('keyboard.pageDescription')}
         checked={on}
         onChange={(v) => update({ keyboardEnabled: v })}
-        offNote={t('keyboard.offNote')}
-        enableLabel={t('common.turnOn')}
         toggleLabel={t('common.enable', { label: t('settings.keyboardCustomization') })}
+        onLabel={t('common.on')}
+        offLabel={t('common.off')}
       />
 
-      <div className={`view ${on ? '' : 'gated'}`} aria-disabled={!on} inert={!on}>
-        {!inputMonitoringGranted && (
-          <Banner tone="warn">
-            <div className="banner__body">
-              <strong>{t('keyboard.imNeeded')}</strong>
-              <p>{t('keyboard.imBody')}</p>
-            </div>
-            {onOpenSetup && (
-              <button type="button" className="btn btn--ghost" onClick={onOpenSetup}>
-                {t('setup.openSetup')}
-              </button>
-            )}
-            <button
-              type="button"
-              className="btn btn--primary"
-              onClick={() => void grantInputMonitoring()}
-            >
-              {t('window.grantAccess')}
-            </button>
-          </Banner>
-        )}
+      <SegmentedPageNav
+        label={t('keyboard.tabsLabel')}
+        idBase="keyboard-tabs"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { value: 'modifiers', label: t('keyboard.tab.modifiers') },
+          { value: 'shortcuts', label: t('keyboard.tab.shortcuts') },
+        ]}
+      />
 
-        <Group
-          label={t('keyboard.modifierKeys')}
-          note={
-            modifierError ? (
-              <span className="hint--err" role="alert">
-                {modifierError}
-              </span>
-            ) : (
-              t('keyboard.modifierHint')
-            )
-          }
-        >
-          {rules.length === 0 && <p className="hint">{t('keyboard.noModifierRules')}</p>}
-          {rules.map((rule) => (
-            <ModifierRow
-              key={rule.id}
-              rule={rule}
-              saving={savingRuleIds.has(rule.id)}
-              onToggle={() => void saveRulePatch(rule.id, { enabled: !rule.enabled })}
-              onTapAction={(action) => void saveRulePatch(rule.id, { tap: action })}
-            />
-          ))}
-          <EntityRow
-            lead={<div className="kbd-chip">⌘</div>}
-            title={t('keyboard.commandImeSwitch')}
-            sub={t('keyboard.commandImeSwitchDesc')}
-            trail={
-              <Toggle
-                checked={settings.commandImeSwitchEnabled}
-                onChange={(v) => update({ commandImeSwitchEnabled: v })}
-                label={t('common.enable', { label: t('keyboard.commandImeSwitch') })}
-              />
-            }
+      <FeatureContent enabled={on}>
+        {tab === 'modifiers' ? (
+          <ModifiersPanel
+            rules={rules}
+            loaded={rulesLoaded}
+            error={modifierError}
+            savingIds={savingRuleIds}
+            commandImeSwitchEnabled={settings.commandImeSwitchEnabled}
+            onToggle={(rule) => void saveRulePatch(rule.id, { enabled: !rule.enabled })}
+            onTapAction={(rule, action) => void saveRulePatch(rule.id, { tap: action })}
+            onCommandImeSwitch={(enabled) => update({ commandImeSwitchEnabled: enabled })}
           />
-        </Group>
-
-        <Group
-          label={t('keyboard.globalShortcuts')}
-          note={
-            shortcutError ? (
-              <span className="hint--err" role="alert">
-                {shortcutError}
-              </span>
-            ) : undefined
-          }
-        >
-          {keyboardHotkeys.length === 0 && <p className="hint">{t('keyboard.noHotkeys')}</p>}
-          {keyboardHotkeys.map((hk) => (
-            <HotkeyRow
-              key={hk.id}
-              hotkey={hk}
-              saving={savingHotkeyIds.has(hk.id)}
-              onAccelerator={(accel) => void saveHotkeyPatch(hk.id, { accelerator: accel })}
-              onToggle={() => void saveHotkeyPatch(hk.id, { enabled: !hk.enabled })}
-              onDelete={() => void removeHotkey(hk.id)}
-            />
-          ))}
-          <AddHotkeyForm options={shortcutOptions} onAdded={addHotkey} onError={setShortcutError} />
-        </Group>
-      </div>
+        ) : (
+          <ShortcutsPanel
+            hotkeys={keyboardHotkeys}
+            loaded={hotkeysLoaded}
+            error={shortcutError}
+            savingIds={savingHotkeyIds}
+            options={shortcutOptions}
+            adding={addingShortcut}
+            onStartAdding={() => setAddingShortcut(true)}
+            onCancelAdding={() => setAddingShortcut(false)}
+            onSave={(id, patch) => void saveHotkeyPatch(id, patch)}
+            onRemove={(id) => void removeHotkey(id)}
+            onAdded={addHotkey}
+            onError={setShortcutError}
+          />
+        )}
+      </FeatureContent>
     </div>
+  );
+}
+
+function ModifiersPanel({
+  rules,
+  loaded,
+  error,
+  savingIds,
+  commandImeSwitchEnabled,
+  onToggle,
+  onTapAction,
+  onCommandImeSwitch,
+}: {
+  rules: ModifierRule[];
+  loaded: boolean;
+  error: string | null;
+  savingIds: ReadonlySet<string>;
+  commandImeSwitchEnabled: boolean;
+  onToggle: (rule: ModifierRule) => void;
+  onTapAction: (rule: ModifierRule, action: AppAction) => void;
+  onCommandImeSwitch: (enabled: boolean) => void;
+}) {
+  const t = useT();
+  return (
+    <div
+      id="keyboard-tabs-panel"
+      className="keyboard-panel"
+      role="tabpanel"
+      aria-labelledby="keyboard-tabs-modifiers-tab"
+    >
+      <section className="keyboard-section">
+        <header className="keyboard-section__header">
+          <h2 id="keyboard-modifiers-title">{t('keyboard.modifierKeys')}</h2>
+        </header>
+        <SettingsList>
+          {!loaded && <p className="empty-row">{t('common.loading')}</p>}
+          {loaded && rules.length === 0 && (
+            <p className="empty-row">{t('keyboard.noModifierRules')}</p>
+          )}
+          {rules.length > 0 && (
+            <table className="modifier-table">
+              <thead>
+                <tr>
+                  <th scope="col">{t('keyboard.table.key')}</th>
+                  <th scope="col">{t('keyboard.table.tap')}</th>
+                  <th scope="col">{t('keyboard.table.hold')}</th>
+                  <th scope="col">{t('keyboard.table.enabled')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((rule) => (
+                  <ModifierRow
+                    key={rule.id}
+                    rule={rule}
+                    saving={savingIds.has(rule.id)}
+                    onToggle={() => onToggle(rule)}
+                    onTapAction={(action) => onTapAction(rule, action)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          )}
+        </SettingsList>
+        {error && (
+          <p className="hint hint--err" role="alert">
+            {error}
+          </p>
+        )}
+      </section>
+
+      <section className="keyboard-section" aria-labelledby="keyboard-ime-title">
+        <header className="keyboard-section__header">
+          <h2 id="keyboard-ime-title">{t('keyboard.inputSwitching')}</h2>
+        </header>
+        <SettingsList>
+          <div className="command-ime">
+            <div className="command-ime__map">
+              <span className="command-ime__binding">
+                <span className="kbd-chip">{t('keyboard.leftCommand')}</span>
+                <span className="command-ime__arrow">→</span>
+                <strong className="command-ime__target">{t('keyboard.imeEisu')}</strong>
+              </span>
+              <span className="command-ime__binding">
+                <span className="kbd-chip">{t('keyboard.rightCommand')}</span>
+                <span className="command-ime__arrow">→</span>
+                <strong className="command-ime__target">{t('keyboard.imeKana')}</strong>
+              </span>
+            </div>
+            <Toggle
+              checked={commandImeSwitchEnabled}
+              onChange={onCommandImeSwitch}
+              label={t('common.enable', { label: t('keyboard.commandImeSwitch') })}
+              describedBy="keyboard-ime-note"
+            />
+          </div>
+        </SettingsList>
+        <p className="hint" id="keyboard-ime-note">
+          {t('keyboard.commandImeSwitchNote')}
+        </p>
+      </section>
+    </div>
+  );
+}
+
+function ShortcutsPanel({
+  hotkeys,
+  loaded,
+  error,
+  savingIds,
+  options,
+  adding,
+  onStartAdding,
+  onCancelAdding,
+  onSave,
+  onRemove,
+  onAdded,
+  onError,
+}: {
+  hotkeys: Hotkey[];
+  loaded: boolean;
+  error: string | null;
+  savingIds: ReadonlySet<string>;
+  options: HotkeyActionOption[];
+  adding: boolean;
+  onStartAdding: () => void;
+  onCancelAdding: () => void;
+  onSave: (id: string, patch: Partial<Hotkey>) => void;
+  onRemove: (id: string) => void;
+  onAdded: (hotkey: Hotkey) => void;
+  onError: (message: string) => void;
+}) {
+  const t = useT();
+  return (
+    <section
+      id="keyboard-tabs-panel"
+      className="keyboard-panel"
+      role="tabpanel"
+      aria-labelledby="keyboard-tabs-shortcuts-tab"
+    >
+      <header className="keyboard-section__header keyboard-section__header--action">
+        <h2 id="keyboard-shortcuts-title">{t('keyboard.globalShortcuts')}</h2>
+        <button type="button" className="btn" onClick={onStartAdding} hidden={adding}>
+          {t('keyboard.addShortcut')}
+        </button>
+      </header>
+      <SettingsList>
+        {!loaded && <p className="empty-row">{t('common.loading')}</p>}
+        {loaded && hotkeys.length === 0 && <p className="empty-row">{t('keyboard.noHotkeys')}</p>}
+        {hotkeys.map((hotkey) => (
+          <HotkeyRow
+            key={hotkey.id}
+            hotkey={hotkey}
+            saving={savingIds.has(hotkey.id)}
+            onAccelerator={(accelerator) => onSave(hotkey.id, { accelerator })}
+            onToggle={() => onSave(hotkey.id, { enabled: !hotkey.enabled })}
+            onDelete={() => onRemove(hotkey.id)}
+          />
+        ))}
+      </SettingsList>
+      {adding && (
+        <div className="keyboard-shortcut-builder">
+          <AddHotkeyForm options={options} onAdded={onAdded} onError={onError} />
+          <button
+            type="button"
+            className="btn btn--ghost"
+            aria-label={t('keyboard.cancelAddShortcut')}
+            onClick={onCancelAdding}
+          >
+            {t('common.cancel')}
+          </button>
+        </div>
+      )}
+      {error && (
+        <p className="hint hint--err" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -345,43 +466,44 @@ function ModifierRow({
   const t = useT();
   const selected = tapActionKey(rule.tap);
   return (
-    <EntityRow
-      lead={<div className="kbd-chip">{modifierWithSide(rule.modifier, rule.side, t)}</div>}
-      title={modifierLabel(rule.modifier)}
-      sub={
-        <span className="modifier-rule__details">
-          <span>{modifierDesc(rule, t)}</span>
-          <label>
-            <span>{t('keyboard.tapAction')}</span>
-            <select
-              className="input input--compact"
-              value={selected}
-              onChange={(event) => onTapAction(tapAction(event.target.value as TapActionKey))}
-              disabled={saving}
-              aria-label={t('keyboard.tapActionFor', { modifier: modifierLabel(rule.modifier) })}
-            >
-              {selected === 'custom' && (
-                <option value="custom" disabled>
-                  {actionLabel(rule.tap, t)}
-                </option>
-              )}
-              <option value="none">{t('action.noOp')}</option>
-              <option value="panel">{t('action.togglePanel')}</option>
-              <option value="restoreWindow">{t('action.recallPlacement')}</option>
-              <option value="preventSleep">{t('action.toggleKeepAwake')}</option>
-              <option value="menuBar">{t('action.toggleMenuBar')}</option>
-            </select>
-          </label>
+    <tr>
+      <th scope="row">
+        <span className="modifier-table__key">
+          <span className="kbd-chip">{modifierWithSide(rule.modifier, rule.side, t)}</span>
+          <span>{modifierLabel(rule.modifier)}</span>
         </span>
-      }
-      trail={
+      </th>
+      <td>
+        <select
+          className="input input--compact"
+          value={selected}
+          onChange={(event) => onTapAction(tapAction(event.target.value as TapActionKey))}
+          disabled={saving}
+          aria-label={t('keyboard.tapActionFor', { modifier: modifierLabel(rule.modifier) })}
+        >
+          {selected === 'custom' && (
+            <option value="custom" disabled>
+              {actionLabel(rule.tap, t)}
+            </option>
+          )}
+          <option value="none">{t('action.noOp')}</option>
+          <option value="panel">{t('action.togglePanel')}</option>
+          <option value="restoreWindow">{t('action.recallPlacement')}</option>
+          <option value="preventSleep">{t('action.toggleKeepAwake')}</option>
+          <option value="menuBar">{t('action.toggleMenuBar')}</option>
+        </select>
+      </td>
+      <td>
+        <span className="modifier-table__hold">{heldModifierLabel(rule, t)}</span>
+      </td>
+      <td>
         <Toggle
           checked={rule.enabled}
           onChange={onToggle}
           disabled={saving}
           label={t('common.enable', { label: modifierLabel(rule.modifier) })}
         />
-      }
-    />
+      </td>
+    </tr>
   );
 }

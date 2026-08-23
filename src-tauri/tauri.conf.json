@@ -15,9 +15,11 @@
       {
         "label": "main",
         "title": "Tomari",
-        "width": 620,
+        "width": 940,
         "height": 720,
-        "resizable": false,
+        "minWidth": 860,
+        "minHeight": 620,
+        "resizable": true,
         "minimizable": false,
         "maximizable": false,
         "visible": false,

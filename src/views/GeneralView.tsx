@@ -1,7 +1,7 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { useEffect, useRef, useState } from 'react';
 
-import { Banner, Group, SwitchRow } from '../components/ui';
+import { Banner, FeaturePageHeader, SettingsList, SettingsRow, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
 import { cmdErrorMessage } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
@@ -98,7 +98,12 @@ export function GeneralView({
 
   return (
     <div className="view">
-      <Group label={t('settings.general')}>
+      <FeaturePageHeader
+        title={t('settings.general')}
+        description={t('settings.pageDescription')}
+      />
+
+      <SettingsList label={t('settings.startup')}>
         <SwitchRow
           title={t('settings.launchAtLogin')}
           checked={settings.launchAtLogin}
@@ -106,7 +111,7 @@ export function GeneralView({
         />
         <SwitchRow
           title={t('settings.showInMenuBar')}
-          desc={settings.showInMenuBar ? undefined : t('settings.hiddenHint')}
+          desc={!settings.showInMenuBar ? t('settings.hiddenHint') : undefined}
           checked={settings.showInMenuBar}
           onChange={(v) => {
             if (v) {
@@ -116,11 +121,9 @@ export function GeneralView({
             }
           }}
         />
-        <div className="item">
-          <div className="item__body">
-            <span className="item__title">{t('settings.language')}</span>
-          </div>
-          <div className="item__trail">
+        <SettingsRow
+          title={t('settings.language')}
+          trail={
             <select
               className="input"
               value={settings.language}
@@ -133,9 +136,9 @@ export function GeneralView({
                 </option>
               ))}
             </select>
-          </div>
-        </div>
-      </Group>
+          }
+        />
+      </SettingsList>
 
       {applyWarnings.length > 0 && (
         <Banner tone="warn">
@@ -183,24 +186,21 @@ export function GeneralView({
         </Banner>
       )}
 
-      <Group label={t('settings.externalControl')} note={t('settings.externalControlHint')}>
+      <SettingsList label={t('settings.externalControl')}>
         <SwitchRow
           title={t('settings.externalWindowActions')}
+          desc={t('settings.externalControlHint')}
           checked={settings.externalWindowActionsEnabled}
           onChange={(v) => update({ externalWindowActionsEnabled: v })}
         />
-      </Group>
+      </SettingsList>
 
-      <Group label={t('settings.maintenance')}>
-        <div className="item">
-          <div className="item__body">
-            <span className="item__title">
-              {t('settings.version')} {version}
-            </span>
-            {maintenanceDesc && <span className="item__desc">{maintenanceDesc}</span>}
-          </div>
-          <div className="item__trail">
-            {updateStatus.phase === 'available' || updateStatus.phase === 'installing' ? (
+      <SettingsList label={t('settings.maintenance')}>
+        <SettingsRow
+          title={`${t('settings.version')} ${version}`}
+          description={maintenanceDesc}
+          trail={
+            updateStatus.phase === 'available' || updateStatus.phase === 'installing' ? (
               <button
                 type="button"
                 className="btn btn--primary"
@@ -222,10 +222,10 @@ export function GeneralView({
                   ? t('settings.checking')
                   : t('settings.checkUpdates')}
               </button>
-            )}
-          </div>
-        </div>
-      </Group>
+            )
+          }
+        />
+      </SettingsList>
     </div>
   );
 }
@@ -240,6 +240,8 @@ function applyWarningText(code: string, t: Translator): string {
       return t('settings.applyWarning.menuBar');
     case 'keyboardTap':
       return t('settings.applyWarning.keyboardTap');
+    case 'globalShortcuts':
+      return t('settings.applyWarning.globalShortcuts');
     case 'dragToSnapTap':
       return t('settings.applyWarning.dragToSnapTap');
     case 'dragToMoveTap':

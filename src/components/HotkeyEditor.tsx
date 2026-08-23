@@ -6,7 +6,7 @@ import { actionLabel } from '../lib/format';
 import { useT } from '../lib/i18n';
 import type { AppAction, Hotkey } from '../lib/types';
 import { ShortcutRecorder } from './ShortcutRecorder';
-import { EntityRow, Toggle } from './ui';
+import { SettingsRow, Toggle } from './ui';
 
 export interface HotkeyActionOption {
   key: string;
@@ -29,6 +29,7 @@ export function HotkeyRow({
 }) {
   const t = useT();
   const [confirming, setConfirming] = useState(false);
+  const action = actionLabel(hotkey.action, t);
 
   function handleDeleteClick() {
     if (confirming) {
@@ -40,20 +41,18 @@ export function HotkeyRow({
   }
 
   return (
-    <EntityRow
-      lead={
-        <span inert={saving}>
-          <ShortcutRecorder
-            value={hotkey.accelerator}
-            onCapture={onAccelerator}
-            ariaLabel={t('keyboard.changeShortcut', { label: hotkey.label })}
-          />
-        </span>
-      }
-      title={hotkey.label}
-      sub={actionLabel(hotkey.action, t)}
+    <SettingsRow
+      title={action}
+      description={hotkey.label !== action ? hotkey.label : undefined}
       trail={
         <>
+          <span inert={saving}>
+            <ShortcutRecorder
+              value={hotkey.accelerator}
+              onCapture={onAccelerator}
+              ariaLabel={t('keyboard.changeShortcut', { label: action })}
+            />
+          </span>
           <button
             type="button"
             className={`btn btn--ghost ${confirming ? 'btn--warn' : ''}`}
@@ -68,8 +67,8 @@ export function HotkeyRow({
             disabled={saving}
             aria-label={
               confirming
-                ? t('common.deleteConfirm', { label: hotkey.label })
-                : t('keyboard.deleteShortcut', { label: hotkey.label })
+                ? t('common.deleteConfirm', { label: action })
+                : t('keyboard.deleteShortcut', { label: action })
             }
           >
             {confirming ? t('common.deleteConfirmShort') : '✕'}
@@ -78,7 +77,7 @@ export function HotkeyRow({
             checked={hotkey.enabled}
             onChange={onToggle}
             disabled={saving}
-            label={t('common.enable', { label: hotkey.label })}
+            label={t('common.enable', { label: action })}
           />
         </>
       }
@@ -129,33 +128,43 @@ export function AddHotkeyForm({
 
   return (
     <form className="add-form" onSubmit={(event) => void submit(event)}>
-      <input
-        className="input"
-        placeholder={t('common.label')}
-        value={label}
-        onChange={(event) => setLabel(event.target.value)}
-        aria-label={t('keyboard.shortcutLabelAria')}
-      />
-      <ShortcutRecorder
-        value={accelerator}
-        onCapture={setAccelerator}
-        ariaLabel={t('keyboard.recordShortcut')}
-      />
-      <select
-        className="input"
-        value={actionKey}
-        onChange={(event) => setActionKey(event.target.value)}
-        aria-label={t('keyboard.actionAria')}
-      >
-        {options.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
-        {t('common.add')}
-      </button>
+      <label className="add-form__field add-form__field--wide">
+        <span>{t('common.label')}</span>
+        <input
+          className="input"
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          aria-label={t('keyboard.shortcutLabelAria')}
+        />
+      </label>
+      <div className="add-form__field">
+        <span>{t('keyboard.recordShortcut')}</span>
+        <ShortcutRecorder
+          value={accelerator}
+          onCapture={setAccelerator}
+          ariaLabel={t('keyboard.recordShortcut')}
+        />
+      </div>
+      <label className="add-form__field">
+        <span>{t('keyboard.actionAria')}</span>
+        <select
+          className="input"
+          value={actionKey}
+          onChange={(event) => setActionKey(event.target.value)}
+          aria-label={t('keyboard.actionAria')}
+        >
+          {options.map((option) => (
+            <option key={option.key} value={option.key}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="add-form__actions">
+        <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
+          {t('common.add')}
+        </button>
+      </div>
     </form>
   );
 }

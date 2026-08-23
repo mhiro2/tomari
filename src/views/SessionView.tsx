@@ -1,7 +1,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useEffectEvent, useState } from 'react';
 
-import { Chip, Group, Toggle } from '../components/ui';
+import { Chip, FeaturePageHeader, SettingsList, SettingsRow } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { useT, type MessageKey } from '../lib/i18n';
@@ -62,50 +62,84 @@ export function SessionView() {
     }
   }
 
+  async function retryStatus() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await api.getKeepAwake());
+    } catch (e) {
+      setError(formatCmdError(e, t));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const active = status?.active ?? false;
+  const ready = status !== null;
   const lid = status?.lidClose ?? 'off';
   const chip = LID_CLOSE_CHIP[lid];
 
   return (
     <div className="view">
-      <Group>
-        {/* SwitchRow has no `disabled` prop, so this row is inlined here to pass
-            `disabled` straight to Toggle and keep the busy guard from being
-            bypassed by a stray click while the admin prompt is in flight. */}
-        <div className="item">
-          <div className="item__body">
-            <span className="item__title">{t('settings.keepAwakeToggle')}</span>
-            <span className="item__desc">{t('settings.keepAwakeHint')}</span>
-          </div>
-          <div className="item__trail">
-            <Toggle
-              checked={active}
-              onChange={(v) => void toggle(v)}
-              disabled={busy}
-              label={busy ? t('settings.working') : t('settings.keepAwakeToggle')}
-            />
-          </div>
+      <FeaturePageHeader
+        title={t('settings.keepAwakeToggle')}
+        description={t('settings.sessionPageDescription')}
+        checked={active}
+        onChange={(next) => void toggle(next)}
+        toggleLabel={busy ? t('settings.working') : t('settings.keepAwakeAction')}
+        toggleDisabled={busy || !ready}
+        onLabel={t('common.on')}
+        offLabel={t('common.off')}
+      />
+
+      <div className={`session-state ${active ? 'session-state--active' : ''}`}>
+        <span className="session-state__mark" aria-hidden="true" />
+        <div>
+          <strong>
+            {ready
+              ? active
+                ? t('settings.keepAwakeActive')
+                : t('settings.keepAwakeInactive')
+              : t('common.loading')}
+          </strong>
+          <p>{t('settings.currentSessionHint')}</p>
         </div>
+      </div>
+
+      <SettingsList>
+        <SettingsRow
+          title={t('settings.keepAwakeAction')}
+          description={t('settings.keepAwakeHint')}
+        />
         {error && (
-          <div className="item">
-            <div className="item__body">
+          <SettingsRow
+            description={
               <span className="hint--err" role="alert">
                 {error}
               </span>
-            </div>
-          </div>
+            }
+            trail={
+              !ready && (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => void retryStatus()}
+                  disabled={busy}
+                >
+                  {t('common.retry')}
+                </button>
+              )
+            }
+          />
         )}
         {active && (
-          <div className="item">
-            <div className="item__body">
-              <span className="item__title">{t('settings.lidClose')}</span>
-            </div>
-            <div className="item__trail">
-              <Chip tone={chip.tone}>{t(chip.key)}</Chip>
-            </div>
-          </div>
+          <SettingsRow
+            title={t('settings.lidClose')}
+            trail={<Chip tone={chip.tone}>{t(chip.key)}</Chip>}
+          />
         )}
-      </Group>
+      </SettingsList>
     </div>
   );
 }

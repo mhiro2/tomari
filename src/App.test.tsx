@@ -1,22 +1,18 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
 import type { AppSettings, PermissionsChanged, SetupStatus } from './lib/types';
 
-// Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-
-// The General section reads the app version on mount; it goes through its own
-// module rather than the command bridge.
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(() => Promise.resolve('1.2.3')) }));
+
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
-
-// vitest.setup.ts stubs `listen` as a permanent no-op; capture the callback
-// here so tests can drive the "tomari:permissions-changed" event directly.
 const { listen } = await import('@tauri-apps/api/event');
 const mockListen = vi.mocked(listen);
+
+const LAST_SECTION_KEY = 'tomari.settings.lastSection';
 
 const SETTINGS: AppSettings = {
   launchAtLogin: false,
@@ -50,72 +46,112 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(SETTINGS);
       case 'setup_status':
         return Promise.resolve(ALL_GRANTED);
+      case 'save_settings':
+        return Promise.resolve({ applyWarnings: [] });
       case 'list_modifier_rules':
       case 'list_hotkeys':
         return Promise.resolve([]);
+      case 'get_window_history_status':
+        return Promise.resolve({ canUndo: false, canRedo: false });
       case 'input_monitoring_status':
       case 'accessibility_status':
         return Promise.resolve(true);
+      case 'get_keep_awake':
+        return Promise.resolve({ active: false, lidClose: 'off' });
       default:
         return Promise.resolve(null);
     }
   });
 }
 
-describe('App setup flow', () => {
-  // Both the shell and the mounted views subscribe to this event, so collect
-  // every handler and fan the test's synthetic event out to all of them.
-  let permissionHandlers: ((e: { event: string; id: number; payload: unknown }) => void)[] = [];
-  const permissionsChanged = (payload: PermissionsChanged) => {
-    for (const handler of permissionHandlers) {
-      handler({ event: 'tomari:permissions-changed', id: 0, payload });
-    }
-  };
+function sidebar() {
+  return screen.getByRole('navigation', { name: 'Sections' });
+}
+
+function nav(name: string) {
+  return within(sidebar()).getByRole('button', { name });
+}
+
+describe('App setup and permission status', () => {
+  let permissionHandlers: ((event: { event: string; id: number; payload: unknown }) => void)[] = [];
+
+  function permissionsChanged(payload: PermissionsChanged) {
+    act(() => {
+      for (const handler of permissionHandlers) {
+        handler({ event: 'tomari:permissions-changed', id: 0, payload });
+      }
+    });
+  }
 
   beforeEach(() => {
+    window.localStorage.clear();
     mockInvoke.mockReset();
     mockCommands();
     permissionHandlers = [];
     mockListen.mockReset();
     mockListen.mockImplementation((event, handler) => {
-      if (event === 'tomari:permissions-changed') {
-        permissionHandlers.push(handler);
-      }
+      if (event === 'tomari:permissions-changed') permissionHandlers.push(handler);
       return Promise.resolve(() => {});
     });
   });
 
-  it('shows the sections, no checklist and no banner, when nothing is missing', async () => {
+  it('opens the Windows page with a ready permission footer', async () => {
     render(<App />);
 
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
-    expect(screen.queryByText('Set up Tomari')).not.toBeInTheDocument();
-    expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(nav('Windows')).toHaveAttribute('aria-current', 'page');
+    expect(within(sidebar()).getByText('Permissions: Ready')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Get Tomari ready' })).not.toBeInTheDocument();
+    expect(within(sidebar()).queryByRole('button', { name: 'Home' })).not.toBeInTheDocument();
   });
 
-  it('opens the checklist instead of the sections on a first run with missing permissions', async () => {
+  it('opens setup immediately on the first run when a permission is missing', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, firstRun: true, accessibility: false },
     });
 
     render(<App />);
 
-    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
-    expect(screen.queryByText('Keyboard customization')).not.toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
+    expect(screen.getByText('Accessibility')).toBeInTheDocument();
+    expect(nav('Permissions: Needs attention')).toBeInTheDocument();
   });
 
-  it('opens the checklist with the update explanation when an update revoked permissions', async () => {
+  it('keeps a normal launch on the current page and opens setup from the permission footer', async () => {
     mockCommands({
-      setup_status: { ...ALL_GRANTED, updateRegrant: true, accessibility: false },
+      setup_status: { ...ALL_GRANTED, inputMonitoring: false },
     });
 
     render(<App />);
 
-    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
-    expect(screen.getByText(/went missing after the update/)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Get Tomari ready' })).not.toBeInTheDocument();
+
+    fireEvent.click(nav('Permissions: Needs attention'));
+    expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set up later' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Get Tomari ready' })).not.toBeInTheDocument();
+    });
+    expect(nav('Windows')).toHaveAttribute('aria-current', 'page');
+    expect(nav('Permissions: Needs attention')).toBeInTheDocument();
   });
 
-  it('stops blaming the update once setup has completed', async () => {
+  it('updates the footer when permissions change outside Tomari', async () => {
+    render(<App />);
+    expect(await screen.findByText('Permissions: Ready')).toBeInTheDocument();
+
+    permissionsChanged({ accessibility: true, inputMonitoring: false });
+    expect(
+      await screen.findByRole('button', { name: 'Permissions: Needs attention' }),
+    ).toBeInTheDocument();
+
+    permissionsChanged({ accessibility: true, inputMonitoring: true });
+    expect(await screen.findByText('Permissions: Ready')).toBeInTheDocument();
+  });
+
+  it('preserves the update explanation only for the update recovery flow', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, updateRegrant: true, accessibility: false },
     });
@@ -123,147 +159,124 @@ describe('App setup flow', () => {
     render(<App />);
     expect(await screen.findByText(/went missing after the update/)).toBeInTheDocument();
 
-    // Re-grant everything and leave via Done, then revoke by hand and reopen:
-    // the checklist must show the generic intro, not the stale update note.
     permissionsChanged({ accessibility: true, inputMonitoring: true });
-    fireEvent.click(await screen.findByText('Done'));
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Start using Tomari' }));
 
     permissionsChanged({ accessibility: false, inputMonitoring: true });
-    fireEvent.click(await screen.findByText('Continue'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Permissions: Needs attention' }));
 
-    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
     expect(screen.queryByText(/went missing after the update/)).not.toBeInTheDocument();
   });
 
-  it('shows the sections plus the reminder banner when permissions are missing on a normal launch', async () => {
-    mockCommands({
-      setup_status: { ...ALL_GRANTED, inputMonitoring: false },
-    });
-
-    render(<App />);
-
-    expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
-    expect(screen.getByText('Keyboard customization')).toBeInTheDocument();
-  });
-
-  it('reopens the checklist from the reminder banner and returns via "Set up later"', async () => {
-    mockCommands({
-      setup_status: { ...ALL_GRANTED, inputMonitoring: false },
-    });
-
-    render(<App />);
-
-    fireEvent.click(await screen.findByText('Continue'));
-    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('Set up later'));
-    expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
-  });
-
-  it('retires the reminder banner once the backend reports everything granted', async () => {
-    mockCommands({
-      setup_status: { ...ALL_GRANTED, inputMonitoring: false },
-    });
-
-    render(<App />);
-    expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
-
-    permissionsChanged({ accessibility: true, inputMonitoring: true });
-
-    await waitFor(() => {
-      expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
-    });
-  });
-
-  it('brings the reminder banner back when a permission is revoked later', async () => {
-    render(<App />);
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
-    expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
-
-    permissionsChanged({ accessibility: true, inputMonitoring: false });
-
-    expect(await screen.findByText("Setup isn't finished yet.")).toBeInTheDocument();
-  });
-
-  it('keeps the open checklist up after the last grant so its Done button is seen', async () => {
-    mockCommands({
-      setup_status: { ...ALL_GRANTED, firstRun: true, inputMonitoring: false },
-    });
-
-    render(<App />);
-    expect(await screen.findByText('Set up Tomari')).toBeInTheDocument();
-
-    permissionsChanged({ accessibility: true, inputMonitoring: true });
-
-    expect(await screen.findByText('Done')).toBeInTheDocument();
-    expect(screen.getByText('Set up Tomari')).toBeInTheDocument();
-  });
-
-  it('falls back to the sections when the setup status cannot be read', async () => {
+  it('falls back to Windows when setup status cannot be read', async () => {
     mockCommands({
       setup_status: Object.assign(new Error('status unavailable'), { code: 'unknown' }),
     });
 
     render(<App />);
 
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
-    expect(screen.queryByText("Setup isn't finished yet.")).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(within(sidebar()).getByText('Permissions: Ready')).toBeInTheDocument();
   });
 });
 
-// The sidebar row and the switch inside the section share the "Prevent Sleep"
-// name, so reach for the section's descriptive text instead.
-const LID_HINT = /awake even with the lid closed/;
-
-function nav(name: string | RegExp) {
-  return screen.getByRole('button', { name });
-}
-
-describe('App sidebar', () => {
+describe('App sidebar and page persistence', () => {
   beforeEach(() => {
+    window.localStorage.clear();
     mockInvoke.mockReset();
     mockCommands();
     mockListen.mockReset();
     mockListen.mockImplementation(() => Promise.resolve(() => {}));
   });
 
-  it('starts on Keyboard with that row marked current', async () => {
+  it('shows only concise tool and app destinations in separate groups', async () => {
     render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
 
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
-    expect(nav('Keyboard')).toHaveAttribute('aria-current', 'true');
-    expect(nav('Windows')).not.toHaveAttribute('aria-current');
+    const tools = within(sidebar()).getByRole('region', { name: 'Tools' });
+    const app = within(sidebar()).getByRole('region', { name: 'App' });
+
+    expect(
+      within(tools)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Windows', 'Keyboard', 'Menu Bar', 'Prevent Sleep']);
+    expect(
+      within(app)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['General']);
+    expect(within(sidebar()).queryByRole('button', { name: 'Home' })).not.toBeInTheDocument();
   });
 
-  it('switches sections and moves the current marker with the click', async () => {
-    render(<App />);
-    await screen.findByText('Keyboard customization');
-
-    fireEvent.click(nav('Windows'));
-    expect(await screen.findByText('Remembered positions')).toBeInTheDocument();
-    expect(screen.queryByText('Keyboard customization')).not.toBeInTheDocument();
-    expect(nav('Windows')).toHaveAttribute('aria-current', 'true');
-    expect(nav('Keyboard')).not.toHaveAttribute('aria-current');
-
-    fireEvent.click(nav('Prevent Sleep'));
-    expect(await screen.findByText(LID_HINT)).toBeInTheDocument();
-
-    fireEvent.click(nav('General'));
-    expect(await screen.findByText('Maintenance')).toBeInTheDocument();
-
-    fireEvent.click(nav('Keyboard'));
-    expect(await screen.findByText('Keyboard customization')).toBeInTheDocument();
-  });
-
-  it('names a section as off when its master switch is off', async () => {
+  it('does not add feature state to a sidebar destination name', async () => {
     mockCommands({ get_settings: { ...SETTINGS, windowManagementEnabled: false } });
 
     render(<App />);
-    await screen.findByText('Keyboard customization');
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
 
-    // The dot is decorative, so the state has to reach the accessible name.
-    expect(nav('Windows (Off)')).toBeInTheDocument();
-    expect(nav('Keyboard')).toBeInTheDocument();
+    expect(nav('Windows')).toBeInTheDocument();
+    expect(
+      within(sidebar()).queryByRole('button', { name: 'Windows (Off)' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('persists the selected page and restores it after remounting', async () => {
+    const first = render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+
+    fireEvent.click(nav('Keyboard'));
+    expect(await screen.findByRole('heading', { name: 'Keyboard', level: 1 })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.localStorage.getItem(LAST_SECTION_KEY)).toBe('keyboard');
+    });
+
+    first.unmount();
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Keyboard', level: 1 })).toBeInTheDocument();
+    expect(nav('Keyboard')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('falls back to Windows for an invalid or removed saved page', async () => {
+    window.localStorage.setItem(LAST_SECTION_KEY, 'overview');
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(nav('Windows')).toHaveAttribute('aria-current', 'page');
+    expect(window.localStorage.getItem(LAST_SECTION_KEY)).toBe('window');
+  });
+
+  it('switches pages and moves the current marker', async () => {
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+
+    fireEvent.click(nav('Prevent Sleep'));
+    expect(
+      await screen.findByRole('heading', { name: 'Prevent Sleep', level: 1 }),
+    ).toBeInTheDocument();
+    expect(nav('Prevent Sleep')).toHaveAttribute('aria-current', 'page');
+    expect(nav('Windows')).not.toHaveAttribute('aria-current');
+
+    fireEvent.click(nav('General'));
+    expect(await screen.findByRole('heading', { name: 'General', level: 1 })).toBeInTheDocument();
+    expect(nav('General')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('keeps a partial-apply warning visible outside General', async () => {
+    mockCommands({ save_settings: { applyWarnings: ['launchAtLogin'] } });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+
+    fireEvent.click(nav('General'));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Launch at login' }));
+    expect(await screen.findByText('Saved, but not fully applied')).toBeInTheDocument();
+
+    fireEvent.click(nav('Windows'));
+    expect(await screen.findByText(/macOS could not apply part/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    expect(await screen.findByRole('heading', { name: 'General', level: 1 })).toBeInTheDocument();
   });
 });

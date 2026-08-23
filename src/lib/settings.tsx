@@ -1,12 +1,12 @@
 // Shared app-settings state. One source of truth for the whole panel so the
-// master switches (which live on the Keyboard/Windows tabs) and the global
-// preferences (General tab) read and write the same record.
+// master switches on the tool screens and the global preferences on General
+// read and write the same record.
 //
 // Writes are optimistic and serialized: the UI updates immediately, but only
 // one save runs at a time and it always persists the *latest* settings. That
 // makes the persistence order match the order edits were made — concurrent
-// edits (a toggle here, another there, across tabs) can't race a stale snapshot
-// onto disk. The save error is held here so it survives a tab switch (each view
+// edits (a toggle here, another there, across screens) can't race a stale snapshot
+// onto disk. The save error is held here so it survives navigation (each view
 // unmounts when you leave it).
 
 import { listen } from '@tauri-apps/api/event';

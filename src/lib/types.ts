@@ -66,6 +66,7 @@ export type MoveRecallResult =
 
 export interface PlacementEditResult {
   changed: boolean;
+  undoable: boolean;
 }
 
 export type ModifierKey = 'capsLock' | 'control' | 'option' | 'command' | 'shift' | 'function';
@@ -182,8 +183,8 @@ export interface PermissionsChanged {
   inputMonitoring: boolean;
 }
 
-// Result of the setup_status command, pulled once at startup to decide whether
-// to show the permission-setup checklist instead of the tabs.
+// Result of the setup_status command, pulled once at startup to populate the
+// permission reminder and update-specific recovery copy.
 export interface SetupStatus {
   // This launch seeded the database (a true first run).
   firstRun: boolean;

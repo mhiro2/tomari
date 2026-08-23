@@ -83,7 +83,7 @@ describe('SetupView', () => {
 
     expect(screen.getByText('Accessibility')).toBeInTheDocument();
     expect(screen.getByText('Input Monitoring')).toBeInTheDocument();
-    expect(screen.getAllByText('Grant Access')).toHaveLength(2);
+    expect(screen.getAllByText('Open System Settings')).toHaveLength(2);
     // The admin password is per-use, not a grantable permission — a note only.
     expect(screen.getByText(/administrator password/)).toBeInTheDocument();
   });
@@ -96,20 +96,20 @@ describe('SetupView', () => {
     const regions = screen.getAllByRole('status');
     expect(regions).toHaveLength(2);
     expect(screen.getByText('Granted')).toBeInTheDocument();
-    expect(screen.getAllByText('Grant Access')).toHaveLength(1);
+    expect(screen.getAllByText('Open System Settings')).toHaveLength(1);
   });
 
   it('names each grant button after its permission for assistive tech', () => {
     renderView();
 
-    expect(screen.getByLabelText('Grant Access for Accessibility')).toBeInTheDocument();
-    expect(screen.getByLabelText('Grant Access for Input Monitoring')).toBeInTheDocument();
+    expect(screen.getByLabelText('Open System Settings for Accessibility')).toBeInTheDocument();
+    expect(screen.getByLabelText('Open System Settings for Input Monitoring')).toBeInTheDocument();
   });
 
   it('moves focus to the heading on mount', () => {
     renderView();
 
-    expect(screen.getByText('Set up Tomari')).toHaveFocus();
+    expect(screen.getByText('Get Tomari ready')).toHaveFocus();
   });
 
   it('requests the permission and reports an immediate grant upward', async () => {
@@ -119,7 +119,7 @@ describe('SetupView', () => {
       onGranted,
     });
 
-    fireEvent.click(screen.getByText('Grant Access'));
+    fireEvent.click(screen.getByText('Open System Settings'));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('request_input_monitoring');
@@ -135,7 +135,7 @@ describe('SetupView', () => {
       onGranted,
     });
 
-    fireEvent.click(screen.getByText('Grant Access'));
+    fireEvent.click(screen.getByText('Open System Settings'));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('request_accessibility');
@@ -149,10 +149,10 @@ describe('SetupView', () => {
 
     fireEvent.click(screen.getByText('Set up later'));
     expect(onDismiss).toHaveBeenCalled();
-    expect(screen.queryByText('Done')).not.toBeInTheDocument();
+    expect(screen.queryByText('Start using Tomari')).not.toBeInTheDocument();
   });
 
-  it('swaps to the all-set hint and a Done button once everything is granted', () => {
+  it('swaps to the all-set hint and a start button once everything is granted', () => {
     const onDone = vi.fn();
     renderView({
       permissions: { accessibility: true, inputMonitoring: true },
@@ -162,7 +162,7 @@ describe('SetupView', () => {
     expect(screen.getByText(/All set/)).toBeInTheDocument();
     expect(screen.queryByText('Set up later')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Done'));
+    fireEvent.click(screen.getByText('Start using Tomari'));
     expect(onDone).toHaveBeenCalled();
   });
 
@@ -229,7 +229,7 @@ describe('SetupView', () => {
     });
     renderView({ permissions: { accessibility: false, inputMonitoring: true } });
 
-    fireEvent.click(screen.getByText('Grant Access'));
+    fireEvent.click(screen.getByText('Open System Settings'));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('request failed');
   });

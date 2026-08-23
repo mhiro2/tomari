@@ -103,14 +103,29 @@ describe('SessionView', () => {
     expect(toggle).not.toBeDisabled();
   });
 
-  it('shows an error when the initial getKeepAwake rejects', async () => {
-    mockCommands({ get_keep_awake: new Rejection(new Error('backend gone')) });
+  it('offers a retry when the initial getKeepAwake rejects', async () => {
+    let attempts = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_keep_awake') {
+        attempts += 1;
+        return attempts === 1 ? Promise.reject(new Error('backend gone')) : Promise.resolve(OFF);
+      }
+      return Promise.resolve(null);
+    });
 
     render(<SessionView />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('backend gone');
-    // The view stays usable with the default off state.
+    // A failed initial read must not expose a clickable switch backed by a
+    // guessed off state.
     expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('switch')).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
 
   it('updates from the tomari:keep-awake-changed event', async () => {
