@@ -170,6 +170,13 @@ export interface MenuBarInventory {
   items: MenuBarItem[];
 }
 
+export type MenuBarMoveOutcome = 'moved' | 'alreadyInZone' | 'staleItem' | 'notMovable';
+
+export interface MenuBarMoveResult {
+  outcome: MenuBarMoveOutcome;
+  inventory: MenuBarInventory;
+}
+
 export interface AcceleratorCheck {
   valid: boolean;
   normalized: string | null;

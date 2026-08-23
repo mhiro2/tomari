@@ -25,8 +25,8 @@ checklist — it is asked for each time rather than granted once (see below).
 ## Accessibility
 
 Required for **moving windows**, **switching the IME**, **sending keys**, and
-**reading the menu bar arrangement**. macOS prompts you the first time one of
-these is used. Grant it under
+**reading or rearranging menu bar items**. macOS prompts you the first time one
+of these is used. Grant it under
 **System Settings → Privacy & Security → Accessibility**.
 
 Global shortcuts work regardless of this permission.

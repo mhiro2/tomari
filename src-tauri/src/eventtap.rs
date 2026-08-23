@@ -37,9 +37,13 @@ use crate::locks::MutexExt;
 use crate::state::AppState;
 use crate::tap::{self, RunningTap};
 
-/// Marker written into `EVENT_SOURCE_USER_DATA` on events Tomari synthesizes
-/// (see [`crate::keysend`]), so the tap ignores its own injected keystrokes.
+/// Marker written into `EVENT_SOURCE_USER_DATA` on input Tomari synthesizes,
+/// so its keyboard and pointer gesture taps ignore their own injected events.
 pub const SYNTHETIC_MARKER: i64 = 0x746f_6d72; // "tomr"
+
+pub fn is_synthetic(event: &CGEvent) -> bool {
+    event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_MARKER
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -242,7 +246,7 @@ fn handle_event(
     }
 
     // Ignore keystrokes Tomari itself synthesized.
-    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_MARKER {
+    if is_synthetic(event) {
         return CallbackResult::Keep;
     }
 

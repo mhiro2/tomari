@@ -11,6 +11,8 @@ import type {
   Hotkey,
   KeepAwakeStatus,
   MenuBarInventory,
+  MenuBarItemZone,
+  MenuBarMoveResult,
   MenuBarStatus,
   ModifierRule,
   SaveSettingsOutcome,
@@ -112,6 +114,13 @@ export const getMenuBar = (): Promise<MenuBarStatus> => invoke('get_menu_bar');
 
 // Read the real hidden/visible item arrangement around Tomari's divider.
 export const listMenuBarItems = (): Promise<MenuBarInventory> => invoke('list_menu_bar_items');
+
+// Move one item across Tomari's divider and return the fresh arrangement that
+// the backend verified after macOS finished reflowing the menu bar.
+export const moveMenuBarItem = (
+  itemId: string,
+  targetZone: MenuBarItemZone,
+): Promise<MenuBarMoveResult> => invoke('move_menu_bar_item', { itemId, targetZone });
 
 // Expand or collapse the tidied menu bar icons. Resolves to the resulting
 // status, which reports the feature still off if it was never switched on.

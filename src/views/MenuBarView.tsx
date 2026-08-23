@@ -7,15 +7,15 @@ import {
   SegmentedPageNav,
   SettingsList,
   SettingsRow,
-  StatusLabel,
 } from '../components/ui';
 import * as api from '../lib/api';
 import { useT } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { MenuBarInventory, MenuBarItem, MenuBarStatus } from '../lib/types';
+import type { MenuBarInventory, MenuBarItem, MenuBarItemZone, MenuBarStatus } from '../lib/types';
 
 const AUTO_COLLAPSE_CHOICES = [0, 5, 15, 30] as const;
 type MenuBarTab = 'items' | 'behavior';
+type MoveFailure = { kind: 'stale' | 'failed'; itemName: string };
 
 export function MenuBarView() {
   const t = useT();
@@ -26,15 +26,21 @@ export function MenuBarView() {
   const [inventory, setInventory] = useState<MenuBarInventory | null>(null);
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [inventoryError, setInventoryError] = useState(false);
+  const [movingItemId, setMovingItemId] = useState<string | null>(null);
+  const [moveFailure, setMoveFailure] = useState<MoveFailure | null>(null);
   const runtimeEnabled = useRef<boolean | null>(null);
   const inventoryRequest = useRef(0);
   const activeInventoryRequest = useRef<number | null>(null);
+  const activeMoveRequest = useRef(0);
+  const moveBusy = useRef(false);
 
   const refreshInventory = useCallback(async () => {
+    if (moveBusy.current) return;
     const request = ++inventoryRequest.current;
     activeInventoryRequest.current = request;
     setInventoryBusy(true);
     setInventoryError(false);
+    setMoveFailure(null);
     try {
       const next = await api.listMenuBarItems();
       if (request === inventoryRequest.current) setInventory(next);
@@ -60,10 +66,14 @@ export function MenuBarView() {
         // An in-flight scan belongs to the old runtime. Invalidate it so an
         // off/on cycle never exposes inventory from before the new divider.
         inventoryRequest.current += 1;
+        activeMoveRequest.current += 1;
         activeInventoryRequest.current = null;
+        moveBusy.current = false;
         setInventory(null);
         setInventoryBusy(false);
         setInventoryError(false);
+        setMovingItemId(null);
+        setMoveFailure(null);
       }
     };
 
@@ -90,13 +100,50 @@ export function MenuBarView() {
       cancelled = true;
       runtimeEnabled.current = null;
       inventoryRequest.current += 1;
+      activeMoveRequest.current += 1;
       activeInventoryRequest.current = null;
+      moveBusy.current = false;
       void unlisten.then((fn) => fn());
     };
   }, [refreshInventory]);
 
+  const moveItem = useCallback(async (item: MenuBarItem, targetZone: MenuBarItemZone) => {
+    if (moveBusy.current) return;
+    moveBusy.current = true;
+    const operation = ++activeMoveRequest.current;
+
+    // A move starts from the current inventory and returns its own verified
+    // replacement. Invalidate an older scan so it cannot win the race later.
+    inventoryRequest.current += 1;
+    activeInventoryRequest.current = null;
+    setInventoryBusy(false);
+    setInventoryError(false);
+    setMoveFailure(null);
+    setMovingItemId(item.id);
+
+    try {
+      const result = await api.moveMenuBarItem(item.id, targetZone);
+      if (operation !== activeMoveRequest.current) return;
+      setInventory(result.inventory);
+      if (result.outcome === 'staleItem') {
+        setMoveFailure({ kind: 'stale', itemName: item.name });
+      } else if (result.outcome === 'notMovable') {
+        setMoveFailure({ kind: 'failed', itemName: item.name });
+      }
+    } catch {
+      if (operation === activeMoveRequest.current) {
+        setMoveFailure({ kind: 'failed', itemName: item.name });
+      }
+    } finally {
+      if (operation === activeMoveRequest.current) {
+        moveBusy.current = false;
+        setMovingItemId(null);
+      }
+    }
+  }, []);
+
   async function show(next: boolean) {
-    if (busy) return;
+    if (busy || inventoryBusy || moveBusy.current) return;
     setBusy(true);
     try {
       const status = await api.setMenuBarCollapsed(!next);
@@ -119,6 +166,7 @@ export function MenuBarView() {
         checked={enabled}
         onChange={(next) => update({ menuBarTidyEnabled: next })}
         toggleLabel={t('menubar.enable')}
+        toggleDisabled={inventoryBusy || movingItemId !== null}
         onLabel={t('common.on')}
         offLabel={t('common.off')}
       />
@@ -139,13 +187,16 @@ export function MenuBarView() {
           <MenuBarItemsPanel
             inventory={inventory}
             busy={inventoryBusy}
+            movingItemId={movingItemId}
+            moveFailure={moveFailure}
             failed={inventoryError}
             onRefresh={() => void refreshInventory()}
+            onMove={(item, targetZone) => void moveItem(item, targetZone)}
           />
         ) : (
           <MenuBarBehaviorPanel
             collapsed={collapsed}
-            busy={busy}
+            busy={busy || inventoryBusy || movingItemId !== null}
             autoCollapseSecs={settings.menuBarAutoCollapseSecs}
             onShow={(next) => void show(next)}
             onAutoCollapse={(seconds) => update({ menuBarAutoCollapseSecs: seconds })}
@@ -159,13 +210,19 @@ export function MenuBarView() {
 function MenuBarItemsPanel({
   inventory,
   busy,
+  movingItemId,
+  moveFailure,
   failed,
   onRefresh,
+  onMove,
 }: {
   inventory: MenuBarInventory | null;
   busy: boolean;
+  movingItemId: string | null;
+  moveFailure: MoveFailure | null;
   failed: boolean;
   onRefresh: () => void;
+  onMove: (item: MenuBarItem, targetZone: MenuBarItemZone) => void;
 }) {
   const t = useT();
   const usable = inventory?.supported && inventory.permissionGranted && inventory.dividerAvailable;
@@ -182,14 +239,35 @@ function MenuBarItemsPanel({
       <MenuBarDiagram hidden={hidden} visible={visible} />
 
       <div className="arrangement-action">
-        <kbd>⌘</kbd>
         <span>{t('menubar.arrangeInstruction')}</span>
-        <button type="button" className="btn" onClick={onRefresh} disabled={busy}>
+        <button
+          type="button"
+          className="btn"
+          onClick={onRefresh}
+          disabled={busy || movingItemId !== null}
+        >
           {t('menubar.refreshItems')}
         </button>
       </div>
 
-      <InventoryBody inventory={inventory} busy={busy} failed={failed} />
+      {moveFailure && (
+        <p className="inventory-move-error" role="alert">
+          <strong>
+            {t(moveFailure.kind === 'stale' ? 'menubar.moveStale' : 'menubar.moveFailed', {
+              item: moveFailure.itemName,
+            })}
+          </strong>
+          {moveFailure.kind === 'failed' && <span>{t('menubar.moveManualFallback')}</span>}
+        </p>
+      )}
+
+      <InventoryBody
+        inventory={inventory}
+        busy={busy}
+        failed={failed}
+        movingItemId={movingItemId}
+        onMove={onMove}
+      />
     </div>
   );
 }
@@ -232,10 +310,14 @@ function InventoryBody({
   inventory,
   busy,
   failed,
+  movingItemId,
+  onMove,
 }: {
   inventory: MenuBarInventory | null;
   busy: boolean;
   failed: boolean;
+  movingItemId: string | null;
+  onMove: (item: MenuBarItem, targetZone: MenuBarItemZone) => void;
 }) {
   const t = useT();
   if (busy && !inventory) return <p className="inventory-state">{t('menubar.inventoryLoading')}</p>;
@@ -253,8 +335,22 @@ function InventoryBody({
   const visible = inventory.items.filter((item) => item.zone === 'visible');
   return (
     <div className="inventory-grid" aria-live="polite">
-      <InventorySection title={t('menubar.hiddenItems')} items={hidden} tone="active" />
-      <InventorySection title={t('menubar.visibleItems')} items={visible} tone="muted" />
+      <InventorySection
+        title={t('menubar.hiddenItems')}
+        items={hidden}
+        zone="hidden"
+        busy={busy}
+        movingItemId={movingItemId}
+        onMove={onMove}
+      />
+      <InventorySection
+        title={t('menubar.visibleItems')}
+        items={visible}
+        zone="visible"
+        busy={busy}
+        movingItemId={movingItemId}
+        onMove={onMove}
+      />
     </div>
   );
 }
@@ -262,13 +358,20 @@ function InventoryBody({
 function InventorySection({
   title,
   items,
-  tone,
+  zone,
+  busy,
+  movingItemId,
+  onMove,
 }: {
   title: string;
   items: MenuBarItem[];
-  tone: 'active' | 'muted';
+  zone: MenuBarItemZone;
+  busy: boolean;
+  movingItemId: string | null;
+  onMove: (item: MenuBarItem, targetZone: MenuBarItemZone) => void;
 }) {
   const t = useT();
+  const targetZone: MenuBarItemZone = zone === 'hidden' ? 'visible' : 'hidden';
   return (
     <section className="inventory-column">
       <header>
@@ -279,22 +382,54 @@ function InventorySection({
         {items.length === 0 ? (
           <p className="inventory-empty">{t('menubar.inventoryEmpty')}</p>
         ) : (
-          items.map((item) => (
-            <div className="inventory-item" key={item.id}>
-              <span className="inventory-item__glyph" aria-hidden="true">
-                {Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? '•'}
-              </span>
-              <span className="inventory-item__copy">
-                <strong>{item.name}</strong>
-                {item.ownerName && (
-                  <small>{t('menubar.itemOwner', { owner: item.ownerName })}</small>
-                )}
-              </span>
-              <StatusLabel tone={tone}>
-                {t(tone === 'active' ? 'menubar.zoneHidden' : 'menubar.zoneVisible')}
-              </StatusLabel>
-            </div>
-          ))
+          items.map((item) => {
+            const moving = movingItemId === item.id;
+            const show = targetZone === 'visible';
+            return (
+              <div className="inventory-item" key={item.id}>
+                <span className="inventory-item__glyph" aria-hidden="true">
+                  {Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? '•'}
+                </span>
+                <span className="inventory-item__copy">
+                  <strong>{item.name}</strong>
+                  {item.ownerName && (
+                    <small>{t('menubar.itemOwner', { owner: item.ownerName })}</small>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="btn inventory-item__action"
+                  aria-label={t(
+                    moving
+                      ? 'menubar.movingItem'
+                      : show
+                        ? 'menubar.moveShowItem'
+                        : 'menubar.moveHideItem',
+                    { item: item.name },
+                  )}
+                  aria-busy={moving}
+                  disabled={busy || movingItemId !== null}
+                  onClick={() => onMove(item, targetZone)}
+                >
+                  {!moving && !show && (
+                    <span className="inventory-item__direction" aria-hidden="true">
+                      ‹
+                    </span>
+                  )}
+                  <span>
+                    {moving
+                      ? t('menubar.moving')
+                      : t(show ? 'menubar.moveShow' : 'menubar.moveHide')}
+                  </span>
+                  {!moving && show && (
+                    <span className="inventory-item__direction" aria-hidden="true">
+                      ›
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </section>
@@ -346,6 +481,7 @@ function MenuBarBehaviorPanel({
             <select
               className="input"
               value={autoCollapseSecs}
+              disabled={busy}
               onChange={(event) => onAutoCollapse(Number(event.target.value))}
               aria-label={t('menubar.autoCollapse')}
             >

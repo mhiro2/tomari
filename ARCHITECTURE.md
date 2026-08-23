@@ -581,14 +581,15 @@ Gather the status items you rarely look at behind a divider and push them off
 the edge of the screen until you ask for them — the job Bartender, Ice and
 Hidden Bar do.
 
-AppKit offers no API to enumerate or move another app's status item, so hiding
-one directly is impossible. What is possible is to own an item and make it
-enormous: the menu bar lays items out right to left, so an item stretched to a
-sentinel width (`10_000pt`, which macOS clamps to something a little over the
-screen) pushes everything to its left past the edge. **Which icons those are is
-the user's own ⌘-drag arrangement** — the app cannot do the sorting for them.
+AppKit offers no API to enumerate or directly reposition another app's status
+item. Tomari owns a divider and makes it enormous: the menu bar lays items out
+right to left, so a divider stretched to a sentinel width (`10_000pt`, which
+macOS clamps to something a little over the screen) pushes everything to its
+left past the edge. The physical ordering around that divider remains the
+source of truth.
 
-The settings panel can still *inspect* that arrangement. `inventory.rs` asks
+The settings panel can inspect and best-effort edit that arrangement.
+`inventory.rs` asks
 each running process for its Accessibility `AXExtrasMenuBar`, reads the child
 items' frames and classifies them relative to Tomari's divider. The divider is
 expanded only for the scan and restored to the latest live state immediately
@@ -599,10 +600,22 @@ a known system menu-extra identifier; generic role labels and owner-only
 fallbacks cannot mask a later item-specific name. Transient AX label failures
 are retried once; persistent failures omit the item from that snapshot instead
 of mislabeling it with its owner's name.
-Item ids are snapshot-local: AX exposes neither a durable status-item
-identity nor a supported move operation, and item names vary in quality across
-applications. The physical ⌘-drag layout therefore remains the single source
-of truth; the panel is a live inventory, not a second configuration database.
+Item ids are snapshot-local: AX exposes neither a durable status-item identity
+nor a supported move operation, and item names vary in quality across
+applications. Every published inventory receives generation-scoped opaque ids;
+a refresh invalidates the preceding generation rather than letting a stale row
+target a different item.
+
+`movement.rs` implements the public fallback available to an assistive app: it
+posts a short, interpolated mouse drag with the Command flag from the AX frame
+to the requested side of the divider. Scans and moves share one session lock.
+A move expands the divider, resolves the opaque id against a fresh scan, refuses
+ambiguous identities, restores the pointer and live collapsed state on every
+exit, and publishes a newly scanned inventory. Only a verified item on the
+requested side is reported as moved. Items behind a notch or implementations
+that reject synthetic input therefore fail closed and keep the manual ⌘-drag
+as their fallback. Tomari stores no parallel desired-layout database; the
+physical arrangement remains authoritative.
 
 Two status items, with distinct jobs:
 
@@ -639,7 +652,7 @@ relaunch is still unproven.
 
 | Permission       | Required by                                        | Acquisition                                                                                                                            |
 | ---------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Accessibility    | Moving windows (AX), key synthesis (`keysend`), reading menu bar items | `AXIsProcessTrustedWithOptions` (with prompt)                                                                               |
+| Accessibility    | Moving windows (AX), key and menu-bar drag synthesis, reading menu bar items | `AXIsProcessTrustedWithOptions` (with prompt)                                                                            |
 | Input Monitoring | The keyboard tap and the drag-to-snap tap          | `CGRequestListenEventAccess`. Attempting to create a tap without it adds Tomari to the Input Monitoring list so the user can enable it |
 | Administrator    | Keep-awake's lid-close veto (`pmset disablesleep`) | macOS auth dialog via `osascript … with administrator privileges`; required to turn Keep Awake on — the lid-close veto is part of the switch, so declining cancels it |
 

@@ -238,7 +238,7 @@ const en = {
   'menubar.tab.items': 'Items',
   'menubar.tab.behavior': 'Behavior',
   'menubar.diagramLabel': 'Current menu bar arrangement',
-  'menubar.arrangeInstruction': 'Hold ⌘ and drag an item across the divider in the real menu bar.',
+  'menubar.arrangeInstruction': 'Use the buttons below to move items across Tomari’s divider.',
   'menubar.offNote': 'Menu bar tidying is off — Tomari adds no divider to your menu bar.',
   'menubar.enable': 'Turn on menu bar tidying',
   'menubar.showToggle': 'Show hidden icons',
@@ -269,6 +269,17 @@ const en = {
   'menubar.itemOwner': 'From {owner}',
   'menubar.zoneHidden': 'hidden',
   'menubar.zoneVisible': 'always shown',
+  'menubar.moveHide': 'Hide',
+  'menubar.moveShow': 'Always Show',
+  'menubar.moveHideItem': 'Hide {item}',
+  'menubar.moveShowItem': 'Always show {item}',
+  'menubar.moving': 'Moving…',
+  'menubar.movingItem': 'Moving {item}…',
+  'menubar.moveStale':
+    'The menu bar changed before Tomari could move {item}. The list has been refreshed; try again.',
+  'menubar.moveFailed': 'Tomari could not move {item}.',
+  'menubar.moveManualFallback':
+    'Hold ⌘ and drag it across the divider in the real menu bar instead.',
 
   'settings.general': 'General',
   'settings.pageDescription':
@@ -582,8 +593,7 @@ const ja: Record<MessageKey, string> = {
   'menubar.tab.items': '項目',
   'menubar.tab.behavior': '動作',
   'menubar.diagramLabel': '現在のメニューバー配置',
-  'menubar.arrangeInstruction':
-    '⌘ を押しながら、実際のメニューバーで項目を区切りの反対側へドラッグします。',
+  'menubar.arrangeInstruction': '下のボタンで、項目を Tomari の区切りの反対側へ移動します。',
   'menubar.offNote': 'メニューバー整理はオフです。区切りは表示されません。',
   'menubar.enable': 'メニューバー整理を有効化',
   'menubar.showToggle': '隠したアイコンを表示',
@@ -615,6 +625,17 @@ const ja: Record<MessageKey, string> = {
   'menubar.itemOwner': '{owner} から',
   'menubar.zoneHidden': '隠れる',
   'menubar.zoneVisible': '常に表示',
+  'menubar.moveHide': '隠す',
+  'menubar.moveShow': '常に表示',
+  'menubar.moveHideItem': '{item} を隠す',
+  'menubar.moveShowItem': '{item} を常に表示',
+  'menubar.moving': '移動中…',
+  'menubar.movingItem': '{item} を移動中…',
+  'menubar.moveStale':
+    '{item} の移動中にメニューバーが変わりました。一覧を更新したので、もう一度お試しください。',
+  'menubar.moveFailed': '{item} を移動できませんでした。',
+  'menubar.moveManualFallback':
+    '代わりに、実際のメニューバーで ⌘ を押しながら区切りの反対側へドラッグしてください。',
 
   'settings.general': '一般',
   'settings.pageDescription':

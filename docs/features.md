@@ -131,19 +131,20 @@ menu bar: a **divider** (≡) and a **handle** (‹). Collapsing stretches the
 divider so everything to its *left* slides off-screen; the handle stays put so
 you can always bring them back.
 
-**You choose what gets hidden.** Hold ⌘ and drag your menu bar icons so the ones
-you want tucked away sit to the left of the divider. macOS lets an app move only
-its own menu bar icons, so this part is yours to do — there is no way for Tomari
-to sort them for you.
+**You choose what gets hidden.** In Tomari's item list, choose **Hide** to move
+an always-shown item to the left of the divider, or **Always Show** to move a
+hidden item to its right. Tomari performs the same ⌘-drag gesture you would use
+in the real menu bar, then rereads the physical arrangement before reporting
+success. It never updates the list based on an assumed move.
 
 The **Menu Bar** settings separate **Items** from **Behavior**. Items shows a
 menu-bar diagram and a live, best-effort inventory split into **Hidden now** and
-**Always shown**. After moving an icon across the divider with ⌘-drag, choose
-**Refresh Items** to reread the physical arrangement. Reading item names
-requires Accessibility access; some applications expose only a generic owner
-name, and the list may be incomplete when macOS does not publish an item
-through Accessibility. Behavior contains the show/hide control and automatic
-collapse timing.
+**Always shown**, with an action on every identified item. Choose **Refresh
+Items** after rearranging the real menu bar manually. Reading names and
+performing an automated move require Accessibility access; some applications
+expose only a generic owner name, and the list may be incomplete when macOS
+does not publish an item through Accessibility. Behavior contains the show/hide
+control and automatic collapse timing.
 
 - **Expand and collapse** — click the ‹ handle, use **Show Menu Bar Icons** in
   the tray menu, or bind the "Show/Hide Menu Bar Icons" action to a shortcut in
@@ -152,9 +153,10 @@ collapse timing.
   available. A timed collapse fires on schedule whatever you are doing,
   including while one of the revealed menus is open.
 - **Limits** — expanding may not reveal everything if the frontmost app has a
-  long menu bar of its own, or if your Mac has a notch. That is the method, not
-  a bug: Tomari is making room by moving its own item, not by taking over the
-  menu bar.
+  long menu bar of its own, or if your Mac has a notch. Some system and
+  third-party items also ignore synthetic drags or restore their own position.
+  Tomari reports those moves as unsuccessful and leaves the physical layout as
+  macOS presents it; hold ⌘ and drag the item manually as the fallback.
 
 If you ever lose the handle (⌘-dragging it to the *left* of the divider hides it
 along with everything else), open Tomari's window with the global shortcut

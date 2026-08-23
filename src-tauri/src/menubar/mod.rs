@@ -2,9 +2,9 @@
 //! divider, and push them off-screen until you ask for them.
 //!
 //! The mechanism and its one hard limit live in [`status`]: Tomari can only
-//! control its own status items, so *which* icons end up hidden is whatever the
-//! user has ⌘-dragged to the left of the divider. There is no API to do that
-//! for them.
+//! control its own status items. Moving another application's item therefore
+//! uses the same ⌘-drag gesture a person would perform, synthesized from the
+//! Accessibility geometry returned by [`inventory`].
 //!
 //! Like keep-awake, the expanded/collapsed state is runtime-only and always
 //! starts collapsed — with one exception: switching the feature on starts
@@ -15,6 +15,9 @@ mod state;
 
 #[cfg(target_os = "macos")]
 mod inventory;
+
+#[cfg(target_os = "macos")]
+mod movement;
 
 #[cfg(target_os = "macos")]
 mod status;
@@ -41,9 +44,10 @@ mod inventory {
     }
 }
 
+use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tomari_core::AppSettings;
 
@@ -67,7 +71,7 @@ pub struct MenuBarStatus {
 }
 
 /// Which side of Tomari's divider a menu bar item currently occupies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MenuBarItemZone {
     Hidden,
@@ -90,6 +94,20 @@ pub struct MenuBarItem {
     /// Physical order used inside the backend; not part of the command payload.
     #[serde(skip)]
     pub position: f64,
+    /// Vertical center in AX/Core Graphics' global top-left coordinate space.
+    #[serde(skip)]
+    pub center_y: f64,
+    /// Physical size used to choose a drop point clear of the divider.
+    #[serde(skip)]
+    pub width: f64,
+    /// Owning process for this exact scan. A restarted process invalidates the
+    /// snapshot even if its bundle identifier and labels are unchanged.
+    #[serde(skip)]
+    pub owner_pid: i32,
+    /// The strongest Accessibility identity available. This is still scoped
+    /// to one process lifetime and may be absent or duplicated.
+    #[serde(skip)]
+    pub ax_identifier: Option<String>,
 }
 
 /// Result of scanning the currently active menu bar.
@@ -101,6 +119,39 @@ pub struct MenuBarInventory {
     pub divider_available: bool,
     pub items: Vec<MenuBarItem>,
 }
+
+/// Whether a settings-requested menu bar move took effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuBarMoveOutcome {
+    Moved,
+    AlreadyInZone,
+    StaleItem,
+    NotMovable,
+}
+
+/// A move result always carries a newly scanned inventory so the settings UI
+/// never has to guess what macOS ultimately accepted.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarMoveResult {
+    pub outcome: MenuBarMoveOutcome,
+    pub inventory: MenuBarInventory,
+}
+
+#[derive(Default)]
+struct InventorySession {
+    generation: u64,
+    latest: Vec<MenuBarItem>,
+}
+
+/// Accessibility scans expand Tomari's divider and menu item moves temporarily
+/// take over the pointer. Keeping both under one gate prevents refreshes from
+/// changing the snapshot or divider geometry in the middle of a move.
+static INVENTORY_SESSION: Mutex<InventorySession> = Mutex::new(InventorySession {
+    generation: 0,
+    latest: Vec::new(),
+});
 
 pub fn status(state: &AppState) -> MenuBarStatus {
     MenuBarStatus {
@@ -122,49 +173,262 @@ pub fn inventory(app: &AppHandle, state: &AppState) -> MenuBarInventory {
 
     #[cfg(target_os = "macos")]
     {
-        let permission_granted = state.windows.permission_granted();
-        if !permission_granted {
-            return MenuBarInventory {
-                supported: true,
-                permission_granted: false,
-                divider_available: false,
-                items: Vec::new(),
-            };
-        }
-        if !state.settings.lock_safe().menu_bar_tidy_enabled {
-            return MenuBarInventory {
-                supported: true,
-                permission_granted: true,
-                divider_available: false,
-                items: Vec::new(),
-            };
-        }
+        let mut session = INVENTORY_SESSION.lock_safe();
+        inventory_locked(app, state, &mut session)
+    }
+}
 
-        let context = status::scan_context(app);
-        let Some(context) = context else {
-            let current = status(state);
-            status::finish_scan(app, current.enabled, current.collapsed);
-            return MenuBarInventory {
-                supported: true,
-                permission_granted: true,
-                divider_available: false,
-                items: Vec::new(),
-            };
+/// Move the item represented by the latest inventory snapshot to the requested
+/// side of Tomari's divider. The opaque id embeds the snapshot generation;
+/// refreshing the list invalidates prior ids instead of risking a move of a
+/// different item that later reused the same Accessibility attributes.
+pub fn move_item(
+    app: &AppHandle,
+    state: &AppState,
+    item_id: &str,
+    target_zone: MenuBarItemZone,
+) -> MenuBarMoveResult {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, state, item_id, target_zone);
+        return MenuBarMoveResult {
+            outcome: MenuBarMoveOutcome::NotMovable,
+            inventory: inventory::unsupported(),
         };
-        // AppKit updates the status-item windows on the main run loop after the
-        // divider length changes. Give that layout one frame before asking the
-        // other processes for their AX positions; this runs on the command's
-        // worker thread, never on the UI thread.
-        std::thread::sleep(Duration::from_millis(40));
-        let items = inventory::scan(context);
-        let current = status(state);
-        status::finish_scan(app, current.enabled, current.collapsed);
-        MenuBarInventory {
-            supported: true,
-            permission_granted: true,
-            divider_available: true,
-            items,
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut session = INVENTORY_SESSION.lock_safe();
+        move_item_locked(app, state, item_id, target_zone, &mut session)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct DividerRestore<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DividerRestore<'_> {
+    fn drop(&mut self) {
+        status::finish_scan(self.app, self.state);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn inventory_locked(
+    app: &AppHandle,
+    state: &AppState,
+    session: &mut InventorySession,
+) -> MenuBarInventory {
+    if let Some(inventory) = unavailable_inventory(state, session) {
+        return inventory;
+    }
+
+    let _restore = DividerRestore { app, state };
+    let Some(context) = status::scan_context(app) else {
+        return publish_inventory(session, true, true, false, Vec::new());
+    };
+    wait_for_menu_bar_layout();
+    let items = inventory::scan(context);
+    publish_inventory(session, true, true, true, items)
+}
+
+#[cfg(target_os = "macos")]
+fn move_item_locked(
+    app: &AppHandle,
+    state: &AppState,
+    item_id: &str,
+    target_zone: MenuBarItemZone,
+    session: &mut InventorySession,
+) -> MenuBarMoveResult {
+    let expected = unique_item(&session.latest, |item| item.id == item_id).cloned();
+    let requested_latest_item = expected.is_some();
+
+    if let Some(inventory) = unavailable_inventory(state, session) {
+        return MenuBarMoveResult {
+            outcome: if requested_latest_item {
+                MenuBarMoveOutcome::NotMovable
+            } else {
+                MenuBarMoveOutcome::StaleItem
+            },
+            inventory,
+        };
+    }
+
+    let _restore = DividerRestore { app, state };
+    let Some(context) = status::scan_context(app) else {
+        return MenuBarMoveResult {
+            outcome: MenuBarMoveOutcome::NotMovable,
+            inventory: publish_inventory(session, true, true, false, Vec::new()),
+        };
+    };
+    wait_for_menu_bar_layout();
+    let current_items = inventory::scan(context);
+
+    let Some(expected) = expected else {
+        return MenuBarMoveResult {
+            outcome: MenuBarMoveOutcome::StaleItem,
+            inventory: publish_inventory(session, true, true, true, current_items),
+        };
+    };
+    let matching: Vec<&MenuBarItem> = current_items
+        .iter()
+        .filter(|candidate| tracks_same_item(&expected, candidate))
+        .collect();
+    let current = match matching.as_slice() {
+        [] => {
+            return MenuBarMoveResult {
+                outcome: MenuBarMoveOutcome::StaleItem,
+                inventory: publish_inventory(session, true, true, true, current_items),
+            };
         }
+        [item] => (*item).clone(),
+        _ => {
+            return MenuBarMoveResult {
+                outcome: MenuBarMoveOutcome::NotMovable,
+                inventory: publish_inventory(session, true, true, true, current_items),
+            };
+        }
+    };
+    drop(matching);
+    if current.zone == target_zone {
+        return MenuBarMoveResult {
+            outcome: MenuBarMoveOutcome::AlreadyInZone,
+            inventory: publish_inventory(session, true, true, true, current_items),
+        };
+    }
+
+    let cursor = match movement::command_drag(&current, context, target_zone) {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            tracing::warn!(item = %current.name, %error, "menu bar item move was not started");
+            return MenuBarMoveResult {
+                outcome: MenuBarMoveOutcome::NotMovable,
+                inventory: publish_inventory(session, true, true, true, current_items),
+            };
+        }
+    };
+
+    // The gesture itself includes a Window Server settling delay. Restore the
+    // person's pointer before the slower all-process AX verification scan.
+    drop(cursor);
+
+    let mut final_items = Vec::new();
+    let mut divider_available = false;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(80));
+        }
+        let Some(items) = scan_current_layout(app) else {
+            continue;
+        };
+        // Moving an item across the divider reflows every status item and can
+        // shift the divider itself. Only this fresh boundary can classify the
+        // post-move item correctly.
+        divider_available = true;
+        final_items = items;
+        let moved = unique_item(&final_items, |candidate| {
+            tracks_same_item(&current, candidate)
+        })
+        .is_some_and(|candidate| candidate.zone == target_zone);
+        if moved {
+            break;
+        }
+    }
+
+    let moved = unique_item(&final_items, |candidate| {
+        tracks_same_item(&current, candidate)
+    })
+    .is_some_and(|candidate| candidate.zone == target_zone);
+    if moved {
+        tracing::info!(item = %current.name, ?target_zone, "menu bar item moved");
+    } else {
+        tracing::warn!(item = %current.name, ?target_zone, "macOS did not accept menu bar item move");
+    }
+    MenuBarMoveResult {
+        outcome: if moved {
+            MenuBarMoveOutcome::Moved
+        } else {
+            MenuBarMoveOutcome::NotMovable
+        },
+        inventory: publish_inventory(session, true, true, divider_available, final_items),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unavailable_inventory(
+    state: &AppState,
+    session: &mut InventorySession,
+) -> Option<MenuBarInventory> {
+    if !state.windows.permission_granted() {
+        return Some(publish_inventory(session, true, false, false, Vec::new()));
+    }
+    if !state.settings.lock_safe().menu_bar_tidy_enabled {
+        return Some(publish_inventory(session, true, true, false, Vec::new()));
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_menu_bar_layout() {
+    // AppKit applies status-item frame changes on the main run loop. One frame
+    // keeps the AX scan from observing the divider's previous 10,000pt width.
+    std::thread::sleep(Duration::from_millis(40));
+}
+
+#[cfg(target_os = "macos")]
+fn scan_current_layout(app: &AppHandle) -> Option<Vec<MenuBarItem>> {
+    let context = status::scan_context(app)?;
+    wait_for_menu_bar_layout();
+    Some(inventory::scan(context))
+}
+
+#[cfg(target_os = "macos")]
+fn publish_inventory(
+    session: &mut InventorySession,
+    supported: bool,
+    permission_granted: bool,
+    divider_available: bool,
+    mut items: Vec<MenuBarItem>,
+) -> MenuBarInventory {
+    session.generation = session.generation.wrapping_add(1).max(1);
+    for (index, item) in items.iter_mut().enumerate() {
+        item.id = format!("{}:{index}", session.generation);
+    }
+    session.latest.clone_from(&items);
+    MenuBarInventory {
+        supported,
+        permission_granted,
+        divider_available,
+        items,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unique_item(
+    items: &[MenuBarItem],
+    predicate: impl Fn(&MenuBarItem) -> bool,
+) -> Option<&MenuBarItem> {
+    let mut matching = items.iter().filter(|item| predicate(item));
+    let item = matching.next()?;
+    matching.next().is_none().then_some(item)
+}
+
+#[cfg(target_os = "macos")]
+fn tracks_same_item(expected: &MenuBarItem, candidate: &MenuBarItem) -> bool {
+    if expected.owner_pid != candidate.owner_pid
+        || expected.bundle_id != candidate.bundle_id
+        || expected.name != candidate.name
+        || expected.owner_name != candidate.owner_name
+    {
+        return false;
+    }
+    match expected.ax_identifier.as_deref() {
+        Some(identifier) => candidate.ax_identifier.as_deref() == Some(identifier),
+        None => candidate.ax_identifier.is_none(),
     }
 }
 
@@ -281,7 +545,94 @@ fn arm_auto_collapse(app: &AppHandle, pending: Option<(u64, u64)>) {
         };
         let fired = state.menu_bar.lock_safe().auto_collapse_elapsed(generation);
         if fired {
+            // Do not physically collapse the divider during an AX scan or a
+            // synthesized move. The logical state is already collapsed, so
+            // the operation's restore guard will apply it before releasing
+            // this gate; the publish below then updates the other surfaces.
+            let _operation = INVENTORY_SESSION.lock_safe();
             publish(&app);
         }
     });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    fn item(name: &str) -> MenuBarItem {
+        MenuBarItem {
+            id: "raw".to_string(),
+            name: name.to_string(),
+            owner_name: Some("Example".to_string()),
+            bundle_id: Some("com.example.app".to_string()),
+            zone: MenuBarItemZone::Visible,
+            position: 900.0,
+            center_y: 12.0,
+            width: 24.0,
+            owner_pid: 42,
+            ax_identifier: Some("example-item".to_string()),
+        }
+    }
+
+    #[test]
+    fn publishing_a_refresh_invalidates_previous_snapshot_ids() {
+        let mut session = InventorySession::default();
+        let first = publish_inventory(&mut session, true, true, true, vec![item("First")]);
+        let first_id = first.items[0].id.clone();
+        assert_eq!(session.latest[0].id, first_id);
+
+        let second = publish_inventory(&mut session, true, true, true, vec![item("First")]);
+        assert_ne!(second.items[0].id, first_id);
+        assert_eq!(session.latest, second.items);
+        assert!(unique_item(&session.latest, |candidate| candidate.id == first_id).is_none());
+    }
+
+    #[test]
+    fn tracking_rejects_reused_or_changed_accessibility_identity() {
+        let expected = item("Wi-Fi");
+        assert!(tracks_same_item(&expected, &expected));
+
+        let mut changed_pid = expected.clone();
+        changed_pid.owner_pid += 1;
+        assert!(!tracks_same_item(&expected, &changed_pid));
+
+        let mut changed_label = expected.clone();
+        changed_label.name = "Bluetooth".to_string();
+        assert!(!tracks_same_item(&expected, &changed_label));
+
+        let mut changed_identifier = expected.clone();
+        changed_identifier.ax_identifier = Some("other-item".to_string());
+        assert!(!tracks_same_item(&expected, &changed_identifier));
+    }
+
+    #[test]
+    fn duplicate_tracking_candidates_are_ambiguous() {
+        let candidate = item("Control Center");
+        let candidates = vec![candidate.clone(), candidate];
+
+        assert!(
+            unique_item(&candidates, |item| item.name == "Control Center").is_none(),
+            "an ambiguous match must never pick the first candidate"
+        );
+    }
+
+    #[test]
+    fn target_zone_deserializes_from_the_frontend_contract() {
+        assert_eq!(
+            serde_json::from_str::<MenuBarItemZone>(r#""hidden""#).unwrap(),
+            MenuBarItemZone::Hidden
+        );
+        assert_eq!(
+            serde_json::from_str::<MenuBarItemZone>(r#""visible""#).unwrap(),
+            MenuBarItemZone::Visible
+        );
+        assert_eq!(
+            serde_json::to_string(&MenuBarMoveOutcome::AlreadyInZone).unwrap(),
+            r#""alreadyInZone""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MenuBarMoveOutcome::NotMovable).unwrap(),
+            r#""notMovable""#
+        );
+    }
 }

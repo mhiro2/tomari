@@ -195,8 +195,10 @@ fn collect_children(
         let name = specific_name.unwrap_or_else(|| owner.name.clone());
         let owner_name = (!same_label(&name, &owner.name)).then(|| owner.name.clone());
         let zone = zone_for_x(context, center_x);
-        let identity = unsafe { string_attr(element, "AXIdentifier") }
-            .filter(|value| !value.is_empty())
+        let ax_identifier =
+            unsafe { string_attr(element, "AXIdentifier") }.filter(|value| !value.is_empty());
+        let identity = ax_identifier
+            .clone()
             .unwrap_or_else(|| format!("{center_x:.1}"));
         let owner_identity = owner
             .bundle_id
@@ -210,6 +212,10 @@ fn collect_children(
             bundle_id: owner.bundle_id.clone(),
             zone,
             position: center_x,
+            center_y,
+            width: size.width,
+            owner_pid: owner.pid,
+            ax_identifier,
         });
     }
 }
@@ -670,6 +676,8 @@ mod tests {
     fn classifies_items_around_the_divider() {
         let context = ScanContext {
             divider_x: 800.0,
+            divider_left: 794.0,
+            divider_right: 806.0,
             screen_left: 0.0,
             screen_right: 1_200.0,
             menu_top: 0.0,

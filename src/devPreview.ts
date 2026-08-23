@@ -140,7 +140,7 @@ export async function installDevPreview() {
     ],
     canMoveToDisplay: true,
   };
-  const menuItems: MenuBarInventory = {
+  let menuItems: MenuBarInventory = {
     supported: true,
     permissionGranted: true,
     dividerAvailable: true,
@@ -172,7 +172,7 @@ export async function installDevPreview() {
     ],
   };
 
-  mockIPC((cmd) => {
+  mockIPC((cmd, payload) => {
     switch (cmd) {
       case 'get_settings':
         return settings;
@@ -187,7 +187,7 @@ export async function installDevPreview() {
       case 'set_keep_awake':
         return keepAwake;
       case 'get_menu_bar':
-        return { collapsed: true };
+        return { enabled: true, collapsed: true };
       case 'list_modifier_rules':
         return modifierRules;
       case 'list_hotkeys':
@@ -198,6 +198,22 @@ export async function installDevPreview() {
         return { canUndo: true, canRedo: false };
       case 'list_menu_bar_items':
         return menuItems;
+      case 'move_menu_bar_item': {
+        const { itemId, targetZone } = payload as {
+          itemId: string;
+          targetZone: 'hidden' | 'visible';
+        };
+        const item = menuItems.items.find((candidate) => candidate.id === itemId);
+        if (!item) return { outcome: 'staleItem', inventory: menuItems };
+        const outcome = item.zone === targetZone ? 'alreadyInZone' : 'moved';
+        menuItems = {
+          ...menuItems,
+          items: menuItems.items.map((candidate) =>
+            candidate.id === itemId ? { ...candidate, zone: targetZone } : candidate,
+          ),
+        };
+        return { outcome, inventory: menuItems };
+      }
       case 'plugin:app|version':
         return '0.0.1';
       default:

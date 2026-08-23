@@ -573,6 +573,12 @@ fn handle_event(
         return CallbackResult::Keep;
     }
 
+    // Menu bar arrangement posts a real Command-drag through the HID stream.
+    // It is intended for macOS, not either of Tomari's pointer gesture taps.
+    if crate::eventtap::is_synthetic(event) {
+        return CallbackResult::Keep;
+    }
+
     handle_drag_to_move(state, etype, event)
 }
 

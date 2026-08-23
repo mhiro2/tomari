@@ -1,12 +1,11 @@
 //! The two `NSStatusItem`s that do the tidying, and the click handler on the
 //! second one.
 //!
-//! macOS offers no way to enumerate, identify or move another app's status
-//! item, so hiding one directly is out. What *is* possible is to own an item
-//! and make it enormous: the menu bar lays items out right to left, so an item
-//! stretched to [`COLLAPSED_LENGTH`] pushes everything to its left past the
-//! edge of the screen. That is the whole mechanism, and it is the one Ice,
-//! Dozer and Hidden Bar are built on.
+//! AppKit offers no API to move another app's status item directly. Tomari can
+//! reproduce the user's Command-drag gesture (see `movement`), but hiding still
+//! works by owning an enormous item: the menu bar lays items out right to left,
+//! so an item stretched to [`COLLAPSED_LENGTH`] pushes everything to its left
+//! past the edge of the screen.
 //!
 //! Two items, with distinct jobs:
 //!
@@ -84,6 +83,8 @@ struct Items {
 #[derive(Debug, Clone, Copy)]
 pub struct ScanContext {
     pub divider_x: f64,
+    pub divider_left: f64,
+    pub divider_right: f64,
     pub screen_left: f64,
     pub screen_right: f64,
     pub menu_top: f64,
@@ -185,11 +186,38 @@ pub fn scan_context(app: &AppHandle) -> Option<ScanContext> {
         .ok()?
 }
 
-/// Restore the physical divider after an inventory scan. Going through
-/// [`apply`] claims a generation, so a later click or settings save still wins
-/// even if this main-thread hop has not landed yet.
-pub fn finish_scan(app: &AppHandle, enabled: bool, collapsed: bool) {
-    apply(app, enabled, collapsed);
+/// Restore the physical divider after an inventory scan. Unlike normal state
+/// publication this waits for the main-thread hop, so the scan/move operation
+/// gate is not released while the divider is still temporarily expanded.
+pub fn finish_scan(app: &AppHandle, state: &crate::state::AppState) {
+    let generation = claim_generation();
+    // Claim before reading. A state change that completed first is included in
+    // this snapshot; one that races after the claim gets a newer generation
+    // and its own queued apply wins over this restore.
+    let current = super::status(state);
+    if MainThreadMarker::new().is_some() {
+        apply_on_main(app, current.enabled, current.collapsed, generation);
+        return;
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let handle = app.clone();
+    if app
+        .run_on_main_thread(move || {
+            apply_on_main(&handle, current.enabled, current.collapsed, generation);
+            let _ = sender.send(());
+        })
+        .is_err()
+    {
+        tracing::warn!("could not schedule menu bar divider restoration");
+        return;
+    }
+    if receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_err()
+    {
+        tracing::warn!("timed out restoring menu bar divider");
+    }
 }
 
 fn scan_context_on_main(mtm: MainThreadMarker) -> Option<ScanContext> {
@@ -212,6 +240,8 @@ fn scan_context_on_main(mtm: MainThreadMarker) -> Option<ScanContext> {
         let menu_top = main_height - (menu.origin.y + menu.size.height);
         Some(ScanContext {
             divider_x: menu.origin.x + menu.size.width / 2.0,
+            divider_left: menu.origin.x,
+            divider_right: menu.origin.x + menu.size.width,
             screen_left: screen.origin.x,
             screen_right: screen.origin.x + screen.size.width,
             menu_top,

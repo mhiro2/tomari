@@ -1,9 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsProvider } from '../lib/settings';
-import type { AppSettings, MenuBarInventory, MenuBarStatus } from '../lib/types';
+import type { AppSettings, MenuBarInventory, MenuBarMoveResult, MenuBarStatus } from '../lib/types';
 import { MenuBarView } from './MenuBarView';
 
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
@@ -63,14 +63,33 @@ function renderView(ui: ReactElement) {
   return render(<SettingsProvider>{ui}</SettingsProvider>);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function inventorySection(name: string): HTMLElement {
+  const section = screen.getByRole('heading', { name }).closest('section');
+  if (!section) throw new Error(`Missing inventory section: ${name}`);
+  return section;
+}
+
 async function openBehavior() {
   fireEvent.click(await screen.findByRole('tab', { name: 'Behavior' }));
 }
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
-  mockInvoke.mockImplementation((cmd: string) => {
+  mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
     if (cmd in overrides) {
       const value = overrides[cmd];
+      if (typeof value === 'function') {
+        return Promise.resolve((value as (args?: unknown) => unknown)(args));
+      }
       return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
     }
     switch (cmd) {
@@ -80,6 +99,11 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve({ enabled: true, collapsed: true } satisfies MenuBarStatus);
       case 'list_menu_bar_items':
         return Promise.resolve(INVENTORY);
+      case 'move_menu_bar_item':
+        return Promise.resolve({
+          outcome: 'alreadyInZone',
+          inventory: INVENTORY,
+        } satisfies MenuBarMoveResult);
       case 'save_settings':
         return Promise.resolve({ applyWarnings: [] });
       case 'set_menu_bar_collapsed':
@@ -227,6 +251,131 @@ describe('MenuBarView', () => {
         2,
       );
     });
+  });
+
+  it('disables item moves while a refresh is replacing snapshot-local IDs', async () => {
+    const refresh = deferred<MenuBarInventory>();
+    let listCalls = 0;
+    mockCommands({
+      list_menu_bar_items: () => {
+        listCalls += 1;
+        return listCalls === 1 ? INVENTORY : refresh.promise;
+      },
+    });
+    renderView(<MenuBarView />);
+
+    const showDocker = await screen.findByRole('button', { name: 'Always show Docker' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Items' }));
+
+    expect(showDocker).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Hide Wi-Fi' })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: 'Turn on menu bar tidying' })).toBeDisabled();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'move_menu_bar_item')).toHaveLength(0);
+
+    await act(async () => refresh.resolve(INVENTORY));
+    await waitFor(() => expect(showDocker).toBeEnabled());
+  });
+
+  it('moves an item from its row and waits for the backend-confirmed inventory', async () => {
+    const move = deferred<MenuBarMoveResult>();
+    mockCommands({ move_menu_bar_item: move.promise });
+    renderView(<MenuBarView />);
+
+    const showDocker = await screen.findByRole('button', { name: 'Always show Docker' });
+    fireEvent.click(showDocker);
+
+    expect(mockInvoke).toHaveBeenCalledWith('move_menu_bar_item', {
+      itemId: 'com.docker.docker:status:0',
+      targetZone: 'visible',
+    });
+    expect(within(inventorySection('Hidden now')).getByText('Docker')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Moving Docker…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Hide Wi-Fi' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh Items' })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: 'Turn on menu bar tidying' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Behavior' }));
+    expect(await screen.findByRole('button', { name: 'Show icons' })).toBeDisabled();
+    expect(screen.getByLabelText('Collapse automatically')).toBeDisabled();
+
+    const movedInventory: MenuBarInventory = {
+      ...INVENTORY,
+      items: INVENTORY.items.map((item) =>
+        item.id === 'com.docker.docker:status:0' ? { ...item, zone: 'visible' } : item,
+      ),
+    };
+    await act(async () => move.resolve({ outcome: 'moved', inventory: movedInventory }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Items' }));
+
+    await waitFor(() => {
+      expect(within(inventorySection('Always shown')).getByText('Docker')).toBeInTheDocument();
+    });
+    expect(within(inventorySection('Hidden now')).queryByText('Docker')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hide Docker' })).toBeEnabled();
+  });
+
+  it('uses the refreshed inventory and explains when an item became stale', async () => {
+    const refreshedInventory: MenuBarInventory = {
+      ...INVENTORY,
+      items: INVENTORY.items.filter((item) => item.id !== 'com.docker.docker:status:0'),
+    };
+    mockCommands({
+      move_menu_bar_item: {
+        outcome: 'staleItem',
+        inventory: refreshedInventory,
+      } satisfies MenuBarMoveResult,
+    });
+    renderView(<MenuBarView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Always show Docker' }));
+
+    expect(
+      await screen.findByText(
+        'The menu bar changed before Tomari could move Docker. The list has been refreshed; try again.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Always show Docker' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Hold ⌘ and drag it across the divider in the real menu bar instead.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('offers a manual Command-drag fallback when macOS will not move an item', async () => {
+    mockCommands({
+      move_menu_bar_item: {
+        outcome: 'notMovable',
+        inventory: INVENTORY,
+      } satisfies MenuBarMoveResult,
+    });
+    renderView(<MenuBarView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Hide Wi-Fi' }));
+
+    expect(await screen.findByText('Tomari could not move Wi-Fi.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Hold ⌘ and drag it across the divider in the real menu bar instead.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hide Wi-Fi' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Items' }));
+    await waitFor(() => {
+      expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'list_menu_bar_items')).toHaveLength(
+        2,
+      );
+    });
+    expect(screen.queryByText('Tomari could not move Wi-Fi.')).not.toBeInTheDocument();
+  });
+
+  it('offers the same manual fallback when the move command fails', async () => {
+    mockCommands({ move_menu_bar_item: new Error('drag failed') });
+    renderView(<MenuBarView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Always show Docker' }));
+
+    expect(await screen.findByText('Tomari could not move Docker.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Hold ⌘ and drag it across the divider in the real menu bar instead.'),
+    ).toBeInTheDocument();
   });
 
   it('shows why inventory is unavailable without duplicating the permission action', async () => {

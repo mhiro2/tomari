@@ -175,6 +175,12 @@ fn handle_event(
         return CallbackResult::Keep;
     }
 
+    // Settings-driven menu bar arrangement is a synthesized pointer gesture,
+    // not a window drag. Let it reach macOS without arming a snap candidate.
+    if crate::eventtap::is_synthetic(event) {
+        return CallbackResult::Keep;
+    }
+
     let Some(app_state) = app.try_state::<AppState>() else {
         return CallbackResult::Keep;
     };

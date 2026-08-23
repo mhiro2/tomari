@@ -845,6 +845,24 @@ pub async fn list_menu_bar_items(
     Ok(crate::menubar::inventory(&app, state.inner()))
 }
 
+/// Move one item from the latest inventory snapshot across Tomari's divider.
+/// This synthesizes a real Command-drag and performs blocking AX verification,
+/// so it runs as an async command rather than on AppKit's main thread.
+#[tauri::command]
+pub async fn move_menu_bar_item(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    item_id: String,
+    target_zone: crate::menubar::MenuBarItemZone,
+) -> CmdResult<crate::menubar::MenuBarMoveResult> {
+    Ok(crate::menubar::move_item(
+        &app,
+        state.inner(),
+        &item_id,
+        target_zone,
+    ))
+}
+
 /// Expand or collapse the tidied menu bar items from the panel. A no-op while
 /// the feature is off, which the returned status reflects.
 #[tauri::command]
