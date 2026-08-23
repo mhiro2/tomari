@@ -35,10 +35,11 @@ with the lid closed).
 ```text
 ┌─────────────────────────────────────────────┐
 │ src/            React + TypeScript UI       │
-│                 (one window, sidebar        │
-│                  sections: Keyboard /       │
-│                  Windows / Menu Bar /       │
-│                  Prevent Sleep / General)   │
+│                 (one window, five direct    │
+│                  sidebar destinations:      │
+│                  Windows / Keyboard /       │
+│                  Menu Bar / Prevent Sleep / │
+│                  General)                   │
 └──────────────────────┬──────────────────────┘
                        │ Tauri invoke (camelCase JSON)
 ┌──────────────────────▼──────────────────────┐
@@ -93,14 +94,15 @@ platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
 - **`WindowApplication`** / **`PlacementSlot`** / **`NormalizedRect`** /
   **`WindowPlacement`** — the privacy-safe remembered-home model. A bundle id
   is the durable app identity, each app has only Primary and Secondary slots,
-  shown as Home 1 and Home 2 in the UI, and the frame is relative to one
-  display's usable work area. Window titles are neither required nor persisted.
+  shown as Position A and Position B in the UI, and the frame is relative to
+  one display's usable work area. Window titles are neither required nor
+  persisted.
 - **`AppSettings`** — feature master switches, drag-to-snap configuration, the
   left/right ⌘ IME-toggle switch (`command_ime_switch_enabled`), menu bar
   tidying (`menu_bar_tidy_enabled` plus its `menu_bar_auto_collapse_secs`), UI
-  language (`Language`: system / en / ja), etc. Persisted as a single JSON row. (The app
-  is dark-only, so there is no theme setting; the tap/hold threshold is a fixed
-  engine constant, not a preference.)
+  language (`Language`: system / en / ja), etc. Persisted as a single JSON row.
+  (The app is dark-only, so there is no theme setting; the tap/hold threshold
+  is a fixed engine constant, not a preference.)
 
 ## 4. Input event flow (keyboard)
 
@@ -358,14 +360,15 @@ and applies none of them.
   (`seed_first_run_defaults` in `main.rs`). Keying off empty tables would
   resurrect defaults whenever a user deliberately clears everything. A launch
   where the seed actually ran is flagged as `AppState::first_run`, which
-  `setup` uses to auto-open the settings window once and the frontend pulls
-  via the `setup_status` command (together with the current permission states)
-  to decide whether to show the setup checklist instead of the sections. It is a
-  pull, not an event: a push at launch would race the WebView load. Any
-  ambiguous detection counts as _not_ a first run, so an existing database
-  never triggers it; a corruption reset that re-seeds a fresh database does,
-  deliberately — the settings are back at defaults and the window shows the
-  user that state. Defaults live in
+  `setup` uses to auto-open the settings window once. The frontend pulls it via
+  the `setup_status` command (together with the current permission states) to
+  open the focused Setup dialog over the current settings page when a permission
+  is missing; later recovery opens the same dialog from the sidebar permission
+  status. It is a pull, not an event: a push at launch would race the WebView
+  load. Any ambiguous detection counts as _not_ a first run, so an
+  existing database never triggers it; a corruption reset that re-seeds a fresh
+  database does, deliberately — the settings are back at defaults and the
+  window shows the user that state. Defaults live in
   `defaults.rs` (Caps Lock → Control — the one seeded modifier rule — plus
   focused window shortcuts for quick snaps, remembered-home restore,
   move-and-restore, undo, and redo). The left/right ⌘ IME toggle is _not_ a
@@ -433,15 +436,17 @@ and applies none of them.
   launch would create a duplicate event tap that double-fires every remap, so it
   hands off to the running instance (surfacing its panel) and exits.
   `deep-link` is registered right after it, as the plugin requires.
-- The activation policy is **Accessory** (no Dock icon). A single window
-  (`main`, 620×720, decorated, opaque, not always on top) is declared in
-  `tauri.conf.json`; a fixed-width sidebar lists its sections beside one content
-  column. A row of equal-width tabs was the earlier layout, but it runs out of
-  width at five entries — the sidebar grows down the column instead, which is
-  what a tool-per-section app needs as tools are added. The height is sized so
-  that every section fits without scrolling — check against Japanese, which
-  runs taller than English. A section that outgrows the window should be
-  trimmed rather than left to scroll silently. Closing
+- The activation policy is **Accessory** (no Dock icon). A single resizable
+  window (`main`, 940×720 by default, minimum 860×620, decorated, opaque, not
+  always on top) is declared in `tauri.conf.json`; a fixed-width sidebar lists
+  the five direct destinations beside one scrolling content column. The sidebar
+  is grouped into Tools (Windows, Keyboard, Menu Bar, Prevent Sleep) and App
+  (General), and carries names rather than secondary descriptions or feature
+  state badges. The last selected destination is stored in local storage and
+  restored on the next open, with Windows as the fallback. At the narrow
+  breakpoint the navigation becomes a horizontal strip and the content keeps a
+  usable minimum width. English and Japanese are both checked at the default
+  size; longer sections scroll within the window. Closing
   it is reinterpreted as hide (so reopening is instant and keeps state), and as
   a normal macOS window it stays open on focus loss. Minimize/zoom are disabled
   (`minimizable`/`maximizable: false`) so only the red close button is active.
@@ -454,8 +459,8 @@ and applies none of them.
   Input Monitoring is newly granted, the dead taps are restarted (a tap
   created without the permission is null and never revives on its own). Every
   transition also emits `tomari:permissions-changed` (`{ accessibility,
-  inputMonitoring }`), which the frontend's permission banners listen for so
-  they clear without the panel needing to be reopened.
+  inputMonitoring }`), which updates the centralized sidebar permission status
+  and any open Setup dialog without the window needing to be reopened.
 - **Tray** (`tray.rs`): setup items for missing permissions (at the very top),
   explicitly named Undo/Redo Window Change recovery actions, live Prevent
   Sleep and menu-bar-icon state, Settings, and Check for Updates. It does not
@@ -477,23 +482,32 @@ and applies none of them.
   (`{ code, message }`, `src-tauri/src/error.rs`): the frontend localizes the
   frequent `code`s (missing permission, no focused window, shortcut conflict)
   and falls back to the English `message` for the rest.
-- **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar selects
-  one of four sections — `KeyboardView` / `WindowView` / `SessionView` /
-  `GeneralView`. A section's row carries a muted dot when its master switch is
-  off, folded into the row's accessible name so the state is not colour-only.
-  Sections are named for what they do (`SessionView` is *Prevent Sleep*,
-  matching its tray entry and its own switch). `lib/api.ts` provides typed invoke wrappers whose argument
-  keys must match the Rust command parameter names; `lib/types.ts` mirrors
-  the domain types. `lib/i18n.tsx` holds the typed English/Japanese message
-  dictionaries and the `useT` hook; backend commands return ids (e.g.
+- **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
+  `WindowView` / `KeyboardView` / `MenuBarView` / `SessionView` /
+  `GeneralView` directly; there is no Overview route. Each detail screen pairs
+  a one-sentence purpose with explicit state. Master switches wrap their page
+  controls in `FeatureContent`: turning a feature off keeps the configuration
+  visible but disables interaction. `WindowView` is segmented into Saved
+  Positions / Shortcuts / Mouse, `KeyboardView` into Modifier Keys / Shortcuts,
+  and `MenuBarView` into Items / Behavior. `FeaturePageHeader`,
+  `SegmentedPageNav`, `SettingsList`, `SettingsRow`, and `PermissionStatus`
+  provide the shared presentation vocabulary instead of treating all content
+  as generic cards. Missing permissions appear once in the sidebar footer;
+  first-run/update re-grant flows render `SetupView` as a modal dialog over the
+  selected page. Sections are named for what they do (`SessionView` is *Prevent
+  Sleep*, matching its tray entry and its own switch). `lib/api.ts` provides
+  typed invoke wrappers whose
+  argument keys must match the Rust command parameter names; `lib/types.ts`
+  mirrors the domain types. `lib/i18n.tsx` holds the typed English/Japanese
+  message dictionaries and the `useT` hook; backend commands return ids (e.g.
   `WindowPreset`) and the frontend renders the localized label. `WindowView`
   renders the focused application's current and remembered normalized frames,
   refreshes that context when the panel becomes active, exposes fixed-position
   operation feedback, and owns shortcut editing for every window action without
   restoring the old preset palette. `KeyboardView` owns general keyboard and
-  modifier tap actions, including optional remembered-position restore. Both reuse
-  `HotkeyEditor`; its `ShortcutRecorder` suspends registered global shortcuts
-  (`set_hotkeys_suspended`) while capturing a chord.
+  modifier tap actions, including optional remembered-position restore. Both
+  reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
+  shortcuts (`set_hotkeys_suspended`) while capturing a chord.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
   consumes it and relaunches. The endpoint is `latest.json` on GitHub

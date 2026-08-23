@@ -5,6 +5,13 @@ A detailed look at everything Tomari can do. For a quick overview, see the
 
 ## Keyboard
 
+The **Keyboard** settings separate the two kinds of configuration into
+**Modifier Keys** and **Shortcuts** tabs. Modifier Keys presents each physical
+key as a row with its tap action, held role, and enabled state; the left/right
+Command IME switch is shown as a direct key-to-input-source mapping. Global
+shortcut recording stays in the Shortcuts tab so it does not compete with the
+modifier table.
+
 - **Modifier remapping** — remap Caps Lock / Control / Option / Command /
   Shift / fn to another modifier (for example, _Caps Lock → Control_).
 - **Tap vs. hold** — tap a modifier on its own, quickly, to fire a dedicated
@@ -64,11 +71,17 @@ consequences to be aware of:
 
 ## Window management
 
-- **Two remembered homes per app** — place a focused app where it belongs, then
-  save that position as Home 1 or Home 2 in the Windows section. Replacing a
-  home can be undone from the confirmation toast; forgetting one requires a
-  second click and can also be undone. Tomari identifies the app by bundle id
-  and never stores the window title.
+The **Windows** settings are split into **Saved Positions**, **Shortcuts**, and
+**Mouse** tabs. Saved Positions keeps the focused application, its current
+frame, and Position A/B together; Shortcuts puts each window action beside its
+recorded chord; Mouse gives drag-to-snap and drag-to-move/resize their own
+visual controls.
+
+- **Two remembered positions per app** — place a focused app where it belongs,
+  then save that position as Position A or Position B in the Windows section.
+  Replacing a position can be undone from the confirmation toast; forgetting
+  one requires a second click and can also be undone. Tomari identifies the app
+  by bundle id and never stores the window title.
 - **Display-safe restore** — homes are stored as position and size relative to
   the usable display rather than as desktop pixels. Restoring applies the same
   proportion to the current display, including after a display is disconnected,
@@ -77,12 +90,13 @@ consequences to be aware of:
   to another global shortcut, or assign Restore as a modifier-key tap under
   Keyboard. Caps Lock → Control users can choose it as an optional accelerator:
   a tap restores the window and a hold remains Control. Repeating restore on
-  the same unmoved window alternates Home 1 and Home 2. The panel refreshes its
-  focused-app context whenever it is shown, and each button verifies the exact
-  represented window before applying an action.
+  the same unmoved window alternates Position A and Position B. The panel
+  refreshes its focused-app context whenever it is shown, and each button
+  verifies the exact represented window before applying an action.
 - **Move and restore** — `⌃⌥⇧→` moves the focused window to the next display and
-  applies Home 1 there as one action. Home 2 is used when Home 1 is absent; all
-  window shortcuts are configured beside the workflow in the Windows section.
+  applies Position A there as one action. Position B is used when Position A is
+  absent; all window shortcuts are configured beside the workflow in the
+  Windows section.
 - **Undo and redo** — `⌃⌥Z` and `⌃⌥⇧Z` reverse or reapply window changes,
   including remembered-home restores, display moves, preset snaps, and drag
   snaps. The tray names these actions explicitly as window changes so their
@@ -122,12 +136,14 @@ you want tucked away sit to the left of the divider. macOS lets an app move only
 its own menu bar icons, so this part is yours to do — there is no way for Tomari
 to sort them for you.
 
-The **Menu Bar** settings show a live, best-effort inventory split into
-**Hidden now** and **Always shown**. After moving an icon across the divider with
-⌘-drag, choose **Refresh Items** to reread the physical arrangement. Reading
-item names requires Accessibility access; some applications expose only a
-generic owner name, and the list may be incomplete when macOS does not publish
-an item through Accessibility.
+The **Menu Bar** settings separate **Items** from **Behavior**. Items shows a
+menu-bar diagram and a live, best-effort inventory split into **Hidden now** and
+**Always shown**. After moving an icon across the divider with ⌘-drag, choose
+**Refresh Items** to reread the physical arrangement. Reading item names
+requires Accessibility access; some applications expose only a generic owner
+name, and the list may be incomplete when macOS does not publish an item
+through Accessibility. Behavior contains the show/hide control and automatic
+collapse timing.
 
 - **Expand and collapse** — click the ‹ handle, use **Show Menu Bar Icons** in
   the tray menu, or bind the "Show/Hide Menu Bar Icons" action to a shortcut in
@@ -177,24 +193,39 @@ machine plugged in is recommended.
 Tomari runs as a menu bar app: clicking its menu bar icon opens a compact menu
 for permission recovery, undo/redo of window changes, Prevent Sleep, menu-bar
 icons, and Settings. Placement choices live with their app context in the
-Windows section or on shortcuts rather than in a generic tray palette. A
-sidebar down the left lists the sections — Keyboard, Windows, Prevent Sleep,
-and General — and a muted dot marks a section whose feature is switched off.
-On the very first launch the settings window opens automatically (the main features need
-permissions you have not granted yet); after that Tomari starts silently in the
-menu bar. The same happens on the rare launch where Tomari had to reset an
-unreadable settings database — your settings are back at their defaults, so the
-window shows you what state you are in.
+Windows section or on shortcuts rather than in a generic tray palette. The
+settings window has no overview page: its sidebar contains the five direct
+destinations **Windows**, **Keyboard**, **Menu Bar**, **Prevent Sleep**, and
+**General**, grouped under Tools and App. Sidebar rows use the destination name
+instead of repeating descriptions or feature-state badges. Reopening Settings
+returns to the last selected destination (or Windows when no valid selection has
+been saved).
 
-On that first launch the window opens on a one-screen setup checklist in place
-of the sections (see [Permissions](permissions.md)): grant Accessibility and
-Input Monitoring from there, or choose **Set up later** to go to the sections.
-While a permission is still missing, a reminder bar above the content — and an
-**Open Setup** button in the per-section permission banners — leads back to the
-checklist. You can hide the icon with **Show in menu bar** in the General
-section if you prefer a fully background app. Because hiding it removes the
-app's only visible affordance (Tomari has no Dock icon), turning it off asks you
-to confirm first and spells out how to reopen the window.
+Each feature page starts with one short purpose sentence and, where applicable,
+a master switch. Turning a feature off leaves its settings visible so its scope
+is still understandable, but disables the controls until the feature is turned
+back on. Windows, Keyboard, and Menu Bar use the focused tabs described above;
+ordinary options use divided rows, while cards are reserved for objects such as
+saved window positions.
+
+On the very first launch the settings window opens automatically (the main
+features need permissions you have not granted yet); after that Tomari starts
+silently in the menu bar. The same happens on the rare launch where Tomari had
+to reset an unreadable settings database — your settings are back at their
+defaults, so the window shows you what state you are in.
+
+On the first launch, or after an update invalidates a previously granted
+permission, Settings opens with a focused Setup dialog over the current page
+(see [Permissions](permissions.md)). Dismissing it returns to the settings pages.
+Afterward, permission health is summarized once in the sidebar footer: a green
+ready status when both permissions are granted, or **Needs attention** when
+either is missing. Selecting **Needs attention** reopens Setup; individual
+feature pages do not repeat permission banners.
+
+You can hide the icon with **Show in menu bar** in the General section if you
+prefer a fully background app. Because hiding it removes the app's only visible
+affordance (Tomari has no Dock icon), turning it off asks you to confirm first
+and spells out how to reopen the window.
 
 Even with the icon hidden, you can always reopen the window:
 

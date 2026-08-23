@@ -5,22 +5,28 @@ them. This page explains what each one is for and how to grant it.
 
 ## The setup checklist
 
-While either permission below is missing, the settings window offers a
-one-screen **setup checklist**: each permission as a row with what it is for,
-a **Grant Access** button, and a green **Granted** mark once it is on. On a
-first launch the window opens on this checklist automatically; on later
-launches the sections show as usual with a thin reminder bar above the content
-that reopens it. **Set up later** on the checklist returns to the sections the
-same way. The per-section permission banners stay, and their **Open Setup**
-button also leads back to the checklist.
+Setup is a focused dialog over the settings page. Each permission appears with
+what it enables, an **Open System Settings** button, and a green **Granted** mark
+once it is on. The dialog opens automatically on first launch when a permission
+is missing, and after an update when Tomari detects that a previously granted
+permission was invalidated. **Set up later** closes the dialog without hiding
+or disabling navigation.
+
+Outside that automatic setup flow, permission health is kept in one place: the
+settings sidebar footer. It reads **Permissions: Ready** when both grants are
+present. If either is missing it becomes **Needs attention**; selecting it
+reopens Setup. Individual Windows, Keyboard, and Menu Bar pages do not repeat
+permission banners. Their settings remain visible, and the backend still
+reports a permission error if an action requiring a missing grant is attempted.
 
 The administrator password for Prevent Sleep is deliberately not on the
 checklist — it is asked for each time rather than granted once (see below).
 
 ## Accessibility
 
-Required for **moving windows**, **switching the IME**, and **sending keys**.
-macOS prompts you the first time one of these is used. Grant it under
+Required for **moving windows**, **switching the IME**, **sending keys**, and
+**reading the menu bar arrangement**. macOS prompts you the first time one of
+these is used. Grant it under
 **System Settings → Privacy & Security → Accessibility**.
 
 Global shortcuts work regardless of this permission.
@@ -70,9 +76,9 @@ inside the app.
 
 Tomari does detect it, though: each run stores which permissions were granted,
 and a launch that finds a previously granted permission missing *and* a changed
-app version opens the settings window on the setup checklist, noting that the
-permissions went missing after the update. If the version has not changed — you
-revoked a permission yourself — nothing opens automatically; the tray items and
-section banners point it out as usual. (Detection needs a stored snapshot to
-compare against, so it starts working from the first update *after* the release
-that introduced it.)
+app version opens the settings window with an update-specific Setup dialog. If
+the version has not changed — you revoked a permission yourself — nothing opens
+automatically; the tray items and the settings sidebar's **Needs attention**
+status point it out. (Detection needs a stored snapshot to compare against, so
+it starts working from the first update *after* the release that introduced
+it.)
