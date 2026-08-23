@@ -49,6 +49,13 @@ const INVENTORY: MenuBarInventory = {
       bundleId: 'com.apple.controlcenter',
       zone: 'visible',
     },
+    {
+      id: 'com.apple.controlcenter:battery:1',
+      name: 'Battery',
+      ownerName: 'Control Center',
+      bundleId: 'com.apple.controlcenter',
+      zone: 'visible',
+    },
   ],
 };
 
@@ -203,7 +210,8 @@ describe('MenuBarView', () => {
 
     expect(await screen.findByText('Docker')).toBeInTheDocument();
     expect(screen.getByText('Wi-Fi')).toBeInTheDocument();
-    expect(screen.getByText('From Control Center')).toBeInTheDocument();
+    expect(screen.getByText('Battery')).toBeInTheDocument();
+    expect(screen.getAllByText('From Control Center')).toHaveLength(2);
     expect(screen.getByText('Hidden now')).toBeInTheDocument();
     expect(screen.getByText('Always shown')).toBeInTheDocument();
   });

@@ -148,9 +148,27 @@ export async function installDevPreview() {
       { id: 'dropbox', name: 'Dropbox', ownerName: 'Dropbox', bundleId: null, zone: 'hidden' },
       { id: 'docker', name: 'Docker', ownerName: 'Docker Desktop', bundleId: null, zone: 'hidden' },
       { id: 'vpn', name: 'VPN', ownerName: 'VPN', bundleId: null, zone: 'hidden' },
-      { id: 'wifi', name: 'Wi-Fi', ownerName: 'System', bundleId: null, zone: 'visible' },
-      { id: 'battery', name: 'Battery', ownerName: 'System', bundleId: null, zone: 'visible' },
-      { id: 'clock', name: 'Clock', ownerName: 'System', bundleId: null, zone: 'visible' },
+      {
+        id: 'com.apple.controlcenter:wifi',
+        name: 'Wi-Fi',
+        ownerName: 'Control Center',
+        bundleId: 'com.apple.controlcenter',
+        zone: 'visible',
+      },
+      {
+        id: 'com.apple.controlcenter:battery',
+        name: 'Battery',
+        ownerName: 'Control Center',
+        bundleId: 'com.apple.controlcenter',
+        zone: 'visible',
+      },
+      {
+        id: 'com.apple.controlcenter:clock',
+        name: 'Clock',
+        ownerName: 'Control Center',
+        bundleId: 'com.apple.controlcenter',
+        zone: 'visible',
+      },
     ],
   };
 

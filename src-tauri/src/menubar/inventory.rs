@@ -28,9 +28,12 @@ type AXValueType = u32;
 type pid_t = i32;
 
 const kAXErrorSuccess: AXError = 0;
+const kAXErrorAttributeUnsupported: AXError = -25_205;
+const kAXErrorNoValue: AXError = -25_212;
 const kAXValueTypeCGPoint: AXValueType = 1;
 const kAXValueTypeCGSize: AXValueType = 2;
 const AX_MESSAGING_TIMEOUT_SECS: f32 = 0.1;
+const LABEL_READ_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -60,6 +63,23 @@ struct Owner {
     pid: pid_t,
     name: String,
     bundle_id: Option<String>,
+}
+
+/// Accessibility strings that may describe one menu bar item. Keeping label
+/// policy separate from AX calls makes the incomplete values seen in the wild
+/// straightforward to exercise in unit tests.
+#[derive(Default)]
+struct ItemLabels {
+    title: Option<String>,
+    description: Option<String>,
+    help: Option<String>,
+    identifier: Option<String>,
+    role_description: Option<String>,
+}
+
+struct LabelRead {
+    labels: ItemLabels,
+    failure: Option<AXError>,
 }
 
 /// Scan every running application. `AXExtrasMenuBar` is intentionally queried
@@ -151,6 +171,13 @@ fn collect_children(
         let Some((position, size)) = (unsafe { element_frame(element) }) else {
             continue;
         };
+        // Control Center advertises disabled modules as zero-area menu-bar
+        // items. Their placeholder positions can overlap another display's
+        // menu bar, so geometry checks alone would present them as a row of
+        // duplicate "Control Center" entries.
+        if !usable_item_frame(position, size) {
+            continue;
+        }
         let center_x = position.x + size.width / 2.0;
         let center_y = position.y + size.height / 2.0;
         // Multiple displays may each advertise menu extras. Only compare items
@@ -159,17 +186,14 @@ fn collect_children(
             continue;
         }
 
-        // Control Center commonly exposes an empty AXTitle and puts the useful
-        // label (Wi-Fi, Battery, Clock, ...) in AXDescription. Reject unusable
-        // values *before* choosing one so an empty earlier attribute cannot
-        // suppress a useful later one.
-        let specific_name = first_usable_label(
-            ["AXDescription", "AXTitle", "AXHelp", "AXIdentifier"]
-                .into_iter()
-                .map(|attribute| unsafe { string_attr(element, attribute) }),
-        );
+        let Ok(specific_name) = (unsafe { item_label(element, owner) }) else {
+            // A transient AX failure is not evidence that the item has no
+            // specific name. Omitting it from one best-effort snapshot is less
+            // misleading than presenting the owner name for several items.
+            continue;
+        };
         let name = specific_name.unwrap_or_else(|| owner.name.clone());
-        let owner_name = (name != owner.name).then(|| owner.name.clone());
+        let owner_name = (!same_label(&name, &owner.name)).then(|| owner.name.clone());
         let zone = zone_for_x(context, center_x);
         let identity = unsafe { string_attr(element, "AXIdentifier") }
             .filter(|value| !value.is_empty())
@@ -205,30 +229,235 @@ fn zone_for_x(context: ScanContext, center_x: f64) -> MenuBarItemZone {
     }
 }
 
+fn usable_item_frame(position: CGPoint, size: CGSize) -> bool {
+    position.x.is_finite()
+        && position.y.is_finite()
+        && size.width.is_finite()
+        && size.height.is_finite()
+        && size.width > 0.0
+        && size.height > 0.0
+}
+
 fn generic_label(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "menu extra" | "menu bar item" | "status item"
+        "menu extra" | "menu bar item" | "status item" | "status menu"
     )
 }
 
-fn first_usable_label(values: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+fn same_label(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn first_usable_label(
+    owner: &Owner,
+    role_description: Option<&str>,
+    values: impl IntoIterator<Item = Option<String>>,
+) -> Option<String> {
     values.into_iter().find_map(|value| {
         let value = value?;
         let trimmed = value.trim();
-        (!trimmed.is_empty() && !generic_label(trimmed)).then(|| trimmed.to_owned())
+        let is_owner = same_label(trimmed, &owner.name)
+            || owner
+                .bundle_id
+                .as_deref()
+                .is_some_and(|bundle_id| same_label(trimmed, bundle_id));
+        let is_role = role_description.is_some_and(|role| same_label(trimmed, role));
+        (!trimmed.is_empty() && !generic_label(trimmed) && !is_owner && !is_role)
+            .then(|| trimmed.to_owned())
     })
 }
 
-/// Copy a retained AX attribute. Missing and unsupported attributes are normal
-/// during a best-effort scan and therefore collapse to `None`.
-unsafe fn copy_attr(element: CFTypeRef, name: &str) -> Option<CFOwned> {
+fn system_identifier_label(value: &str) -> Option<String> {
+    let suffix = value.strip_prefix("com.apple.menuextra.")?;
+    let label = match suffix.to_ascii_lowercase().as_str() {
+        "airport" | "wifi" => "Wi-Fi".to_owned(),
+        "controlcenter" => "Control Center".to_owned(),
+        "nowplaying" => "Now Playing".to_owned(),
+        "textinput" => "Input Menu".to_owned(),
+        "timemachine" => "Time Machine".to_owned(),
+        _ => {
+            let mut characters = suffix.chars();
+            let first = characters.next()?;
+            first.to_uppercase().chain(characters).collect()
+        }
+    };
+    Some(label)
+}
+
+fn description_label(owner: &Owner, identifier: Option<&str>, value: String) -> String {
+    let is_control_center = owner.bundle_id.as_deref() == Some("com.apple.controlcenter");
+    if is_control_center && identifier.and_then(system_identifier_label).is_some() {
+        return value
+            .split_once(',')
+            .map_or(value.as_str(), |(label, _)| label)
+            .trim()
+            .to_owned();
+    }
+    value.trim().to_owned()
+}
+
+fn resolve_label(owner: &Owner, labels: ItemLabels) -> Option<String> {
+    let role_description = labels.role_description.as_deref();
+    let system_identifier = labels
+        .identifier
+        .as_deref()
+        .and_then(system_identifier_label);
+    let description = labels
+        .description
+        .map(|value| description_label(owner, labels.identifier.as_deref(), value));
+    let raw_identifier = if system_identifier.is_none() {
+        labels.identifier
+    } else {
+        None
+    };
+    first_usable_label(
+        owner,
+        role_description,
+        [
+            labels.title,
+            description,
+            system_identifier,
+            labels.help,
+            raw_identifier,
+        ],
+    )
+}
+
+unsafe fn item_label(element: CFTypeRef, owner: &Owner) -> Result<Option<String>, AXError> {
+    if let Some(label) = unsafe { resolved_element_label(element, owner) }? {
+        return Ok(Some(label));
+    }
+
+    // Some status-item implementations put the accessible label on a shallow
+    // button or image rather than the AXMenuBarItem itself.
+    let Some(children) = (unsafe { checked_copy_attr_with_retry(element, "AXChildren") })? else {
+        return Ok(None);
+    };
+    if unsafe { CFGetTypeID(children.0) } != unsafe { CFArrayGetTypeID() } {
+        return Ok(None);
+    }
+    let array = children.0 as CFArrayRef;
+    let count = unsafe { CFArrayGetCount(array) };
+    for index in 0..count {
+        let child = unsafe { CFArrayGetValueAtIndex(array, index) } as CFTypeRef;
+        if child.is_null() {
+            continue;
+        }
+        let role = unsafe { checked_string_attr_with_retry(child, "AXRole") }?;
+        if !matches!(
+            role.as_deref(),
+            Some("AXButton" | "AXImage" | "AXStaticText")
+        ) {
+            continue;
+        }
+        if let Some(label) = unsafe { resolved_element_label(child, owner) }? {
+            return Ok(Some(label));
+        }
+    }
+    Ok(None)
+}
+
+unsafe fn resolved_element_label(
+    element: CFTypeRef,
+    owner: &Owner,
+) -> Result<Option<String>, AXError> {
+    let first = unsafe { read_labels(element) };
+    if let Some(label) = resolve_label(owner, first.labels) {
+        return Ok(Some(label));
+    }
+    if first.failure.is_none() {
+        return Ok(None);
+    }
+
+    std::thread::sleep(LABEL_READ_RETRY_DELAY);
+    let retry = unsafe { read_labels(element) };
+    if let Some(label) = resolve_label(owner, retry.labels) {
+        return Ok(Some(label));
+    }
+    retry.failure.map_or(Ok(None), Err)
+}
+
+unsafe fn read_labels(element: CFTypeRef) -> LabelRead {
+    let mut failure = None;
+    let mut read = |name| match unsafe { checked_string_attr(element, name) } {
+        Ok(value) => value,
+        Err(error) => {
+            failure.get_or_insert(error);
+            None
+        }
+    };
+    let labels = ItemLabels {
+        title: read("AXTitle"),
+        description: read("AXDescription"),
+        help: read("AXHelp"),
+        identifier: read("AXIdentifier"),
+        role_description: read("AXRoleDescription"),
+    };
+    LabelRead { labels, failure }
+}
+
+unsafe fn checked_string_attr(element: CFTypeRef, name: &str) -> Result<Option<String>, AXError> {
+    let Some(value) = (unsafe { checked_copy_attr(element, name) })? else {
+        return Ok(None);
+    };
+    if unsafe { CFGetTypeID(value.0) } != unsafe { CFStringGetTypeID() } {
+        return Ok(None);
+    }
+    let string = unsafe { CFString::wrap_under_get_rule(value.0 as CFStringRef) };
+    Ok(Some(string.to_string()))
+}
+
+unsafe fn checked_string_attr_with_retry(
+    element: CFTypeRef,
+    name: &str,
+) -> Result<Option<String>, AXError> {
+    match unsafe { checked_string_attr(element, name) } {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            std::thread::sleep(LABEL_READ_RETRY_DELAY);
+            unsafe { checked_string_attr(element, name) }
+        }
+    }
+}
+
+unsafe fn checked_copy_attr_with_retry(
+    element: CFTypeRef,
+    name: &str,
+) -> Result<Option<CFOwned>, AXError> {
+    match unsafe { checked_copy_attr(element, name) } {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            std::thread::sleep(LABEL_READ_RETRY_DELAY);
+            unsafe { checked_copy_attr(element, name) }
+        }
+    }
+}
+
+unsafe fn checked_copy_attr(element: CFTypeRef, name: &str) -> Result<Option<CFOwned>, AXError> {
     let attribute = CFString::new(name);
     let mut value: CFTypeRef = std::ptr::null();
     let error = unsafe {
         AXUIElementCopyAttributeValue(element, attribute.as_concrete_TypeRef(), &mut value)
     };
-    (error == kAXErrorSuccess && !value.is_null()).then(|| CFOwned(value))
+    let value = (!value.is_null()).then(|| CFOwned(value));
+    if missing_attribute_error(error) {
+        return Ok(None);
+    }
+    if error != kAXErrorSuccess {
+        return Err(error);
+    }
+    Ok(value)
+}
+
+fn missing_attribute_error(error: AXError) -> bool {
+    matches!(error, kAXErrorAttributeUnsupported | kAXErrorNoValue)
+}
+
+/// Copy a retained AX attribute. Missing and unsupported attributes are normal
+/// during a best-effort scan and therefore collapse to `None`.
+unsafe fn copy_attr(element: CFTypeRef, name: &str) -> Option<CFOwned> {
+    unsafe { checked_copy_attr(element, name) }.ok().flatten()
 }
 
 unsafe fn string_attr(element: CFTypeRef, name: &str) -> Option<String> {
@@ -269,23 +498,167 @@ unsafe fn element_frame(element: CFTypeRef) -> Option<(CGPoint, CGSize)> {
 mod tests {
     use super::*;
 
+    fn control_center() -> Owner {
+        Owner {
+            pid: 1,
+            name: "Control Center".into(),
+            bundle_id: Some("com.apple.controlcenter".into()),
+        }
+    }
+
+    fn third_party_owner() -> Owner {
+        Owner {
+            pid: 2,
+            name: "Example App".into(),
+            bundle_id: Some("com.example.app".into()),
+        }
+    }
+
     #[test]
     fn recognizes_only_generic_accessibility_labels() {
         assert!(generic_label("Menu Extra"));
         assert!(generic_label(" status item "));
+        assert!(generic_label("status menu"));
         assert!(!generic_label("Wi-Fi"));
     }
 
     #[test]
-    fn skips_empty_and_generic_labels_before_using_description() {
+    fn skips_empty_generic_and_owner_labels() {
+        let owner = control_center();
         assert_eq!(
-            first_usable_label([
-                Some(String::new()),
-                Some("Menu Bar Item".into()),
-                Some("Wi-Fi".into()),
-            ]),
+            first_usable_label(
+                &owner,
+                Some("status menu"),
+                [
+                    Some(String::new()),
+                    Some("status menu".into()),
+                    Some("Control Center".into()),
+                    Some("Wi-Fi".into()),
+                ],
+            ),
             Some("Wi-Fi".into())
         );
+    }
+
+    #[test]
+    fn resolves_real_control_center_labels_without_dynamic_details() {
+        let owner = control_center();
+
+        assert_eq!(
+            resolve_label(
+                &owner,
+                ItemLabels {
+                    description: Some("Wi-Fi, connected, 3 bars".into()),
+                    identifier: Some("com.apple.menuextra.wifi".into()),
+                    ..Default::default()
+                },
+            ),
+            Some("Wi-Fi".into())
+        );
+        assert_eq!(
+            resolve_label(
+                &owner,
+                ItemLabels {
+                    title: Some("Battery".into()),
+                    description: Some("Control Center".into()),
+                    ..Default::default()
+                },
+            ),
+            Some("Battery".into())
+        );
+    }
+
+    #[test]
+    fn uses_the_menu_extra_identifier_after_an_owner_only_description() {
+        assert_eq!(
+            resolve_label(
+                &control_center(),
+                ItemLabels {
+                    description: Some("Control Center".into()),
+                    help: Some("Click to open Bluetooth settings".into()),
+                    identifier: Some("com.apple.menuextra.bluetooth".into()),
+                    ..Default::default()
+                },
+            ),
+            Some("Bluetooth".into())
+        );
+    }
+
+    #[test]
+    fn preserves_third_party_descriptions_and_identifier_fallbacks() {
+        let owner = third_party_owner();
+        assert_eq!(
+            resolve_label(
+                &owner,
+                ItemLabels {
+                    description: Some("Song, Live".into()),
+                    ..Default::default()
+                },
+            ),
+            Some("Song, Live".into())
+        );
+        assert_eq!(
+            resolve_label(
+                &owner,
+                ItemLabels {
+                    identifier: Some("primary-status-item".into()),
+                    ..Default::default()
+                },
+            ),
+            Some("primary-status-item".into())
+        );
+    }
+
+    #[test]
+    fn distinguishes_missing_attributes_from_transient_failures() {
+        assert!(missing_attribute_error(kAXErrorAttributeUnsupported));
+        assert!(missing_attribute_error(kAXErrorNoValue));
+        // kAXErrorCannotComplete is a transient messaging failure.
+        assert!(!missing_attribute_error(-25_204));
+    }
+
+    #[test]
+    fn leaves_owner_fallback_to_the_caller_when_no_specific_label_exists() {
+        assert_eq!(
+            resolve_label(
+                &control_center(),
+                ItemLabels {
+                    description: Some("Control Center".into()),
+                    identifier: Some("com.apple.menuextra.controlcenter".into()),
+                    role_description: Some("status menu".into()),
+                    ..Default::default()
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_zero_area_and_non_finite_item_frames() {
+        assert!(usable_item_frame(
+            CGPoint { x: 10.0, y: 8.0 },
+            CGSize {
+                width: 22.0,
+                height: 22.0,
+            },
+        ));
+        assert!(!usable_item_frame(
+            CGPoint { x: 0.0, y: 1_169.0 },
+            CGSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        ));
+        assert!(!usable_item_frame(
+            CGPoint {
+                x: f64::NAN,
+                y: 8.0,
+            },
+            CGSize {
+                width: 22.0,
+                height: 22.0,
+            },
+        ));
     }
 
     #[test]

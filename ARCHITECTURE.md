@@ -588,7 +588,14 @@ The settings panel can still *inspect* that arrangement. `inventory.rs` asks
 each running process for its Accessibility `AXExtrasMenuBar`, reads the child
 items' frames and classifies them relative to Tomari's divider. The divider is
 expanded only for the scan and restored to the latest live state immediately
-afterward. Item ids are snapshot-local: AX exposes neither a durable status-item
+afterward. Disabled Control Center modules remain in the AX tree as zero-area
+placeholders, so the scanner rejects non-positive frames. Names prefer a real
+title, then the description (with dynamic Control Center details removed), then
+a known system menu-extra identifier; generic role labels and owner-only
+fallbacks cannot mask a later item-specific name. Transient AX label failures
+are retried once; persistent failures omit the item from that snapshot instead
+of mislabeling it with its owner's name.
+Item ids are snapshot-local: AX exposes neither a durable status-item
 identity nor a supported move operation, and item names vary in quality across
 applications. The physical ⌘-drag layout therefore remains the single source
 of truth; the panel is a live inventory, not a second configuration database.
