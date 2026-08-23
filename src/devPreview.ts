@@ -140,30 +140,37 @@ export async function installDevPreview() {
     ],
     canMoveToDisplay: true,
   };
+  let menuItemGeneration = 1;
   let menuItems: MenuBarInventory = {
     supported: true,
     permissionGranted: true,
     dividerAvailable: true,
     items: [
-      { id: 'dropbox', name: 'Dropbox', ownerName: 'Dropbox', bundleId: null, zone: 'hidden' },
-      { id: 'docker', name: 'Docker', ownerName: 'Docker Desktop', bundleId: null, zone: 'hidden' },
-      { id: 'vpn', name: 'VPN', ownerName: 'VPN', bundleId: null, zone: 'hidden' },
+      { id: '1:0', name: 'Dropbox', ownerName: 'Dropbox', bundleId: null, zone: 'hidden' },
       {
-        id: 'com.apple.controlcenter:wifi',
+        id: '1:1',
+        name: 'Docker',
+        ownerName: 'Docker Desktop',
+        bundleId: null,
+        zone: 'hidden',
+      },
+      { id: '1:2', name: 'VPN', ownerName: 'VPN', bundleId: null, zone: 'hidden' },
+      {
+        id: '1:3',
         name: 'Wi-Fi',
         ownerName: 'Control Center',
         bundleId: 'com.apple.controlcenter',
         zone: 'visible',
       },
       {
-        id: 'com.apple.controlcenter:battery',
+        id: '1:4',
         name: 'Battery',
         ownerName: 'Control Center',
         bundleId: 'com.apple.controlcenter',
         zone: 'visible',
       },
       {
-        id: 'com.apple.controlcenter:clock',
+        id: '1:5',
         name: 'Clock',
         ownerName: 'Control Center',
         bundleId: 'com.apple.controlcenter',
@@ -204,13 +211,15 @@ export async function installDevPreview() {
           targetZone: 'hidden' | 'visible';
         };
         const item = menuItems.items.find((candidate) => candidate.id === itemId);
-        if (!item) return { outcome: 'staleItem', inventory: menuItems };
-        const outcome = item.zone === targetZone ? 'alreadyInZone' : 'moved';
+        const outcome = !item ? 'staleItem' : item.zone === targetZone ? 'alreadyInZone' : 'moved';
+        menuItemGeneration += 1;
         menuItems = {
           ...menuItems,
-          items: menuItems.items.map((candidate) =>
-            candidate.id === itemId ? { ...candidate, zone: targetZone } : candidate,
-          ),
+          items: menuItems.items.map((candidate, index) => ({
+            ...candidate,
+            id: `${menuItemGeneration}:${index}`,
+            zone: candidate.id === itemId ? targetZone : candidate.zone,
+          })),
         };
         return { outcome, inventory: menuItems };
       }

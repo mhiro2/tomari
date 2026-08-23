@@ -36,21 +36,21 @@ const INVENTORY: MenuBarInventory = {
   dividerAvailable: true,
   items: [
     {
-      id: 'com.docker.docker:status:0',
+      id: '1:0',
       name: 'Docker',
       ownerName: null,
       bundleId: 'com.docker.docker',
       zone: 'hidden',
     },
     {
-      id: 'com.apple.controlcenter:wifi:0',
+      id: '1:1',
       name: 'Wi-Fi',
       ownerName: 'Control Center',
       bundleId: 'com.apple.controlcenter',
       zone: 'visible',
     },
     {
-      id: 'com.apple.controlcenter:battery:1',
+      id: '1:2',
       name: 'Battery',
       ownerName: 'Control Center',
       bundleId: 'com.apple.controlcenter',
@@ -58,6 +58,21 @@ const INVENTORY: MenuBarInventory = {
     },
   ],
 };
+
+function inventoryGeneration(
+  inventory: MenuBarInventory,
+  generation: number,
+  zoneByName: Partial<Record<string, 'hidden' | 'visible'>> = {},
+): MenuBarInventory {
+  return {
+    ...inventory,
+    items: inventory.items.map((item, index) => ({
+      ...item,
+      id: `${generation}:${index}`,
+      zone: zoneByName[item.name] ?? item.zone,
+    })),
+  };
+}
 
 function renderView(ui: ReactElement) {
   return render(<SettingsProvider>{ui}</SettingsProvider>);
@@ -272,8 +287,11 @@ describe('MenuBarView', () => {
     expect(screen.getByRole('switch', { name: 'Turn on menu bar tidying' })).toBeDisabled();
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'move_menu_bar_item')).toHaveLength(0);
 
-    await act(async () => refresh.resolve(INVENTORY));
-    await waitFor(() => expect(showDocker).toBeEnabled());
+    await act(async () => refresh.resolve(inventoryGeneration(INVENTORY, 2)));
+    expect(showDocker).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Always show Docker' })).toBeEnabled(),
+    );
   });
 
   it('moves an item from its row and waits for the backend-confirmed inventory', async () => {
@@ -285,7 +303,7 @@ describe('MenuBarView', () => {
     fireEvent.click(showDocker);
 
     expect(mockInvoke).toHaveBeenCalledWith('move_menu_bar_item', {
-      itemId: 'com.docker.docker:status:0',
+      itemId: '1:0',
       targetZone: 'visible',
     });
     expect(within(inventorySection('Hidden now')).getByText('Docker')).toBeInTheDocument();
@@ -298,12 +316,7 @@ describe('MenuBarView', () => {
     expect(await screen.findByRole('button', { name: 'Show icons' })).toBeDisabled();
     expect(screen.getByLabelText('Collapse automatically')).toBeDisabled();
 
-    const movedInventory: MenuBarInventory = {
-      ...INVENTORY,
-      items: INVENTORY.items.map((item) =>
-        item.id === 'com.docker.docker:status:0' ? { ...item, zone: 'visible' } : item,
-      ),
-    };
+    const movedInventory = inventoryGeneration(INVENTORY, 2, { Docker: 'visible' });
     await act(async () => move.resolve({ outcome: 'moved', inventory: movedInventory }));
     fireEvent.click(screen.getByRole('tab', { name: 'Items' }));
 
@@ -311,14 +324,23 @@ describe('MenuBarView', () => {
       expect(within(inventorySection('Always shown')).getByText('Docker')).toBeInTheDocument();
     });
     expect(within(inventorySection('Hidden now')).queryByText('Docker')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Hide Docker' })).toBeEnabled();
+    const hideDocker = screen.getByRole('button', { name: 'Hide Docker' });
+    expect(hideDocker).toBeEnabled();
+
+    fireEvent.click(hideDocker);
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenLastCalledWith('move_menu_bar_item', {
+        itemId: '2:0',
+        targetZone: 'hidden',
+      });
+    });
   });
 
   it('uses the refreshed inventory and explains when an item became stale', async () => {
-    const refreshedInventory: MenuBarInventory = {
-      ...INVENTORY,
-      items: INVENTORY.items.filter((item) => item.id !== 'com.docker.docker:status:0'),
-    };
+    const refreshedInventory = inventoryGeneration(
+      { ...INVENTORY, items: INVENTORY.items.filter((item) => item.name !== 'Docker') },
+      2,
+    );
     mockCommands({
       move_menu_bar_item: {
         outcome: 'staleItem',
@@ -344,7 +366,7 @@ describe('MenuBarView', () => {
     mockCommands({
       move_menu_bar_item: {
         outcome: 'notMovable',
-        inventory: INVENTORY,
+        inventory: inventoryGeneration(INVENTORY, 2),
       } satisfies MenuBarMoveResult,
     });
     renderView(<MenuBarView />);
