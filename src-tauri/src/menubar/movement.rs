@@ -20,10 +20,30 @@ use crate::eventtap::SYNTHETIC_MARKER;
 
 const DROP_GAP: f64 = 3.0;
 const DRAG_STEPS: usize = 16;
-const MOVE_SETTLE: Duration = Duration::from_millis(20);
 const PRESS_SETTLE: Duration = Duration::from_millis(40);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(10);
 const RELEASE_SETTLE: Duration = Duration::from_millis(180);
+
+#[derive(Debug)]
+pub(super) enum CommandDragError {
+    TargetChanged,
+    Unavailable(String),
+}
+
+impl std::fmt::Display for CommandDragError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TargetChanged => formatter.write_str("menu bar item changed before mouse-down"),
+            Self::Unavailable(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for CommandDragError {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -39,6 +59,7 @@ pub(super) struct CursorRestore {
     display: CGDisplay,
     cleanup_up: CGEvent,
     cursor_hidden: bool,
+    cursor_moved: bool,
     mouse_down: bool,
 }
 
@@ -62,6 +83,7 @@ impl CursorRestore {
             display,
             cleanup_up,
             cursor_hidden,
+            cursor_moved: false,
             mouse_down: false,
         }
     }
@@ -69,6 +91,7 @@ impl CursorRestore {
     fn post(&mut self, event: &CGEvent, point: CGPoint) {
         event.post(CGEventTapLocation::HID);
         self.last = point;
+        self.cursor_moved = true;
     }
 
     fn press(&mut self, event: &CGEvent, point: CGPoint) {
@@ -91,11 +114,14 @@ impl Drop for CursorRestore {
             self.cleanup_up.post(CGEventTapLocation::HID);
             self.mouse_down = false;
         }
-        if let Err(code) = CGDisplay::warp_mouse_cursor_position(self.original) {
-            tracing::warn!(
-                code,
-                "could not restore cursor position after menu bar drag"
-            );
+        if self.cursor_moved {
+            if let Err(code) = CGDisplay::warp_mouse_cursor_position(self.original) {
+                tracing::warn!(
+                    code,
+                    "could not restore cursor position after menu bar drag"
+                );
+            }
+            self.cursor_moved = false;
         }
         if self.cursor_hidden {
             if let Err(code) = self.display.show_cursor() {
@@ -112,16 +138,15 @@ pub(super) fn command_drag(
     item: &MenuBarItem,
     context: ScanContext,
     target: MenuBarItemZone,
-) -> Result<CursorRestore, String> {
-    let destination = destination(item, context, target)
-        .ok_or_else(|| "menu bar item has no safe drop point".to_string())?;
-    if unsafe {
-        CGEventSourceButtonState(
-            CGEventSourceStateID::CombinedSessionState,
-            CGMouseButton::Left,
-        )
-    } {
-        return Err("left mouse button is already pressed".to_string());
+    validate_before_move: impl FnOnce() -> bool,
+) -> Result<CursorRestore, CommandDragError> {
+    let destination = destination(item, context, target).ok_or_else(|| {
+        CommandDragError::Unavailable("menu bar item has no safe drop point".into())
+    })?;
+    if left_button_pressed() {
+        return Err(CommandDragError::Unavailable(
+            "left mouse button is already pressed".into(),
+        ));
     }
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -144,13 +169,39 @@ pub(super) fn command_drag(
         .collect::<Result<Vec<_>, _>>()?;
     let up_event = mouse_event(&source, CGEventType::LeftMouseUp, destination)?;
     let cleanup_up = mouse_event(&source, CGEventType::LeftMouseUp, destination)?;
+    // Resolve labels and retain the exact AX element before entering this
+    // function. This first frame/state check therefore leaves the person's
+    // cursor untouched even if the target application responds slowly.
+    if !validate_before_move() {
+        return Err(CommandDragError::TargetChanged);
+    }
+    if left_button_pressed() {
+        return Err(CommandDragError::Unavailable(
+            "left mouse button was pressed before the drag could start".into(),
+        ));
+    }
     let original = CGEvent::new(source.clone())
         .map_err(|()| "failed to read cursor position".to_string())?
         .location();
     let mut restore = CursorRestore::new(original, cleanup_up);
 
+    // Creating the guard hides but does not move the pointer. Check once more
+    // here so a physical press that began during setup is rejected in place,
+    // before any event can turn it into a drag over the foreign item.
+    if left_button_pressed() {
+        return Err(CommandDragError::Unavailable(
+            "left mouse button was pressed before the drag could start".into(),
+        ));
+    }
     restore.post(&move_event, start);
-    std::thread::sleep(MOVE_SETTLE);
+    // Do not perform Accessibility work while the pointer is parked over a
+    // foreign item. Event locations are explicit, so the synthetic down can
+    // follow the move immediately after this last real-button check.
+    if left_button_pressed() {
+        return Err(CommandDragError::Unavailable(
+            "left mouse button was pressed before the drag could start".into(),
+        ));
+    }
     restore.press(&down_event, start);
     std::thread::sleep(PRESS_SETTLE);
     for (event, point) in &drag_events {
@@ -160,6 +211,15 @@ pub(super) fn command_drag(
     restore.release(&up_event, destination);
     std::thread::sleep(RELEASE_SETTLE);
     Ok(restore)
+}
+
+fn left_button_pressed() -> bool {
+    unsafe {
+        CGEventSourceButtonState(
+            CGEventSourceStateID::CombinedSessionState,
+            CGMouseButton::Left,
+        )
+    }
 }
 
 fn mouse_event(

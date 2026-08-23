@@ -133,7 +133,7 @@ const en = {
     'Allow two macOS permissions so Tomari can move windows and recognize key gestures. You can review either permission later.',
   'setup.accessibility': 'Accessibility',
   'setup.accessibilityWhy':
-    'Lets Tomari move and resize windows, send keys, and read your menu bar arrangement.',
+    'Lets Tomari move and resize windows, send keys, and read or rearrange your menu bar items.',
   'setup.inputMonitoring': 'Input Monitoring',
   'setup.inputMonitoringWhy':
     'Lets Tomari recognize modifier-key taps and holds, the hyper key, and window drag gestures.',
@@ -153,7 +153,7 @@ const en = {
   'setup.bannerDescription.both':
     'Window controls and key gestures stay limited until they are allowed.',
   'setup.bannerDescription.accessibility':
-    'Window controls, key sending, and menu bar inspection stay limited until it is allowed.',
+    'Window controls, key sending, and menu bar inspection or rearrangement stay limited until it is allowed.',
   'setup.bannerDescription.inputMonitoring':
     'Modifier-key gestures and window-drag tools stay limited until it is allowed.',
   'setup.bannerAction': 'Review permissions',
@@ -488,7 +488,7 @@ const ja: Record<MessageKey, string> = {
     'Tomari がウィンドウを動かし、キー操作を認識するために macOS の権限を 2 つ許可します。権限はあとから見直せます。',
   'setup.accessibility': 'アクセシビリティ',
   'setup.accessibilityWhy':
-    'ウィンドウの移動・リサイズ、キー送信、メニューバー配置の読み取りに使います。',
+    'ウィンドウの移動・リサイズ、キー送信、メニューバー項目の読み取り・並べ替えに使います。',
   'setup.inputMonitoring': '入力監視',
   'setup.inputMonitoringWhy':
     '修飾キーの単押し・長押し、Hyper キー、ウィンドウのドラッグ操作を認識するために使います。',
@@ -507,7 +507,7 @@ const ja: Record<MessageKey, string> = {
   'setup.updateBannerText': 'アップデート後の権限を確認してください',
   'setup.bannerDescription.both': '許可するまでは、ウィンドウ操作とキー操作の一部が制限されます。',
   'setup.bannerDescription.accessibility':
-    '許可するまでは、ウィンドウ操作、キー送信、メニューバーの読み取りが制限されます。',
+    '許可するまでは、ウィンドウ操作、キー送信、メニューバー項目の読み取り・並べ替えが制限されます。',
   'setup.bannerDescription.inputMonitoring':
     '許可するまでは、修飾キー操作とウィンドウのドラッグ機能が制限されます。',
   'setup.bannerAction': '権限を確認',

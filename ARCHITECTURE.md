@@ -608,14 +608,21 @@ target a different item.
 
 `movement.rs` implements the public fallback available to an assistive app: it
 posts a short, interpolated mouse drag with the Command flag from the AX frame
-to the requested side of the divider. Scans and moves share one session lock.
-A move expands the divider, resolves the opaque id against a fresh scan, refuses
-ambiguous identities, restores the pointer and live collapsed state on every
-exit, and publishes a newly scanned inventory. Only a verified item on the
-requested side is reported as moved. Items behind a notch or implementations
-that reject synthetic input therefore fail closed and keep the manual ⌘-drag
-as their fallback. Tomari stores no parallel desired-layout database; the
-physical arrangement remains authoritative.
+to the requested side of the divider. Scans and moves share one session lock;
+all other physical divider updates defer until that operation releases it. A
+move expands the divider, resolves the opaque id against a fresh scan, refuses
+ambiguous identities, and rechecks the selected process, item frame, and divider
+geometry immediately before mouse-down. A stable AX identifier remains valid
+when a dynamic display label changes; an item without one must retain its label
+and snapshot geometry before Tomari will touch it. Post-drag verification waits
+on that retained AX element, takes one full inventory for the UI, then checks
+the same element again so it cannot go stale while other applications are
+scanned. Every exit restores the pointer and latest live collapsed state, and
+only an item confirmed by both views on the requested side is reported as
+moved. Items behind a notch or implementations that reject synthetic input
+therefore fail closed and keep the manual ⌘-drag as their fallback. Tomari
+stores no parallel desired-layout database; the physical arrangement remains
+authoritative.
 
 Two status items, with distinct jobs:
 

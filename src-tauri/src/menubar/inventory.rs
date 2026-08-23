@@ -15,7 +15,7 @@ use core_foundation::string::CFString;
 use core_foundation_sys::array::{
     CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex, CFArrayRef,
 };
-use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef};
+use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFRetain, CFTypeRef};
 use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 use core_graphics::geometry::{CGPoint, CGSize};
 use objc2_app_kit::NSWorkspace;
@@ -58,6 +58,38 @@ impl Drop for CFOwned {
     }
 }
 
+/// A selected AX element retained for the final pre-drag validation. Expensive
+/// labels and identity are resolved while the person's cursor is untouched;
+/// movement then re-reads only this exact element's frame before taking over
+/// the pointer.
+pub struct DragTarget {
+    item: MenuBarItem,
+    element: CFOwned,
+}
+
+impl DragTarget {
+    pub fn item(&self) -> &MenuBarItem {
+        &self.item
+    }
+
+    pub fn current_geometry(&self) -> Option<(f64, f64, f64)> {
+        let (position, size) = unsafe { element_frame(self.element.0) }?;
+        usable_item_frame(position, size).then(|| {
+            (
+                position.x + size.width / 2.0,
+                position.y + size.height / 2.0,
+                size.width,
+            )
+        })
+    }
+}
+
+#[derive(Default)]
+struct ScanOutput {
+    items: Vec<MenuBarItem>,
+    targets: Vec<DragTarget>,
+}
+
 /// One running application's stable presentation metadata for this scan.
 struct Owner {
     pid: pid_t,
@@ -86,13 +118,40 @@ struct LabelRead {
 /// directly instead of walking the full AX tree: the direct attribute is both
 /// faster and the form used by modern macOS.
 pub fn scan(context: ScanContext) -> Vec<MenuBarItem> {
+    scan_matching(context, None, None, false).items
+}
+
+/// Resolve the owning element under the exact point Tomari is about to press.
+/// Geometry is checked before labels, avoiding slow attribute reads for the
+/// owner's unrelated menu extras during the final TOCTOU check.
+pub fn resolve_owner_at_point(
+    context: ScanContext,
+    owner_pid: i32,
+    point_x: f64,
+    point_y: f64,
+) -> Vec<DragTarget> {
+    scan_matching(
+        context,
+        Some(owner_pid),
+        Some(CGPoint::new(point_x, point_y)),
+        true,
+    )
+    .targets
+}
+
+fn scan_matching(
+    context: ScanContext,
+    owner_pid: Option<i32>,
+    point_filter: Option<CGPoint>,
+    retain_targets: bool,
+) -> ScanOutput {
     let running = NSWorkspace::sharedWorkspace().runningApplications();
     let own_pid = std::process::id() as pid_t;
-    let mut items = Vec::new();
+    let mut output = ScanOutput::default();
 
     for application in running.iter() {
         let pid = application.processIdentifier();
-        if pid <= 0 || pid == own_pid {
+        if pid <= 0 || pid == own_pid || owner_pid.is_some_and(|expected| pid != expected) {
             continue;
         }
         let bundle_id = application
@@ -116,26 +175,40 @@ pub fn scan(context: ScanContext) -> Vec<MenuBarItem> {
             continue;
         }
         let root = CFOwned(root);
-        unsafe {
-            AXUIElementSetMessagingTimeout(root.0, AX_MESSAGING_TIMEOUT_SECS);
+        if unsafe { set_messaging_timeout(root.0) }.is_err() {
+            continue;
         }
 
         let modern = unsafe { copy_attr(root.0, "AXExtrasMenuBar") };
         if let Some(extras) = modern {
-            collect_children(extras.0, &owner, context, &mut items);
+            collect_children(
+                extras.0,
+                &owner,
+                context,
+                point_filter,
+                retain_targets,
+                &mut output,
+            );
         } else {
             // Older and unusual implementations expose `AXMenuExtra` directly
             // under the application root rather than in AXExtrasMenuBar.
-            collect_children(root.0, &owner, context, &mut items);
+            collect_children(
+                root.0,
+                &owner,
+                context,
+                point_filter,
+                retain_targets,
+                &mut output,
+            );
         }
     }
 
-    items.sort_by(|left, right| {
+    output.items.sort_by(|left, right| {
         zone_order(left.zone)
             .cmp(&zone_order(right.zone))
             .then_with(|| left.position.total_cmp(&right.position))
     });
-    items
+    output
 }
 
 fn zone_order(zone: MenuBarItemZone) -> u8 {
@@ -149,8 +222,13 @@ fn collect_children(
     parent: CFTypeRef,
     owner: &Owner,
     context: ScanContext,
-    output: &mut Vec<MenuBarItem>,
+    point_filter: Option<CGPoint>,
+    retain_targets: bool,
+    output: &mut ScanOutput,
 ) {
+    if unsafe { set_messaging_timeout(parent) }.is_err() {
+        return;
+    }
     let Some(children) = (unsafe { copy_attr(parent, "AXChildren") }) else {
         return;
     };
@@ -162,6 +240,11 @@ fn collect_children(
     for index in 0..count {
         let element = unsafe { CFArrayGetValueAtIndex(array, index) } as CFTypeRef;
         if element.is_null() {
+            continue;
+        }
+        // AX timeouts belong to one object and are not inherited from the
+        // application root or parent element.
+        if unsafe { set_messaging_timeout(element) }.is_err() {
             continue;
         }
         let role = unsafe { string_attr(element, "AXRole") };
@@ -176,6 +259,9 @@ fn collect_children(
         // menu bar, so geometry checks alone would present them as a row of
         // duplicate "Control Center" entries.
         if !usable_item_frame(position, size) {
+            continue;
+        }
+        if point_filter.is_some_and(|point| !frame_contains(position, size, point)) {
             continue;
         }
         let center_x = position.x + size.width / 2.0;
@@ -194,9 +280,32 @@ fn collect_children(
         };
         let name = specific_name.unwrap_or_else(|| owner.name.clone());
         let owner_name = (!same_label(&name, &owner.name)).then(|| owner.name.clone());
-        let zone = zone_for_x(context, center_x);
         let ax_identifier =
             unsafe { string_attr(element, "AXIdentifier") }.filter(|value| !value.is_empty());
+        // The targeted pre-drag lookup may spend time resolving a dynamic label.
+        // Read the exact same AX element's frame again after its identity, then
+        // require the pending press point to remain inside it. A neighboring
+        // item cannot slide under the stored center during those AX calls and be
+        // mistaken for the selected item.
+        let (position, size) = if point_filter.is_some() {
+            let Some(frame) = (unsafe { element_frame(element) }) else {
+                continue;
+            };
+            frame
+        } else {
+            (position, size)
+        };
+        if !usable_item_frame(position, size)
+            || point_filter.is_some_and(|point| !frame_contains(position, size, point))
+        {
+            continue;
+        }
+        let center_x = position.x + size.width / 2.0;
+        let center_y = position.y + size.height / 2.0;
+        if !is_on_scanned_menu(context, center_x, center_y) {
+            continue;
+        }
+        let zone = zone_for_x(context, center_x);
         let identity = ax_identifier
             .clone()
             .unwrap_or_else(|| format!("{center_x:.1}"));
@@ -205,7 +314,7 @@ fn collect_children(
             .clone()
             .unwrap_or_else(|| owner.pid.to_string());
         let id = format!("{owner_identity}:{identity}:{index}");
-        output.push(MenuBarItem {
+        let item = MenuBarItem {
             id,
             name,
             owner_name,
@@ -216,7 +325,18 @@ fn collect_children(
             width: size.width,
             owner_pid: owner.pid,
             ax_identifier,
-        });
+        };
+        if retain_targets {
+            let element = unsafe { CFRetain(element) };
+            if !element.is_null() {
+                output.targets.push(DragTarget {
+                    item,
+                    element: CFOwned(element),
+                });
+            }
+        } else {
+            output.items.push(item);
+        }
     }
 }
 
@@ -242,6 +362,13 @@ fn usable_item_frame(position: CGPoint, size: CGSize) -> bool {
         && size.height.is_finite()
         && size.width > 0.0
         && size.height > 0.0
+}
+
+fn frame_contains(position: CGPoint, size: CGSize, point: CGPoint) -> bool {
+    point.x >= position.x
+        && point.x <= position.x + size.width
+        && point.y >= position.y
+        && point.y <= position.y + size.height
 }
 
 fn generic_label(value: &str) -> bool {
@@ -350,6 +477,7 @@ unsafe fn item_label(element: CFTypeRef, owner: &Owner) -> Result<Option<String>
         if child.is_null() {
             continue;
         }
+        unsafe { set_messaging_timeout(child) }?;
         let role = unsafe { checked_string_attr_with_retry(child, "AXRole") }?;
         if !matches!(
             role.as_deref(),
@@ -412,6 +540,11 @@ unsafe fn checked_string_attr(element: CFTypeRef, name: &str) -> Result<Option<S
     }
     let string = unsafe { CFString::wrap_under_get_rule(value.0 as CFStringRef) };
     Ok(Some(string.to_string()))
+}
+
+unsafe fn set_messaging_timeout(element: CFTypeRef) -> Result<(), AXError> {
+    let error = unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECS) };
+    (error == kAXErrorSuccess).then_some(()).ok_or(error)
 }
 
 unsafe fn checked_string_attr_with_retry(
@@ -664,6 +797,26 @@ mod tests {
                 width: 22.0,
                 height: 22.0,
             },
+        ));
+    }
+
+    #[test]
+    fn point_filter_selects_only_the_frame_under_the_pending_press() {
+        let position = CGPoint { x: 100.0, y: 0.0 };
+        let size = CGSize {
+            width: 24.0,
+            height: 24.0,
+        };
+
+        assert!(frame_contains(
+            position,
+            size,
+            CGPoint { x: 112.0, y: 12.0 }
+        ));
+        assert!(!frame_contains(
+            position,
+            size,
+            CGPoint { x: 125.0, y: 12.0 }
         ));
     }
 

@@ -2,7 +2,7 @@
 //! here must match the keys passed from `src/lib/api.ts`.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tomari_core::{AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot};
 use tomari_keyboard::accelerator;
 
@@ -836,31 +836,34 @@ pub fn get_menu_bar(state: State<'_, AppState>) -> crate::menubar::MenuBarStatus
 }
 
 /// Inspect the real menu bar arrangement. The Accessibility scan can message
-/// every running app that owns a status item, so keep it off the main thread.
+/// every running app that owns a status item, so isolate it on the blocking
+/// pool instead of occupying AppKit's main thread or an async runtime worker.
 #[tauri::command]
-pub async fn list_menu_bar_items(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CmdResult<crate::menubar::MenuBarInventory> {
-    Ok(crate::menubar::inventory(&app, state.inner()))
+pub async fn list_menu_bar_items(app: AppHandle) -> CmdResult<crate::menubar::MenuBarInventory> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::menubar::inventory(&app, state.inner())
+    })
+    .await
+    .map_err(|error| CmdError::other(format!("menu bar inventory task failed: {error}")))
 }
 
 /// Move one item from the latest inventory snapshot across Tomari's divider.
 /// This synthesizes a real Command-drag and performs blocking AX verification,
-/// so it runs as an async command rather than on AppKit's main thread.
+/// so it runs on the blocking pool rather than AppKit's main thread or an async
+/// runtime worker.
 #[tauri::command]
 pub async fn move_menu_bar_item(
     app: AppHandle,
-    state: State<'_, AppState>,
     item_id: String,
     target_zone: crate::menubar::MenuBarItemZone,
 ) -> CmdResult<crate::menubar::MenuBarMoveResult> {
-    Ok(crate::menubar::move_item(
-        &app,
-        state.inner(),
-        &item_id,
-        target_zone,
-    ))
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::menubar::move_item(&app, state.inner(), &item_id, target_zone)
+    })
+    .await
+    .map_err(|error| CmdError::other(format!("menu bar movement task failed: {error}")))
 }
 
 /// Expand or collapse the tidied menu bar items from the panel. A no-op while

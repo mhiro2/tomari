@@ -25,7 +25,7 @@
 //! "expand" landing after a teardown could resurrect items nothing owns.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -61,6 +61,9 @@ thread_local! {
 /// applies itself only while its generation is still current, so whichever call
 /// was made last in program order wins no matter what order the hops land in.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Once quit begins, queued reconciliation and scan restoration must never
+/// recreate status items behind teardown's unconditional removal.
+static TERMINATING: AtomicBool = AtomicBool::new(false);
 
 fn claim_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::SeqCst) + 1
@@ -95,6 +98,9 @@ pub struct ScanContext {
 /// them as needed. Hops to the main thread; safe to call from anywhere.
 pub fn apply(app: &AppHandle, enabled: bool, collapsed: bool) {
     let generation = claim_generation();
+    if TERMINATING.load(Ordering::SeqCst) {
+        return;
+    }
     let app = app.clone();
     let _ = app
         .clone()
@@ -106,16 +112,15 @@ pub fn apply(app: &AppHandle, enabled: bool, collapsed: bool) {
 /// bar is tidy the moment Tomari is asked to leave, rather than a beat later
 /// when the process actually exits.
 pub fn teardown(app: &AppHandle) {
-    let generation = claim_generation();
+    TERMINATING.store(true, Ordering::SeqCst);
+    claim_generation();
     let _ = app.run_on_main_thread(move || {
-        if is_current(generation) {
-            remove_items();
-        }
+        remove_items();
     });
 }
 
 fn apply_on_main(app: &AppHandle, enabled: bool, collapsed: bool, generation: u64) {
-    if !is_current(generation) {
+    if TERMINATING.load(Ordering::SeqCst) || !is_current(generation) {
         return;
     }
     let Some(mtm) = MainThreadMarker::new() else {
@@ -171,6 +176,9 @@ fn set_collapsed(items: &Items, collapsed: bool, mtm: MainThreadMarker) {
 /// Expand the divider and snapshot its screen-space boundary. Commands may run
 /// on a worker thread, so hop to AppKit's main thread when necessary.
 pub fn scan_context(app: &AppHandle) -> Option<ScanContext> {
+    if TERMINATING.load(Ordering::SeqCst) {
+        return None;
+    }
     if let Some(mtm) = MainThreadMarker::new() {
         return scan_context_on_main(mtm);
     }
@@ -191,6 +199,9 @@ pub fn scan_context(app: &AppHandle) -> Option<ScanContext> {
 /// gate is not released while the divider is still temporarily expanded.
 pub fn finish_scan(app: &AppHandle, state: &crate::state::AppState) {
     let generation = claim_generation();
+    if TERMINATING.load(Ordering::SeqCst) {
+        return;
+    }
     // Claim before reading. A state change that completed first is included in
     // this snapshot; one that races after the claim gets a newer generation
     // and its own queued apply wins over this restore.
@@ -221,6 +232,9 @@ pub fn finish_scan(app: &AppHandle, state: &crate::state::AppState) {
 }
 
 fn scan_context_on_main(mtm: MainThreadMarker) -> Option<ScanContext> {
+    if TERMINATING.load(Ordering::SeqCst) {
+        return None;
+    }
     ITEMS.with(|cell| {
         let items = cell.borrow();
         let items = items.as_ref()?;
