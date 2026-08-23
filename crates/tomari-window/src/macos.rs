@@ -15,13 +15,15 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
 use core_foundation_sys::base::{CFGetTypeID, CFHash, CFRelease, CFRetain, CFTypeRef};
-use core_foundation_sys::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+use core_foundation_sys::dictionary::{
+    CFDictionaryGetTypeID, CFDictionaryGetValueIfPresent, CFDictionaryRef,
+};
 use core_foundation_sys::number::{CFNumberGetValue, kCFNumberSInt32Type};
 use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 use core_graphics::display::CGDisplay;
-use core_graphics::geometry::{CGPoint, CGSize};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::window::{
-    CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowLayer,
+    CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
     kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
 };
 use objc2::MainThreadMarker;
@@ -186,6 +188,81 @@ fn dict_get_i32(dict: CFTypeRef, key: CFStringRef) -> Option<i32> {
         )
     };
     ok.then_some(out)
+}
+
+/// Read a Core Graphics bounds dictionary as the crate's plain rectangle type.
+fn dict_get_rect(dict: CFTypeRef, key: CFStringRef) -> Option<Rect> {
+    let mut value: *const c_void = std::ptr::null();
+    let found =
+        unsafe { CFDictionaryGetValueIfPresent(dict as CFDictionaryRef, key.cast(), &mut value) };
+    if found == 0 || value.is_null() {
+        return None;
+    }
+    let value = value as CFTypeRef;
+    if unsafe { CFGetTypeID(value) } != unsafe { CFDictionaryGetTypeID() } {
+        return None;
+    }
+    let bounds = unsafe { CFDictionary::wrap_under_get_rule(value as CFDictionaryRef) };
+    let rect = CGRect::from_dict_representation(&bounds)?;
+    Some(Rect::new(
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CgWindowInfo {
+    owner_pid: pid_t,
+    bounds: Rect,
+}
+
+/// Resolve the owner of the frontmost Window Server surface at a point.
+///
+/// The list is already ordered front-to-back. Keep every layer: floating app
+/// windows are valid drag targets, while menu bars, popovers and other surfaces
+/// must block unrelated windows underneath. The later app-scoped AX walk decides
+/// whether the selected owner's surface actually belongs to a draggable window.
+fn pointer_window_owner(windows: &[CgWindowInfo], x: f64, y: f64) -> Option<pid_t> {
+    windows
+        .iter()
+        .find(|window| rect_contains(window.bounds, x, y))
+        .map(|window| window.owner_pid)
+}
+
+/// Snapshot enough Window Server metadata to choose the process to AX hit-test.
+///
+/// This path deliberately uses no Accessibility objects. In particular, it is
+/// safe to call from an event-tap thread while Tomari's main thread is handling
+/// its own AppKit controls.
+fn pointer_window_owner_at_point(x: f64, y: f64) -> Option<pid_t> {
+    let list = unsafe {
+        CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+    };
+    if list.is_null() {
+        return None;
+    }
+    let list = CFOwned(list as CFTypeRef);
+    let count = unsafe { CFArrayGetCount(list.0 as _) };
+    let mut windows = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let entry = unsafe { CFArrayGetValueAtIndex(list.0 as _, i) } as CFTypeRef;
+        if entry.is_null() {
+            continue;
+        }
+        let Some(owner_pid) = dict_get_i32(entry, unsafe { kCGWindowOwnerPID }) else {
+            continue;
+        };
+        let Some(bounds) = dict_get_rect(entry, unsafe { kCGWindowBounds }) else {
+            continue;
+        };
+        windows.push(CgWindowInfo { owner_pid, bounds });
+    }
+    pointer_window_owner(&windows, x, y)
 }
 
 /// Find the PID owning the frontmost on-screen window that is not `exclude_pid`.
@@ -709,27 +786,43 @@ unsafe fn element_role(element: CFTypeRef) -> Option<String> {
 /// a handle for dragging it. The hit element is usually a control deep inside
 /// the window, so walk to the owning window via `AXWindow` / `AXParent`.
 /// Tomari's own windows are deliberately excluded: pointer gestures run on
-/// worker threads, while AppKit requires self-window mutations on the main
-/// thread, and Tomari should not manage its own settings UI in any case.
+/// worker threads, and even a read-only system-wide AX hit-test can synchronously
+/// enter Tomari's AppKit accessibility implementation off the main thread.
+/// Resolve an external owner with Window Server metadata first, then constrain
+/// the AX hit-test to that application's element so it cannot route back into
+/// Tomari even if the window ordering changes between the two operations.
 pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
     unsafe {
         if AXIsProcessTrusted() == 0 {
             return Err(Error::PermissionDenied);
         }
+
+        let own_pid = std::process::id() as pid_t;
+        let Some(owner_pid) = pointer_window_owner_at_point(x, y) else {
+            return Err(Error::NoFocusedWindow);
+        };
+        if !is_external_window_pid(Some(owner_pid), own_pid) {
+            return Err(Error::NoFocusedWindow);
+        }
+
+        // A timeout set on the system-wide object applies globally to this AX
+        // client process. We never hit-test that object: creating it only keeps
+        // the app-scoped hit and every returned child/parent element bounded.
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
             return Err(Error::NoFocusedWindow);
         }
         let system = CFOwned(system);
-        // Bound the hit-test and everything after it: passing the system-wide
-        // element sets the timeout process-globally, so the initial
-        // position hit-test *and* the `AXWindow`/`AXParent` walk below — each
-        // messaging the app under the cursor, possibly the wedged one we must
-        // not block on — are all covered before the first round-trip is sent.
         set_messaging_timeout(system.0);
 
+        let application = AXUIElementCreateApplication(owner_pid);
+        if application.is_null() {
+            return Err(Error::NoFocusedWindow);
+        }
+        let application = CFOwned(application);
+
         let mut hit: CFTypeRef = std::ptr::null();
-        let err = AXUIElementCopyElementAtPosition(system.0, x as f32, y as f32, &mut hit);
+        let err = AXUIElementCopyElementAtPosition(application.0, x as f32, y as f32, &mut hit);
         if err != kAXErrorSuccess || hit.is_null() {
             return Err(Error::NoFocusedWindow);
         }
@@ -777,6 +870,42 @@ mod tests {
         assert!(!is_external_window_pid(None, own_pid));
         assert!(!is_external_window_pid(Some(own_pid), own_pid));
         assert!(is_external_window_pid(Some(own_pid + 1), own_pid));
+    }
+
+    #[test]
+    fn pointer_hit_keeps_a_self_window_in_front_of_external_windows() {
+        let own_pid = 42;
+        let windows = [
+            CgWindowInfo {
+                owner_pid: own_pid,
+                bounds: Rect::new(100.0, 100.0, 500.0, 400.0),
+            },
+            CgWindowInfo {
+                owner_pid: 99,
+                bounds: Rect::new(0.0, 0.0, 1_000.0, 800.0),
+            },
+        ];
+
+        let owner = pointer_window_owner(&windows, 200.0, 200.0);
+        assert_eq!(owner, Some(own_pid));
+        assert!(!is_external_window_pid(owner, own_pid));
+    }
+
+    #[test]
+    fn pointer_hit_preserves_floating_surfaces_and_their_order() {
+        let windows = [
+            CgWindowInfo {
+                owner_pid: 7,
+                bounds: Rect::new(0.0, 0.0, 1_000.0, 40.0),
+            },
+            CgWindowInfo {
+                owner_pid: 99,
+                bounds: Rect::new(0.0, 0.0, 1_000.0, 800.0),
+            },
+        ];
+
+        assert_eq!(pointer_window_owner(&windows, 500.0, 20.0), Some(7));
+        assert_eq!(pointer_window_owner(&windows, 500.0, 200.0), Some(99));
     }
 
     #[test]

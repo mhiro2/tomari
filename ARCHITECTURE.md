@@ -270,6 +270,10 @@ each display's full frame and work area, which only the main thread can read
 (primed at startup and refreshed whenever the displays change, via the
 `NSApplicationDidChangeScreenParametersNotification` observer in `displays.rs`)
 and the tap thread reads the cache, never blocking on a main-thread round-trip.
+Before the Accessibility hit-test, a front-to-back Window Server snapshot
+selects the owning external process at the pointer; AX is then scoped to that
+application. Tomari's own AppKit accessibility is therefore never entered from
+the tap worker, while floating external windows remain eligible targets.
 Armed drags then resolve the target purely from the cursor (`screen_at_cursor` +
 `edge_snap_preset`), and only a change of target (preset _and_ display) touches
 the preview. The preview is a translucent, click-through `NSPanel` in
