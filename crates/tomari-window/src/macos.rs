@@ -159,6 +159,16 @@ unsafe fn element_pid(element: CFTypeRef) -> Option<pid_t> {
     (err == kAXErrorSuccess).then_some(pid)
 }
 
+/// Whether a pointer gesture may target a window with this owner.
+///
+/// A missing PID is rejected as well as this process: pointer-driven frame
+/// writes run off the main thread, and applying one to Tomari's own `NSWindow`
+/// triggers AppKit's main-thread precondition. Requiring a known external PID
+/// keeps both drag-to-snap and drag-to-move on their safe cross-process path.
+fn is_external_window_pid(owner_pid: Option<pid_t>, own_pid: pid_t) -> bool {
+    owner_pid.is_some_and(|pid| pid != own_pid)
+}
+
 /// Read a `CFNumber` dictionary value as an `i32`, if present and numeric.
 fn dict_get_i32(dict: CFTypeRef, key: CFStringRef) -> Option<i32> {
     let mut value: *const c_void = std::ptr::null();
@@ -447,7 +457,7 @@ impl WindowManager for AxWindowManager {
             let (_system, app, window) = focused_window()?;
             let application = window_application(app.0)?;
             Ok(FocusedWindow {
-                handle: Box::new(DragWindow::new(window)),
+                handle: Box::new(DragWindow::new(window)?),
                 application,
             })
         }
@@ -464,7 +474,7 @@ impl WindowManager for AxWindowManager {
             // cannot participate in remembered placement, but their windows
             // must remain usable by handle-only operations.
             let (_system, _app, window) = focused_window()?;
-            Ok(Box::new(DragWindow::new(window)))
+            Ok(Box::new(DragWindow::new(window)?))
         }
     }
 
@@ -603,11 +613,21 @@ pub struct DragWindow {
 }
 
 impl DragWindow {
-    /// Wrap an owned AX window element, bounding every later round-trip to it so
-    /// a wedged target app cannot block the thread that drags or measures it.
-    fn new(window: CFOwned) -> Self {
+    /// Wrap an external application's owned AX window element, bounding every
+    /// later round-trip to it so a wedged target app cannot block the thread
+    /// that drags or measures it.
+    ///
+    /// Reject this process and unknown owners at the handle boundary. Pointer
+    /// gestures mutate windows from worker threads, but AppKit traps if such an
+    /// AX write resolves directly to Tomari's own `NSWindow`.
+    fn new(window: CFOwned) -> Result<Self> {
+        let own_pid = std::process::id() as pid_t;
+        let owner_pid = unsafe { element_pid(window.0) };
+        if !is_external_window_pid(owner_pid, own_pid) {
+            return Err(Error::NoFocusedWindow);
+        }
         unsafe { set_messaging_timeout(window.0) };
-        Self { window }
+        Ok(Self { window })
     }
 }
 
@@ -688,6 +708,9 @@ unsafe fn element_role(element: CFTypeRef) -> Option<String> {
 /// Hit-test the window under the point (`x`, `y`) in CG coordinates and return
 /// a handle for dragging it. The hit element is usually a control deep inside
 /// the window, so walk to the owning window via `AXWindow` / `AXParent`.
+/// Tomari's own windows are deliberately excluded: pointer gestures run on
+/// worker threads, while AppKit requires self-window mutations on the main
+/// thread, and Tomari should not manage its own settings UI in any case.
 pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
     unsafe {
         if AXIsProcessTrusted() == 0 {
@@ -714,10 +737,10 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
 
         for _ in 0..32 {
             if element_role(element.0).as_deref() == Some("AXWindow") {
-                return Ok(DragWindow::new(element));
+                return DragWindow::new(element);
             }
             if let Ok(window) = copy_attr(element.0, "AXWindow") {
-                return Ok(DragWindow::new(window));
+                return DragWindow::new(window);
             }
             match copy_attr(element.0, "AXParent") {
                 Ok(parent) => element = parent,
@@ -746,6 +769,14 @@ mod tests {
             frame,
             visible_frame: visible,
         }
+    }
+
+    #[test]
+    fn pointer_gestures_require_a_known_external_window_owner() {
+        let own_pid = 42;
+        assert!(!is_external_window_pid(None, own_pid));
+        assert!(!is_external_window_pid(Some(own_pid), own_pid));
+        assert!(is_external_window_pid(Some(own_pid + 1), own_pid));
     }
 
     #[test]
