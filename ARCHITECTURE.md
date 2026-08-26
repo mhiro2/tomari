@@ -568,6 +568,10 @@ persisted: it always starts off at launch. A toggle reaches it from the tray (a
 `tomari:keep-awake-changed` and rebuilds the tray, so the panel toggle and the
 tray checkmark stay in sync regardless of which surface initiated it.
 
+Both recovery paths — `reconcile_on_launch` and exit-time `cleanup_blocking` —
+clear through the same verified `cleanup_lid_close_with`, so a setter reporting
+success without moving the kernel flag never takes the marker with it.
+
 Because `disablesleep` survives a crash, a marker file under the data directory
 records that _we_ engaged it. `reconcile_on_launch` (from `setup`) clears a
 leftover override — only one we set, never a user's own `disablesleep` — and

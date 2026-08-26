@@ -560,9 +560,12 @@ pub fn reconcile_on_launch(_app: &AppHandle) {
         ReconcileAction::RemoveMarker => remove_marker(),
         ReconcileAction::ClearOverride => {
             tracing::warn!("clearing a leftover lid-close sleep override from a previous run");
-            if run_disablesleep(false) {
-                remove_marker();
-            }
+            // Goes through the same verified clear as exit-time cleanup rather
+            // than trusting `osascript`'s exit status. This is the last chance to
+            // recover a leaked override, so a setter that reports success without
+            // changing `SleepDisabled` must not take the marker with it — that
+            // would strand the Mac awake with no record left to recover from.
+            cleanup_lid_close_with(&RealSys, true);
         }
     }
 }
