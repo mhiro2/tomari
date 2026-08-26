@@ -21,10 +21,12 @@
 //! cannot be engaged (auth declined, or an unreadable sleep state) the whole
 //! switch rolls back off. A disengage defers turning off to the worker: clearing
 //! the override needs an admin dialog that can be declined, and sleep is still
-//! prevented until it succeeds, so a declined clear keeps keep-awake on. A
-//! `generation` counter bumped on every toggle lets a slow worker tell that a
-//! newer toggle superseded it mid-dialog, so a stale cancel never clobbers a
-//! switch the user re-toggled.
+//! prevented until it succeeds, so a declined clear keeps keep-awake on.
+//! While either direction is pending, ordinary toggles are rejected. An explicit
+//! cancel terminates the active authorization process and queues the reverse
+//! transition. A `generation` counter lets a slow worker recognize that cancel
+//! and prevents its stale result from clobbering the reverse transition — and
+//! makes a worker that has not started yet skip its side effects entirely.
 //!
 //! Three invariants keep the lid-close override from ever stranding the Mac in
 //! a never-sleep state:
@@ -44,8 +46,8 @@
 //!   left untouched.
 //!
 //! The slow, admin-authed `pmset` calls are serialized through `LID_OP_LOCK`
-//! and always drive the system toward the *current* desired state, so rapid
-//! toggles collapse to the last one instead of racing.
+//! and always drive the system toward the current desired state. This also
+//! serializes the cleanup that follows an authorization cancellation.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -59,8 +61,8 @@ use crate::state::AppState;
 const CHANGED_EVENT: &str = "tomari:keep-awake-changed";
 
 /// Serializes the slow, admin-authed `pmset` operations. Under this lock each
-/// worker drives the lid-close override toward whatever the *current* desired
-/// state is, so overlapping toggles collapse to the latest rather than racing.
+/// worker drives the lid-close override toward the current desired state, and a
+/// cancellation can queue its reverse without racing the original operation.
 #[cfg(target_os = "macos")]
 static LID_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -69,8 +71,13 @@ static LID_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// that re-enables the override after cleanup has already cleared it.
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// PID of the `osascript` process currently presenting administrator
+/// authorization. Only one can run because `LID_OP_LOCK` serializes them.
+#[cfg(target_os = "macos")]
+static AUTH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Runtime keep-awake state. Not persisted — always starts inactive.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KeepAwake {
     /// Sleep prevention is on (an idle-sleep assertion is held).
     active: bool,
@@ -85,13 +92,67 @@ pub struct KeepAwake {
     /// Each reconcile worker captures the value *at spawn time* (under the same
     /// lock that bumped it) and carries it through its slow admin-auth dialog; on
     /// writeback it compares that captured value against the current one. If they
-    /// differ, a newer toggle superseded this cycle, so the worker must not
-    /// clobber the newer cycle's `active` or assertion (e.g. an out-of-order ON
-    /// worker completing after the OFF it lost the lock race to must not flip the
-    /// switch back on). Capturing at spawn — rather than after acquiring
-    /// `LID_OP_LOCK` — is what makes the collapse-to-last guarantee hold when
-    /// workers finish in a different order than they were requested.
+    /// differ, a newer transition superseded this cycle, so the worker must not
+    /// clobber the newer cycle's `active` or assertion. Capturing at spawn —
+    /// rather than after acquiring `LID_OP_LOCK` — is what lets an explicit
+    /// cancellation queue a safe reverse transition behind the canceled worker.
     generation: u64,
+    /// User-visible transition state. Unlike `active`, this distinguishes an
+    /// administrator prompt from a settled system state.
+    phase: KeepAwakePhase,
+    /// Last authorization outcome that needs the user's attention.
+    notice: Option<KeepAwakeNotice>,
+    /// Target of the last failed transition, used by the explicit retry action.
+    retry_target: Option<bool>,
+    /// Monotonic stamp taken by every snapshot the frontend can receive — both
+    /// [`status`] reads and [`emit_status`] events — under the same lock that
+    /// produced it. It counts snapshots issued, not state changes: what matters
+    /// is that a snapshot issued later always outranks one issued earlier.
+    /// Several threads emit (commands, reconcile workers, the safety monitor)
+    /// and each snapshots before it emits, so the events can arrive out of
+    /// order; the frontend drops a snapshot older than one it already applied
+    /// instead of being stranded on a transition that has since finished.
+    revision: u64,
+}
+
+impl Default for KeepAwake {
+    fn default() -> Self {
+        Self {
+            active: false,
+            assertion: None,
+            lid_close: LidCloseState::Off,
+            we_own_override: false,
+            generation: 0,
+            phase: KeepAwakePhase::Off,
+            notice: None,
+            retry_target: None,
+            revision: 0,
+        }
+    }
+}
+
+/// Explicit state machine for the complete Keep Awake operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepAwakePhase {
+    #[default]
+    Off,
+    Enabling,
+    On,
+    Disabling,
+    Failed,
+}
+
+impl KeepAwakePhase {
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Enabling | Self::Disabling)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepAwakeNotice {
+    AuthorizationDeclined,
 }
 
 /// The state of the lid-close veto (`pmset disablesleep`).
@@ -112,34 +173,110 @@ pub enum LidCloseState {
 }
 
 /// The keep-awake status surfaced to the tray and the frontend.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeepAwakeStatus {
     /// Sleep prevention is on.
     pub active: bool,
     /// Lid-close veto state.
     pub lid_close: LidCloseState,
+    pub phase: KeepAwakePhase,
+    pub notice: Option<KeepAwakeNotice>,
+    /// See [`KeepAwake::revision`]. Ordering stamp, not a value to render.
+    pub revision: u64,
 }
 
-/// The current keep-awake status.
+/// The current keep-awake status. Stamps the snapshot like [`emit_status`] does,
+/// so a read and an event are ordered against each other: without it a read
+/// taken after an event was snapshotted — but before that event was emitted —
+/// would carry the *same* revision while describing newer state, and the
+/// frontend would then let the older event overwrite it.
 pub fn status(state: &AppState) -> KeepAwakeStatus {
-    let k = state.keep_awake.lock_safe();
+    let mut k = state.keep_awake.lock_safe();
+    k.revision += 1;
+    status_from(&k)
+}
+
+fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
     KeepAwakeStatus {
         active: k.active,
         lid_close: k.lid_close,
+        phase: k.phase,
+        notice: k.notice,
+        revision: k.revision,
     }
 }
 
 /// Turn sleep prevention on or off, returning the resulting status.
 pub fn set(app: &AppHandle, enabled: bool) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    {
+        let mut k = state.keep_awake.lock_safe();
+        // An administrator prompt is already up: the switch is locked until it
+        // settles, so an ordinary toggle is dropped rather than queued behind it.
+        if k.phase.is_pending() {
+            return status_from(&k);
+        }
+        k.notice = None;
+        k.retry_target = None;
+    }
     if enabled { engage(app) } else { disengage(app) }
 }
 
 /// Flip sleep prevention. Used by the tray item and the `ToggleKeepAwake`
 /// action (hotkeys/leader/taps).
 pub fn toggle(app: &AppHandle) -> KeepAwakeStatus {
-    let active = app.state::<AppState>().keep_awake.lock_safe().active;
+    let state = app.state::<AppState>();
+    let k = state.keep_awake.lock_safe();
+    if k.phase.is_pending() {
+        return status_from(&k);
+    }
+    let active = k.active;
+    drop(k);
     set(app, !active)
+}
+
+/// Retry whichever direction most recently failed authorization. No-op when
+/// there is no failed transition.
+pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    let target = state.keep_awake.lock_safe().retry_target;
+    target.map_or_else(|| status(state.inner()), |target| set(app, target))
+}
+
+/// Cancel the administrator prompt and drive the system back toward the stable
+/// state that preceded it. The reverse reconcile is still serialized behind the
+/// canceled worker, which keeps ownership correct if `pmset` won the race and
+/// changed the kernel flag just before cancellation.
+pub fn cancel_transition(app: &AppHandle) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    #[cfg(target_os = "macos")]
+    let (reverse_target, request_generation) = {
+        let mut k = state.keep_awake.lock_safe();
+        let reverse_target = match k.phase {
+            KeepAwakePhase::Enabling => false,
+            KeepAwakePhase::Disabling => true,
+            _ => return status_from(&k),
+        };
+        k.generation = k.generation.wrapping_add(1);
+        k.phase = if reverse_target {
+            KeepAwakePhase::Enabling
+        } else {
+            KeepAwakePhase::Disabling
+        };
+        k.notice = None;
+        k.retry_target = None;
+        (reverse_target, k.generation)
+    };
+    #[cfg(target_os = "macos")]
+    {
+        kill_authorization();
+        notify(app);
+        spawn_reconcile(app.clone(), reverse_target, request_generation);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    status(state.inner())
 }
 
 fn engage(app: &AppHandle) -> KeepAwakeStatus {
@@ -162,18 +299,10 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
     {
         let mut k = state.keep_awake.lock_safe();
         if k.active {
-            // Already on — nothing to do. This is safe against an in-flight
-            // turn-off (whose worker is driving the override toward cleared) only
-            // because every entry point (panel switch, tray, hotkey, deep link)
-            // derives its target from the committed `active`: during an off-pending
-            // `active` is still `true`, so they all request "off", never "on".
-            // Cancelling the auth dialog is the "stay on" affordance. A future
-            // *explicit* set-on path would instead need to supersede a pending
-            // turn-off here (bump the generation and re-drive the veto on).
-            return KeepAwakeStatus {
-                active: true,
-                lid_close: k.lid_close,
-            };
+            // Already on — nothing to do. Pending phases were rejected by `set`
+            // before reaching here; cancellation uses `spawn_reconcile` directly
+            // to reverse an in-flight operation under a new generation.
+            return status_from(&k);
         }
         // Re-check shutdown *under the lock*. `cleanup_blocking` sets
         // SHUTTING_DOWN before it takes this lock, so an engage that raced it
@@ -182,10 +311,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
         // override after cleanup already cleared it — stranding the Mac awake
         // past exit. Bailing here closes that window.
         if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
-            return KeepAwakeStatus {
-                active: false,
-                lid_close: k.lid_close,
-            };
+            return status_from(&k);
         }
         // The idle-sleep assertion is the foundation of keep-awake — it needs no
         // permission and is what actually holds sleep off for the lid-open case.
@@ -201,6 +327,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
                     k.assertion = Some(id);
                     k.active = true;
                     k.lid_close = LidCloseState::Pending;
+                    k.phase = KeepAwakePhase::Enabling;
                     k.generation = k.generation.wrapping_add(1);
                     request_generation = k.generation;
                     engaged = true;
@@ -219,6 +346,7 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
         {
             k.active = true;
             k.lid_close = LidCloseState::Off;
+            k.phase = KeepAwakePhase::On;
         }
     }
     // Re-sync every surface — including a tray checkmark a click just toggled on,
@@ -241,10 +369,8 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     {
         let mut k = state.keep_awake.lock_safe();
         if !k.active {
-            return KeepAwakeStatus {
-                active: false,
-                lid_close: k.lid_close,
-            };
+            k.phase = KeepAwakePhase::Off;
+            return status_from(&k);
         }
         #[cfg(target_os = "macos")]
         {
@@ -254,21 +380,24 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
             // prevented. The worker commits the off (`active = false`, assertion
             // released) only once the clear succeeds; a declined clear keeps
             // keep-awake on rather than show it off while sleep stays blocked.
-            // Bump the generation so an in-flight engage worker is superseded.
+            // Stamp this transition so an explicit cancellation can supersede it.
             k.generation = k.generation.wrapping_add(1);
             request_generation = k.generation;
+            k.phase = KeepAwakePhase::Disabling;
         }
         #[cfg(not(target_os = "macos"))]
         {
             // No lid-close veto off-platform, so the off is immediate.
             k.active = false;
             k.lid_close = LidCloseState::Off;
+            k.phase = KeepAwakePhase::Off;
         }
     }
     #[cfg(target_os = "macos")]
     {
-        // The off is reflected by the worker once the override is cleared, so
-        // there is nothing to notify here yet.
+        // Publish the pending phase immediately so every entry point is disabled
+        // while the administrator prompt is open.
+        notify(app);
         spawn_reconcile(app.clone(), false, request_generation);
     }
     #[cfg(not(target_os = "macos"))]
@@ -279,10 +408,23 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
 /// Emit the change event and rebuild the tray menu (on the main thread, as the
 /// menu APIs require) so the panel and the tray checkmark both follow.
 fn notify(app: &AppHandle) {
-    let status = status(app.state::<AppState>().inner());
-    let _ = app.emit(CHANGED_EVENT, status);
+    emit_status(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
+}
+
+fn emit_status(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let status = {
+        let mut k = state.keep_awake.lock_safe();
+        // Stamp the snapshot under the lock that produced it, so a higher
+        // revision always means a later-issued snapshot — even when two emitting
+        // threads are descheduled between snapshotting and `emit`, and their
+        // events reach the webview in the opposite order.
+        k.revision += 1;
+        status_from(&k)
+    };
+    let _ = app.emit(CHANGED_EVENT, status);
 }
 
 /// What [`reconcile_on_launch`] should do given a leftover marker and the
@@ -469,23 +611,22 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
     }
 }
 
-/// The committed keep-awake state a reconcile worker resolves to. A toggle that
-/// flips the desired state while the worker's admin-auth dialog is up bumps the
-/// generation; a superseded worker must then leave `active` and the assertion to
-/// the newer cycle's own worker.
+/// The committed keep-awake state a reconcile worker resolves to. Canceling an
+/// admin-auth dialog bumps the generation; a superseded worker must then leave
+/// `active` and the assertion to the reverse transition's own worker.
 #[derive(Debug, PartialEq, Eq)]
 enum ReconcileWriteback {
-    /// A newer toggle superseded this cycle: record ownership only, touch nothing
+    /// A newer transition superseded this cycle: record ownership only, touch nothing
     /// else (the newer cycle's worker sets the final state).
     Superseded,
-    /// Keep-awake on: idle assertion held, veto engaged. Either a successful
-    /// engage, or a turn-off whose override clear was declined (sleep is still
-    /// prevented, so we keep it on rather than report it off).
+    /// Keep-awake on: idle assertion held and lid-close veto engaged.
     On,
-    /// Keep-awake off: release the assertion. Either a successful turn-off, or an
-    /// engage whose mandatory veto could not be engaged (declined / unreadable),
-    /// which rolls the whole switch back off.
+    /// Keep-awake off after the lid-close override was confirmed clear.
     Off,
+    /// Enabling failed before the mandatory lid-close veto was established.
+    EnableFailed,
+    /// Disabling failed and Tomari still owns a live lid-close veto.
+    DisableFailed,
 }
 
 /// Decide the committed keep-awake state from a reconcile, given whether the
@@ -507,12 +648,12 @@ fn reconcile_writeback(
         if lid_close == LidCloseState::Engaged {
             ReconcileWriteback::On
         } else {
-            ReconcileWriteback::Off
+            ReconcileWriteback::EnableFailed
         }
     } else if we_own {
         // Turning off but the override clear was declined: we still own it, so
         // sleep is still prevented — keep keep-awake on instead of lying it is off.
-        ReconcileWriteback::On
+        ReconcileWriteback::DisableFailed
     } else {
         // Turning off and nothing is left we own (cleared, or never ours): off.
         ReconcileWriteback::Off
@@ -583,6 +724,7 @@ pub fn cleanup_blocking(app: &AppHandle) {
     {
         let mut k = state.keep_awake.lock_safe();
         k.active = false;
+        k.phase = KeepAwakePhase::Off;
         #[cfg(target_os = "macos")]
         {
             if let Some(id) = k.assertion.take() {
@@ -595,11 +737,17 @@ pub fn cleanup_blocking(app: &AppHandle) {
     }
     #[cfg(target_os = "macos")]
     {
+        // Take down an administrator prompt a reconcile worker left on screen
+        // first. It holds `LID_OP_LOCK` for as long as that dialog is up, so
+        // without this a quit — or the updater's restart — would block until
+        // somebody answered a dialog for work we are about to undo anyway.
+        kill_authorization();
         // Serialize with any in-flight reconcile worker (it holds this lock
         // across its `pmset` call) so we cannot clear the override just before a
-        // late `pmset 1` re-enables it and strands the Mac awake. This may
-        // briefly wait on an auth dialog the worker itself triggered; the
-        // write-ahead marker is the backstop for anything that still slips past.
+        // late `pmset 1` re-enables it and strands the Mac awake. The generation
+        // bumped above also makes a worker still queued for the lock skip its
+        // side effects entirely; the write-ahead marker is the backstop for
+        // anything that still slips past.
         // Lock order is always LID_OP_LOCK → keep_awake (never the reverse).
         let _op = LID_OP_LOCK.lock_safe();
         let we_own = state.keep_awake.lock_safe().we_own_override;
@@ -615,17 +763,17 @@ pub fn cleanup_blocking(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 /// Reconcile the lid-close veto on a worker thread, since the admin-auth dialog
-/// blocks. `desired_on` is the direction the toggle asked for (engage /
-/// disengage); `request_generation` is the generation stamped on that toggle,
-/// used to detect a newer toggle superseding this one.
+/// blocks. `desired_on` is the direction the request asked for (engage /
+/// disengage); `request_generation` is the generation stamped on that request,
+/// used to detect a cancellation superseding this one.
 #[cfg(target_os = "macos")]
 fn spawn_reconcile(app: AppHandle, desired_on: bool, request_generation: u64) {
     std::thread::spawn(move || reconcile_lid_close(&app, desired_on, request_generation));
 }
 
 /// Drive `pmset disablesleep` toward `desired_on` and commit the resulting
-/// keep-awake state. Serialized by `LID_OP_LOCK`, so a burst of toggles settles
-/// on the last one.
+/// keep-awake state. Serialized by `LID_OP_LOCK`, including a reverse operation
+/// queued by explicit cancellation.
 ///
 /// The lid-close veto is a required part of keep-awake and both directions go
 /// through it, so the worker — not the toggle — commits `active`:
@@ -634,17 +782,28 @@ fn spawn_reconcile(app: AppHandle, desired_on: bool, request_generation: u64) {
 /// * Turning **off**: the off takes effect only once the override is actually
 ///   cleared; a declined clear leaves keep-awake on (sleep is still prevented).
 ///
-/// A toggle that superseded this cycle while the admin-auth dialog was up is
-/// detected via `request_generation` — the generation captured when *this*
-/// worker was spawned — and left to its own worker, so a stale cancel (or an
-/// out-of-order ON worker completing after the OFF that beat it to the lock)
-/// never clobbers a freshly re-toggled switch.
+/// A cancellation that superseded this cycle while the admin-auth dialog was up
+/// is detected via `request_generation` — the generation captured when *this*
+/// worker was spawned — and leaves the final state to the reverse worker.
 #[cfg(target_os = "macos")]
 fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u64) {
     let _op = LID_OP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state = app.state::<AppState>();
+    // Nothing has been touched yet, so a cycle already superseded here must run
+    // no side effects at all. Without this the lock could hand out in the wrong
+    // order — a cancellation's reverse worker (or `cleanup_blocking`, which also
+    // bumps the generation) winning `LID_OP_LOCK` ahead of the worker it
+    // superseded — and the loser would then go on to enable `disablesleep`
+    // *after* the winner cleared it, stranding the Mac unable to sleep while
+    // every surface reports keep-awake off. Skipping is safe precisely because
+    // this runs before the first `pmset`: a worker already past this point still
+    // completes and records the ownership it acquired, exactly as the
+    // cancel-during-the-dialog path relies on.
+    if state.keep_awake.lock_safe().generation != request_generation {
+        return;
+    }
     let we_own = state.keep_awake.lock_safe().we_own_override;
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
@@ -656,9 +815,8 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
         k.we_own_override = outcome.we_own;
         // Compare the *current* generation against the one stamped when this
         // worker was spawned. Reading it here (after winning `LID_OP_LOCK`)
-        // instead would compare against whatever the latest toggle set, so an
-        // out-of-order worker would see its own request as current and wrongly
-        // commit it, letting a lost ON race flip the switch back on.
+        // instead would compare against whatever the latest transition set and
+        // could commit a stale authorization result ahead of its reverse worker.
         match reconcile_writeback(
             k.generation != request_generation,
             desired_on,
@@ -678,6 +836,9 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
                 }
                 k.active = true;
                 k.lid_close = LidCloseState::Engaged;
+                k.phase = KeepAwakePhase::On;
+                k.notice = None;
+                k.retry_target = None;
             }
             ReconcileWriteback::Off => {
                 if let Some(id) = k.assertion.take() {
@@ -685,6 +846,25 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
                 }
                 k.active = false;
                 k.lid_close = LidCloseState::Off;
+                k.phase = KeepAwakePhase::Off;
+                k.retry_target = None;
+            }
+            ReconcileWriteback::EnableFailed => {
+                if let Some(id) = k.assertion.take() {
+                    release_assertion(id);
+                }
+                k.active = false;
+                k.lid_close = LidCloseState::Off;
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
+                k.retry_target = Some(true);
+            }
+            ReconcileWriteback::DisableFailed => {
+                k.active = true;
+                k.lid_close = LidCloseState::Engaged;
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
+                k.retry_target = Some(false);
             }
         }
     }
@@ -722,11 +902,27 @@ fn run_disablesleep(on: bool) -> bool {
     let script = format!(
         "do shell script \"/usr/bin/pmset -a disablesleep {value}\" with administrator privileges"
     );
-    match std::process::Command::new("/usr/bin/osascript")
+    let child = std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(&script)
-        .status()
-    {
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, on, "failed to run osascript for pmset disablesleep");
+            return false;
+        }
+    };
+    let pid = child.id();
+    AUTH_PID.store(pid, std::sync::atomic::Ordering::Release);
+    let result = child.wait();
+    let _ = AUTH_PID.compare_exchange(
+        pid,
+        0,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    );
+    match result {
         Ok(status) if status.success() => true,
         Ok(status) => {
             tracing::warn!(code = ?status.code(), on, "pmset disablesleep was not applied (auth declined?)");
@@ -735,6 +931,26 @@ fn run_disablesleep(on: bool) -> bool {
         Err(e) => {
             tracing::warn!(error = %e, on, "failed to run osascript for pmset disablesleep");
             false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kill_authorization() {
+    let pid = AUTH_PID.load(std::sync::atomic::Ordering::Acquire);
+    if pid == 0 {
+        return;
+    }
+    match std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            tracing::warn!(code = ?status.code(), pid, "failed to cancel administrator authorization")
+        }
+        Err(error) => {
+            tracing::warn!(%error, pid, "failed to invoke kill for administrator authorization")
         }
     }
 }
@@ -902,7 +1118,7 @@ mod tests {
 
     #[test]
     fn writeback_superseded_changes_nothing() {
-        // A toggle bumped the generation while our admin-auth dialog was up:
+        // Cancellation bumped the generation while our admin-auth dialog was up:
         // commit nothing, whatever the direction/outcome — the newer cycle's
         // worker owns the final state, so a stale cancel can't clobber it.
         assert_eq!(
@@ -925,7 +1141,7 @@ mod tests {
         );
         assert_eq!(
             reconcile_writeback(false, true, LidCloseState::Unavailable, false),
-            ReconcileWriteback::Off
+            ReconcileWriteback::EnableFailed
         );
     }
 
@@ -935,7 +1151,7 @@ mod tests {
         // sleep is still prevented — keep keep-awake on rather than report off.
         assert_eq!(
             reconcile_writeback(false, false, LidCloseState::Off, true),
-            ReconcileWriteback::On
+            ReconcileWriteback::DisableFailed
         );
     }
 

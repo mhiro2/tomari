@@ -103,11 +103,16 @@ export const runAction = (action: AppAction): Promise<void> => invoke('run_actio
 // Current sleep-prevention status, for the panel to render on open.
 export const getKeepAwake = (): Promise<KeepAwakeStatus> => invoke('get_keep_awake');
 
-// Turn sleep prevention on or off. Resolves to the resulting status; lidClose
-// may flip shortly after (the lid-close veto prompts for admin in the
-// background), signalled by the "tomari:keep-awake-changed" event.
+// Turn sleep prevention on or off. The first response can be an explicit
+// enabling/disabling phase; completion is signalled by the changed event.
 export const setKeepAwake = (enabled: boolean): Promise<KeepAwakeStatus> =>
   invoke('set_keep_awake', { enabled });
+
+export const cancelKeepAwakeTransition = (): Promise<KeepAwakeStatus> =>
+  invoke('cancel_keep_awake_transition');
+
+export const retryKeepAwakeTransition = (): Promise<KeepAwakeStatus> =>
+  invoke('retry_keep_awake_transition');
 
 // Whether menu bar tidying is on and, if so, whether it is collapsed.
 export const getMenuBar = (): Promise<MenuBarStatus> => invoke('get_menu_bar');

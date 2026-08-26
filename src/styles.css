@@ -1643,17 +1643,48 @@ kbd,
   background: var(--muted);
 }
 
-.session-state--active .session-state__mark {
+.session-state--on .session-state__mark,
+.session-state--enabling .session-state__mark,
+.session-state--disabling .session-state__mark {
   border-color: var(--accent-line);
   background: var(--accent-surface);
 }
 
-.session-state--active .session-state__mark::before {
+.session-state--on .session-state__mark::before,
+.session-state--enabling .session-state__mark::before,
+.session-state--disabling .session-state__mark::before {
   border-color: var(--accent-bright);
 }
 
-.session-state--active .session-state__mark::after {
+.session-state--on .session-state__mark::after,
+.session-state--enabling .session-state__mark::after,
+.session-state--disabling .session-state__mark::after {
   background: var(--accent-bright);
+}
+
+.session-state--enabling .session-state__mark::before,
+.session-state--disabling .session-state__mark::before {
+  animation: session-pulse 1.4s ease-in-out infinite;
+}
+
+.session-state--failed .session-state__mark {
+  border-color: var(--danger);
+  background: var(--danger-surface);
+}
+
+.session-state--failed .session-state__mark::before {
+  border-color: var(--danger);
+}
+
+.session-state--failed .session-state__mark::after {
+  background: var(--danger);
+}
+
+@keyframes session-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.78);
+  }
 }
 
 .session-state strong {
@@ -1664,6 +1695,10 @@ kbd,
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.session-view > .alert {
+  margin: 0;
 }
 
 /* Setup */

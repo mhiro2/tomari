@@ -182,6 +182,12 @@ password: declining when enabling cancels Prevent Sleep entirely (no display-ope
 fallback), and declining when disabling leaves it on (sleep is still prevented
 until the override is cleared).
 
+The UI models those operations explicitly as **enabling** and **disabling**.
+Every toggle surface is locked for the full lifetime of the administrator
+prompt—not merely until the backend worker starts. Canceling from Settings
+safely drives the kernel back toward the preceding stable state; a
+failed authorization can be retried without guessing which direction failed.
+
 The state lasts **only for the current session**: Tomari always starts with
 Prevent Sleep off. Even if the app crashes while it is on, a consistency check at
 launch and cleanup at exit reliably clear `disablesleep`, so you are never left

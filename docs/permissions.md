@@ -55,6 +55,9 @@ display-open-only fallback) and when you **disable** it (clearing the override
 needs the same authorization; declining leaves Prevent Sleep on, since sleep is
 still prevented until it is cleared).
 
+The switch remains unavailable for the entire authorization prompt. You can
+cancel that prompt from Settings, and retry a declined or unconfirmed change.
+
 ## Trying things without permissions
 
 The pure decision logic is implemented and unit-tested independently of the OS

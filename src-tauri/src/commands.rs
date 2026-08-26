@@ -820,12 +820,22 @@ pub fn get_keep_awake(state: State<'_, AppState>) -> crate::keepawake::KeepAwake
 
 /// Turn sleep prevention on or off from the panel toggle. Returns the resulting
 /// status; the lid-close veto is engaged in the background (it prompts for the
-/// administrator password), so `lidClose` starts `pending` and settles to
-/// `engaged` / `unavailable` shortly after via the `tomari:keep-awake-changed`
-/// event.
+/// administrator password), so `phase` remains `enabling` / `disabling` until
+/// it settles via the `tomari:keep-awake-changed` event. Every toggle surface
+/// stays disabled during those phases.
 #[tauri::command]
 pub fn set_keep_awake(app: AppHandle, enabled: bool) -> crate::keepawake::KeepAwakeStatus {
     crate::keepawake::set(&app, enabled)
+}
+
+#[tauri::command]
+pub fn cancel_keep_awake_transition(app: AppHandle) -> crate::keepawake::KeepAwakeStatus {
+    crate::keepawake::cancel_transition(&app)
+}
+
+#[tauri::command]
+pub fn retry_keep_awake_transition(app: AppHandle) -> crate::keepawake::KeepAwakeStatus {
+    crate::keepawake::retry(&app)
 }
 
 /// Whether menu bar tidying is on and, if so, whether it is collapsed right

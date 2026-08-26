@@ -57,7 +57,13 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
       case 'accessibility_status':
         return Promise.resolve(true);
       case 'get_keep_awake':
-        return Promise.resolve({ active: false, lidClose: 'off' });
+        return Promise.resolve({
+          active: false,
+          lidClose: 'off',
+          phase: 'off',
+          notice: null,
+          revision: 1,
+        });
       default:
         return Promise.resolve(null);
     }

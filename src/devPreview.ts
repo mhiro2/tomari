@@ -35,7 +35,13 @@ export async function installDevPreview() {
     accessibility: !permissionsMissing,
     inputMonitoring: !permissionsMissing,
   };
-  const keepAwake: KeepAwakeStatus = { active: false, lidClose: 'off' };
+  const keepAwake: KeepAwakeStatus = {
+    active: false,
+    lidClose: 'off',
+    phase: 'off',
+    notice: null,
+    revision: 1,
+  };
   const modifierRules: ModifierRule[] = [
     {
       id: 'caps',
@@ -192,6 +198,8 @@ export async function installDevPreview() {
         return true;
       case 'get_keep_awake':
       case 'set_keep_awake':
+      case 'cancel_keep_awake_transition':
+      case 'retry_keep_awake_transition':
         return keepAwake;
       case 'get_menu_bar':
         return { enabled: true, collapsed: true };

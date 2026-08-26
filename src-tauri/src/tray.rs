@@ -134,9 +134,10 @@ fn build_menu(
         .build(app)?;
 
     // A checkmark reflects the live keep-awake state; clicking toggles it.
-    let keep_awake_active = crate::keepawake::status(state.inner()).active;
+    let keep_awake_status = crate::keepawake::status(state.inner());
     let keep_awake = CheckMenuItemBuilder::with_id("keep-awake", text.keep_awake)
-        .checked(keep_awake_active)
+        .checked(keep_awake_status.active)
+        .enabled(!keep_awake_status.phase.is_pending())
         .build(app)?;
 
     // Only offered while menu bar tidying is on: with the feature off there is

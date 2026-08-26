@@ -129,6 +129,8 @@ fn main() {
             commands::install_update,
             commands::get_keep_awake,
             commands::set_keep_awake,
+            commands::cancel_keep_awake_transition,
+            commands::retry_keep_awake_transition,
             commands::get_menu_bar,
             commands::list_menu_bar_items,
             commands::move_menu_bar_item,

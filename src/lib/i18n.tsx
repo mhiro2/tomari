@@ -310,6 +310,9 @@ const en = {
   'settings.keepAwakeAction': 'Keep this Mac awake',
   'settings.keepAwakeActive': 'Sleep is being prevented',
   'settings.keepAwakeInactive': 'Your Mac can sleep normally',
+  'settings.keepAwakeEnabling': 'Waiting to prevent sleep',
+  'settings.keepAwakeDisabling': 'Waiting to allow sleep',
+  'settings.keepAwakeFailed': 'The last change was not applied',
   'settings.keepAwakeHint':
     'Turning this on or off asks for your administrator password. Expect more battery use and heat while it is on.',
   'settings.lidClose': 'Work with lid closed',
@@ -317,6 +320,11 @@ const en = {
   'settings.lidPending': 'Enabling…',
   'settings.lidUnavailable': 'Unavailable',
   'settings.lidOff': 'Off',
+  'settings.authorizationPending': 'Administrator approval is waiting',
+  'settings.authorizationPendingHint':
+    'Complete the macOS prompt, or cancel here to return to the previous state.',
+  'settings.noticeAuthorizationDeclined':
+    'The administrator change was declined or could not be confirmed.',
 
   'settings.externalControl': 'Links from other apps',
   'settings.externalControlHint':
@@ -666,6 +674,9 @@ const ja: Record<MessageKey, string> = {
   'settings.keepAwakeAction': 'この Mac のスリープを防ぐ',
   'settings.keepAwakeActive': '現在、スリープを防いでいます',
   'settings.keepAwakeInactive': '現在、通常どおりスリープします',
+  'settings.keepAwakeEnabling': 'スリープ防止の許可を待っています',
+  'settings.keepAwakeDisabling': 'スリープ許可の変更を待っています',
+  'settings.keepAwakeFailed': '直前の変更を適用できませんでした',
   'settings.keepAwakeHint':
     'オン・オフの切り替え時に管理者パスワードを確認します。オンの間はバッテリー消費と発熱が増えます。',
   'settings.lidClose': '蓋を閉じても継続',
@@ -673,6 +684,11 @@ const ja: Record<MessageKey, string> = {
   'settings.lidPending': '有効化中…',
   'settings.lidUnavailable': '利用不可',
   'settings.lidOff': 'オフ',
+  'settings.authorizationPending': '管理者の承認を待っています',
+  'settings.authorizationPendingHint':
+    'macOS のダイアログを完了するか、ここでキャンセルして直前の状態に戻してください。',
+  'settings.noticeAuthorizationDeclined':
+    '管理者による変更が拒否されたか、結果を確認できませんでした。',
 
   'settings.externalControl': 'ほかのアプリとの連携',
   'settings.externalControlHint':

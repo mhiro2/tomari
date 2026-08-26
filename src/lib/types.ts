@@ -133,6 +133,8 @@ export interface AppSettings {
 // engaged. ('unavailable' mirrors the backend enum but is no longer surfaced — a
 // declined veto turns keep-awake off entirely rather than reporting it.)
 export type LidCloseState = 'off' | 'pending' | 'engaged' | 'unavailable';
+export type KeepAwakePhase = 'off' | 'enabling' | 'on' | 'disabling' | 'failed';
+export type KeepAwakeNotice = 'authorizationDeclined';
 
 // Runtime sleep-prevention state (not part of AppSettings — it never persists).
 export interface KeepAwakeStatus {
@@ -140,6 +142,12 @@ export interface KeepAwakeStatus {
   active: boolean;
   // Lid-close veto state — when "engaged", work continues with the lid shut.
   lidClose: LidCloseState;
+  phase: KeepAwakePhase;
+  notice: KeepAwakeNotice | null;
+  // Monotonic ordering stamp, assigned by the backend as it emits. Several
+  // backend threads emit, so events can arrive out of order; the panel drops any
+  // snapshot older than one it has already applied. Not for display.
+  revision: number;
 }
 
 // Runtime menu-bar-tidy state. Like keep-awake this never persists: a launch

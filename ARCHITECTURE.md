@@ -556,21 +556,38 @@ shows on; if the veto then cannot be engaged (auth declined, or the sleep state
 is unreadable) the whole switch rolls back off. Turning off is deferred to the
 worker: clearing the override needs an admin dialog that can be declined, and
 sleep is still prevented until it succeeds, so a declined clear keeps keep-awake
-on. A `generation` counter, bumped on every toggle, lets a slow worker detect
-that a newer toggle superseded it while its auth dialog was up, so a stale cancel
-never clobbers a switch the user has since re-toggled (the pure
-`reconcile_writeback` decides supersede / on / off and is unit-tested).
+on. The exported state machine distinguishes `off`, `enabling`, `on`,
+`disabling`, and `failed`; all ordinary toggle entry points reject re-entry
+during the two pending phases. An explicit cancel terminates the active
+`osascript`, bumps a `generation` counter, and queues the reverse reconcile.
+That lets a slow worker detect supersession while preserving any ownership it
+acquired just before cancellation (the pure `reconcile_writeback` decides the
+final state and is unit-tested). A worker that finds itself already superseded
+when it wins `LID_OP_LOCK` — the reverse worker, or `cleanup_blocking`, got the
+lock first — returns before its first `pmset`, so it can never re-enable the
+override the winner just cleared.
 
 Keep-awake is **runtime state** in `AppState` (`Mutex<KeepAwake>`), never
 persisted: it always starts off at launch. A toggle reaches it from the tray (a
 `CheckMenuItem`), the panel (`get_keep_awake` / `set_keep_awake` commands), and
 `AppAction::ToggleKeepAwake` (hotkeys / taps). Every change emits
 `tomari:keep-awake-changed` and rebuilds the tray, so the panel toggle and the
-tray checkmark stay in sync regardless of which surface initiated it.
+tray checkmark stay in sync regardless of which surface initiated it. Commands
+and reconcile workers both emit, and each snapshots under the state lock but
+emits outside it, so the events themselves can arrive out of order. Every
+snapshot the frontend can receive — reads and events alike — therefore takes a
+`revision` under that same lock, so a snapshot issued later always outranks one
+issued earlier. The panel treats the event, never a command's return value, as
+the state; it subscribes before its first read (an event emitted in that gap
+would simply be lost) and drops any snapshot older than one it has already
+applied, rather than being stranded on a transition that has since finished.
 
 Both recovery paths — `reconcile_on_launch` and exit-time `cleanup_blocking` —
 clear through the same verified `cleanup_lid_close_with`, so a setter reporting
-success without moving the kernel flag never takes the marker with it.
+success without moving the kernel flag never takes the marker with it. Shutdown
+also terminates an administrator prompt a worker left on screen before waiting
+on `LID_OP_LOCK`, so a quit or an updater restart cannot block on a dialog for
+work it is about to undo.
 
 Because `disablesleep` survives a crash, a marker file under the data directory
 records that _we_ engaged it. `reconcile_on_launch` (from `setup`) clears a

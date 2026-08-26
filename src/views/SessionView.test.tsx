@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { KeepAwakeStatus } from '../lib/types';
@@ -14,8 +14,29 @@ const mockInvoke = vi.mocked(invoke);
 const { listen } = await import('@tauri-apps/api/event');
 const mockListen = vi.mocked(listen);
 
-const OFF: KeepAwakeStatus = { active: false, lidClose: 'off' };
-const ON: KeepAwakeStatus = { active: true, lidClose: 'engaged' };
+const OFF: KeepAwakeStatus = {
+  active: false,
+  lidClose: 'off',
+  phase: 'off',
+  notice: null,
+  revision: 1,
+};
+// Revisions order the fixtures the way the backend would emit them: ENABLING is
+// stamped before the ON it settles into, so a late ENABLING is a stale snapshot.
+const ENABLING: KeepAwakeStatus = {
+  ...OFF,
+  active: true,
+  lidClose: 'pending',
+  phase: 'enabling',
+  revision: 2,
+};
+const ON: KeepAwakeStatus = {
+  ...OFF,
+  active: true,
+  lidClose: 'engaged',
+  phase: 'on',
+  revision: 3,
+};
 
 // Marks an override value as a command rejection rather than a resolved value.
 class Rejection {
@@ -69,7 +90,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const toggle = await screen.findByRole('switch');
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
     expect(toggle).not.toBeDisabled();
 
     fireEvent.click(toggle);
@@ -79,8 +100,79 @@ describe('SessionView', () => {
 
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(1);
 
-    resolveSet(ON);
+    // The administrator prompt keeps every surface locked well past the command
+    // response, so the pending phase — not the in-flight call — holds it shut.
+    resolveSet(ENABLING);
+    keepAwakeChanged?.(ENABLING);
+    await waitFor(() => expect(toggle).toBeDisabled());
+    fireEvent.click(toggle);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(1);
+
+    keepAwakeChanged?.(ON);
     await waitFor(() => expect(toggle).not.toBeDisabled());
+  });
+
+  it('keeps a settled event when the command that started it responds late', async () => {
+    let resolveSet!: (v: KeepAwakeStatus) => void;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_keep_awake') return Promise.resolve(OFF);
+      if (cmd === 'set_keep_awake') return new Promise((resolve) => (resolveSet = resolve));
+      return Promise.resolve(null);
+    });
+
+    render(<SessionView />);
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
+    fireEvent.click(toggle);
+
+    // The background worker can settle before the response to the call that
+    // spawned it gets back, so that response carries the older snapshot.
+    keepAwakeChanged?.(ON);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+    resolveSet(ENABLING);
+
+    // Applying it would strand the panel in a transition that already finished.
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('subscribes to the change event before the first read', async () => {
+    const order: string[] = [];
+    mockListen.mockImplementation((event) => {
+      order.push(`listen:${event}`);
+      return Promise.resolve(() => {});
+    });
+    mockInvoke.mockImplementation((cmd: string) => {
+      order.push(`invoke:${cmd}`);
+      return Promise.resolve(cmd === 'get_keep_awake' ? OFF : null);
+    });
+
+    render(<SessionView />);
+    await waitFor(() => expect(order).toContain('invoke:get_keep_awake'));
+
+    // A transition settling in the gap would emit an event nobody is listening
+    // for yet, and the read's pending snapshot would become the final state.
+    expect(order.indexOf('listen:tomari:keep-awake-changed')).toBeLessThan(
+      order.indexOf('invoke:get_keep_awake'),
+    );
+  });
+
+  it('ignores an event whose revision is older than one already applied', async () => {
+    render(<SessionView />);
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
+
+    keepAwakeChanged?.(ON);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+
+    // Stamped before ON but delivered after it: every emitting backend thread
+    // snapshots under the state lock and emits outside it, so two of them can
+    // reach the webview in the opposite order. `act` flushes the render, so the
+    // assertions below see the applied state rather than a pending update.
+    await act(async () => keepAwakeChanged?.(ENABLING));
+
+    expect(screen.getByText('Sleep is being prevented')).toBeInTheDocument();
+    expect(toggle).not.toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
   it('shows an error and re-syncs from the backend when set_keep_awake rejects', async () => {
@@ -89,7 +181,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const toggle = await screen.findByRole('switch');
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
     fireEvent.click(toggle);
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -118,19 +210,20 @@ describe('SessionView', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('backend gone');
     // A failed initial read must not expose a clickable switch backed by a
     // guessed off state.
-    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
-    expect(screen.getByRole('switch')).toBeDisabled();
+    const toggle = screen.getByRole('switch', { name: 'Keep this Mac awake' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(toggle).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
-    await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled());
+    await waitFor(() => expect(toggle).not.toBeDisabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(attempts).toBe(2);
   });
 
   it('updates from the tomari:keep-awake-changed event', async () => {
     render(<SessionView />);
-    const toggle = await screen.findByRole('switch');
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
     expect(toggle).toHaveAttribute('aria-checked', 'false');
 
     keepAwakeChanged?.(ON);
@@ -152,12 +245,29 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const toggle = await screen.findByRole('switch');
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
     fireEvent.click(toggle);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     // The toggle finishes (not stuck busy) even though the re-sync failed.
     await waitFor(() => expect(toggle).not.toBeDisabled());
     expect(toggle).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('cancels an administrator prompt without issuing another normal toggle', async () => {
+    mockCommands({ get_keep_awake: ENABLING, cancel_keep_awake_transition: OFF });
+
+    render(<SessionView />);
+
+    const toggle = await screen.findByRole('switch', { name: 'Working…' });
+    expect(toggle).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.filter(([cmd]) => cmd === 'cancel_keep_awake_transition'),
+      ).toHaveLength(1),
+    );
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(0);
   });
 });
