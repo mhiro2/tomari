@@ -167,8 +167,10 @@ along with everything else), open Tomari's window with the global shortcut
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from
 being interrupted — **even when the display is closed**. You can toggle it
 manually from the menu bar tray, the toggle in the Prevent Sleep section, or a global
-shortcut (the "Toggle Prevent Sleep" action). Automatic process detection is
-planned for the future.
+shortcut (the "Toggle Prevent Sleep" action). Settings also detects common
+developer processes such as Codex, Claude, Cargo, Node, and Python after they
+have run for five minutes, and offers a direct way to start Prevent Sleep for
+the detected work. Detection never enables the feature without your action.
 
 How it works, in two layers that engage together:
 
@@ -207,7 +209,9 @@ can decline it, a guard turns Prevent Sleep off at most once per session rather
 than reopening the password prompt every few seconds; the Settings banner then
 offers a retry. The safety
 monitor runs in the backend every ten seconds, including while Settings is
-closed.
+closed. The System state section separately reports the real kernel
+`SleepDisabled` flag and whether Tomari owns the override, rather than inferring
+either value from the switch.
 
 The state lasts **only for the current session**: Tomari always starts with
 Prevent Sleep off. Even if the app crashes while it is on, a consistency check at

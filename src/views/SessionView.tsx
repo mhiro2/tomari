@@ -11,6 +11,7 @@ import type {
   KeepAwakePhase,
   KeepAwakeStatus,
   LidCloseState,
+  PowerSource,
 } from '../lib/types';
 
 type TimerMode = 'never' | '30m' | '1h' | 'time';
@@ -50,6 +51,12 @@ const NOTICE_LABEL: Record<KeepAwakeNotice, MessageKey> = {
   authorizationDeclined: 'settings.noticeAuthorizationDeclined',
 };
 
+const POWER_LABEL: Record<PowerSource, MessageKey> = {
+  ac: 'settings.powerAc',
+  battery: 'settings.powerBattery',
+  unknown: 'settings.systemUnknown',
+};
+
 function deadlineFor(mode: TimerMode, customTime: string): number | null {
   if (mode === 'time') {
     const value = new Date(customTime).getTime();
@@ -82,6 +89,12 @@ function formatCountdown(deadline: number, now: number): string {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
     : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatElapsed(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
 // Keep-awake is runtime-only state (it never persists), so it lives outside
@@ -245,7 +258,6 @@ export function SessionView() {
 
   const active = status?.active ?? false;
   const ready = status !== null;
-  const lidChip = LID_CLOSE_CHIP[status?.lidClose ?? 'off'];
   const endsAtMs = status?.options.endsAtMs;
   const countdown = active && typeof endsAtMs === 'number' ? formatCountdown(endsAtMs, now) : null;
 
@@ -341,19 +353,14 @@ export function SessionView() {
         }}
         onOptionsChange={(overrides) => saveOptions({ ...draftOptions, ...overrides })}
       />
-
-      <SettingsList>
-        <SettingsRow
-          title={t('settings.keepAwakeAction')}
-          description={t('settings.keepAwakeHint')}
-        />
-        {active && (
-          <SettingsRow
-            title={t('settings.lidClose')}
-            trail={<Chip tone={lidChip.tone}>{t(lidChip.key)}</Chip>}
-          />
-        )}
-      </SettingsList>
+      <SystemState t={t} status={status} />
+      <DetectedJobs
+        t={t}
+        status={status}
+        active={active}
+        busy={busy}
+        onEnable={() => toggle(true)}
+      />
     </div>
   );
 }
@@ -444,6 +451,90 @@ function SafetySettings({
           </select>
         }
       />
+    </SettingsList>
+  );
+}
+
+function SystemState({ t, status }: { t: Translator; status: KeepAwakeStatus | null }) {
+  const lid = status?.lidClose ?? 'off';
+  const lidChip = LID_CLOSE_CHIP[lid];
+  const power = status?.powerSource ?? 'unknown';
+  const powerLabel =
+    status?.batteryPercent !== null && status?.batteryPercent !== undefined
+      ? `${t(POWER_LABEL[power])} · ${status.batteryPercent}%`
+      : t(POWER_LABEL[power]);
+  return (
+    <SettingsList label={t('settings.systemState')}>
+      <SettingsRow
+        title={t('settings.powerSource')}
+        trail={<Chip tone="muted">{powerLabel}</Chip>}
+      />
+      <SettingsRow
+        title={t('settings.kernelState')}
+        description={t('settings.kernelStateHint')}
+        trail={
+          <Chip tone={status?.kernelSleepDisabled ? 'ok' : 'muted'}>
+            {status?.kernelSleepDisabled === null || !status
+              ? t('settings.systemUnknown')
+              : status.kernelSleepDisabled
+                ? t('settings.kernelBlocked')
+                : t('settings.kernelAllowed')}
+          </Chip>
+        }
+      />
+      <SettingsRow
+        title={t('settings.lidClose')}
+        trail={<Chip tone={lidChip.tone}>{t(lidChip.key)}</Chip>}
+      />
+      <SettingsRow
+        title={t('settings.ownership')}
+        description={t('settings.ownershipHint')}
+        trail={
+          <Chip tone={status?.ownsLidClose ? 'ok' : 'muted'}>
+            {status?.ownsLidClose ? t('settings.ownedByTomari') : t('settings.notOwned')}
+          </Chip>
+        }
+      />
+    </SettingsList>
+  );
+}
+
+function DetectedJobs({
+  t,
+  status,
+  active,
+  busy,
+  onEnable,
+}: {
+  t: Translator;
+  status: KeepAwakeStatus | null;
+  active: boolean;
+  busy: boolean;
+  onEnable: () => void;
+}) {
+  return (
+    <SettingsList label={t('settings.detectedJobs')} description={t('settings.detectedJobsHint')}>
+      {status?.longRunningProcesses.length ? (
+        status.longRunningProcesses.map((process) => (
+          <SettingsRow
+            key={process.pid}
+            title={process.name}
+            description={t('settings.processDetail', {
+              pid: process.pid,
+              elapsed: formatElapsed(process.elapsedSecs),
+            })}
+            trail={
+              !active && (
+                <button type="button" className="btn btn--amber" disabled={busy} onClick={onEnable}>
+                  {t('common.turnOn')}
+                </button>
+              )
+            }
+          />
+        ))
+      ) : (
+        <SettingsRow description={t('settings.noDetectedJobs')} />
+      )}
     </SettingsList>
   );
 }

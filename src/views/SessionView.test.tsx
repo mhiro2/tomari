@@ -20,6 +20,11 @@ const OFF: KeepAwakeStatus = {
   phase: 'off',
   options: { durationSecs: null, endsAtMs: null, acOnly: false, lowBatteryAction: 'warn' },
   notice: null,
+  powerSource: 'ac',
+  batteryPercent: 82,
+  kernelSleepDisabled: false,
+  ownsLidClose: false,
+  longRunningProcesses: [],
   revision: 1,
 };
 // Revisions order the fixtures the way the backend would emit them: ENABLING is
@@ -36,6 +41,8 @@ const ON: KeepAwakeStatus = {
   active: true,
   lidClose: 'engaged',
   phase: 'on',
+  kernelSleepDisabled: true,
+  ownsLidClose: true,
   revision: 3,
 };
 

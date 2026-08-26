@@ -68,6 +68,11 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
             lowBatteryAction: 'warn',
           },
           notice: null,
+          powerSource: 'ac',
+          batteryPercent: 80,
+          kernelSleepDisabled: false,
+          ownsLidClose: false,
+          longRunningProcesses: [],
           revision: 1,
         });
       default:

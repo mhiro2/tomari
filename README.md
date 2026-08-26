@@ -48,8 +48,8 @@ same foundation over time.
   tray, settings, or a global shortcut. Turning it on or off asks for your
   administrator password; the switch stays locked while that prompt is open,
   and the prompt can be canceled or retried from Settings. Optional deadlines,
-  AC-only operation, low-battery protection, and a live countdown keep the
-  session bounded.
+  AC-only operation, low-battery protection, a live countdown, kernel/ownership
+  diagnostics, and long-running developer-job detection keep the session bounded.
 
 ### And more
 

@@ -77,6 +77,7 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 static AUTH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 const LOW_BATTERY_PERCENT: u8 = 20;
+const LONG_RUNNING_PROCESS_SECS: u64 = 5 * 60;
 
 /// Runtime keep-awake state. Not persisted — always starts inactive.
 #[derive(Debug)]
@@ -115,10 +116,12 @@ pub struct KeepAwake {
     /// in [`set`] — notably not by settling back on, which is where cancelling
     /// an automatic turn-off lands with its trigger usually still true.
     auto_off_attempted: bool,
-    /// Cached power state, refreshed by the safety monitor. Internal for now:
-    /// the guards act on it, nothing renders it.
+    /// Cached real power and kernel state, refreshed by the safety monitor.
     power_source: PowerSource,
     battery_percent: Option<u8>,
+    kernel_sleep_disabled: Option<bool>,
+    /// Long-running developer jobs detected by the safety monitor.
+    long_running_processes: Vec<LongRunningProcess>,
     /// Monotonic stamp taken by every snapshot the frontend can receive — both
     /// [`status`] reads and [`emit_status`] events — under the same lock that
     /// produced it. It counts snapshots issued, not state changes: what matters
@@ -145,6 +148,8 @@ impl Default for KeepAwake {
             auto_off_attempted: false,
             power_source: PowerSource::Unknown,
             battery_percent: None,
+            kernel_sleep_disabled: None,
+            long_running_processes: Vec::new(),
             revision: 0,
         }
     }
@@ -208,6 +213,14 @@ pub enum KeepAwakeNotice {
     AuthorizationDeclined,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongRunningProcess {
+    pub pid: u32,
+    pub name: String,
+    pub elapsed_secs: u64,
+}
+
 /// The state of the lid-close veto (`pmset disablesleep`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,6 +249,11 @@ pub struct KeepAwakeStatus {
     pub phase: KeepAwakePhase,
     pub options: KeepAwakeOptions,
     pub notice: Option<KeepAwakeNotice>,
+    pub power_source: PowerSource,
+    pub battery_percent: Option<u8>,
+    pub kernel_sleep_disabled: Option<bool>,
+    pub owns_lid_close: bool,
+    pub long_running_processes: Vec<LongRunningProcess>,
     /// See [`KeepAwake::revision`]. Ordering stamp, not a value to render.
     pub revision: u64,
 }
@@ -258,6 +276,11 @@ fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
         phase: k.phase,
         options: k.options,
         notice: k.notice,
+        power_source: k.power_source,
+        battery_percent: k.battery_percent,
+        kernel_sleep_disabled: k.kernel_sleep_disabled,
+        owns_lid_close: k.we_own_override,
+        long_running_processes: k.long_running_processes.clone(),
         revision: k.revision,
     }
 }
@@ -384,6 +407,11 @@ pub fn start_monitor(app: &AppHandle) {
 
 fn refresh_system_status(app: &AppHandle) {
     let (power_source, battery_percent) = read_power_status();
+    #[cfg(target_os = "macos")]
+    let kernel_sleep_disabled = read_sleep_disabled();
+    #[cfg(not(target_os = "macos"))]
+    let kernel_sleep_disabled = None;
+    let processes = detect_long_running_processes();
     let now = unix_time_ms();
     let state = app.state::<AppState>();
     // `Some(request_generation)` once a guard has stamped its turn-off; the
@@ -391,9 +419,17 @@ fn refresh_system_status(app: &AppHandle) {
     let mut automatic_off: Option<Option<u64>> = None;
     let changed = {
         let mut k = state.keep_awake.lock_safe();
-        let before = (k.power_source, k.battery_percent, k.notice);
+        let before = (
+            k.power_source,
+            k.battery_percent,
+            k.kernel_sleep_disabled,
+            k.long_running_processes.clone(),
+            k.notice,
+        );
         k.power_source = power_source;
         k.battery_percent = battery_percent;
+        k.kernel_sleep_disabled = kernel_sleep_disabled;
+        k.long_running_processes = processes;
 
         // A guard must not interrupt an administrator prompt that is already up,
         // and must fire at most once per session: `disengage` needs its own
@@ -432,7 +468,14 @@ fn refresh_system_status(app: &AppHandle) {
                 automatic_off = Some(begin_disable(&mut k));
             }
         }
-        before != (k.power_source, k.battery_percent, k.notice)
+        before
+            != (
+                k.power_source,
+                k.battery_percent,
+                k.kernel_sleep_disabled,
+                k.long_running_processes.clone(),
+                k.notice,
+            )
     };
 
     if let Some(request_generation) = automatic_off {
@@ -1269,6 +1312,81 @@ fn parse_power_status(text: &str) -> (PowerSource, Option<u8>) {
     (source, percent)
 }
 
+fn detect_long_running_processes() -> Vec<LongRunningProcess> {
+    let output = match std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,etime=,comm="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    parse_long_running_processes(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_long_running_processes(text: &str) -> Vec<LongRunningProcess> {
+    const JOB_NAMES: &[&str] = &[
+        "bun",
+        "cargo",
+        "claude",
+        "cmake",
+        "codex",
+        "deno",
+        "go",
+        "make",
+        "ninja",
+        "node",
+        "npm",
+        "pnpm",
+        "python",
+        "python3",
+        "pytest",
+        "rustc",
+        "swift",
+        "xcodebuild",
+        "yarn",
+    ];
+    let own_pid = std::process::id();
+    let mut processes = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let elapsed_secs = parse_elapsed(fields.next()?)?;
+            let command = fields.next()?;
+            let name = std::path::Path::new(command).file_name()?.to_str()?;
+            (pid != own_pid
+                && elapsed_secs >= LONG_RUNNING_PROCESS_SECS
+                && JOB_NAMES.contains(&name))
+            .then(|| LongRunningProcess {
+                pid,
+                name: name.to_owned(),
+                elapsed_secs,
+            })
+        })
+        .collect::<Vec<_>>();
+    processes.sort_by_key(|process| std::cmp::Reverse(process.elapsed_secs));
+    processes.truncate(5);
+    processes
+}
+
+fn parse_elapsed(value: &str) -> Option<u64> {
+    let (days, clock) = match value.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, value),
+    };
+    let parts = clock
+        .split(':')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60 + seconds,
+        [hours, minutes, seconds] => hours * 3_600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+    Some(days * 86_400 + seconds)
+}
+
 /// Path to the failsafe marker: present while we may hold a lid-close override.
 #[cfg(target_os = "macos")]
 fn marker_path() -> Option<std::path::PathBuf> {
@@ -1382,6 +1500,28 @@ mod tests {
                 "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t19%; discharging;"
             ),
             (PowerSource::Battery, Some(19))
+        );
+    }
+
+    #[test]
+    fn long_running_process_detection_filters_short_and_unrelated_processes() {
+        let processes = parse_long_running_processes(
+            " 101 04:59 /usr/bin/cargo\n 102 05:00 /opt/homebrew/bin/codex\n 103 1-02:03:04 /usr/bin/python3\n 104 12:00 /usr/bin/Finder\n",
+        );
+        assert_eq!(
+            processes,
+            vec![
+                LongRunningProcess {
+                    pid: 103,
+                    name: "python3".into(),
+                    elapsed_secs: 93_784,
+                },
+                LongRunningProcess {
+                    pid: 102,
+                    name: "codex".into(),
+                    elapsed_secs: 300,
+                },
+            ]
         );
     }
 

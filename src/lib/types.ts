@@ -134,6 +134,7 @@ export interface AppSettings {
 // declined veto turns keep-awake off entirely rather than reporting it.)
 export type LidCloseState = 'off' | 'pending' | 'engaged' | 'unavailable';
 export type KeepAwakePhase = 'off' | 'enabling' | 'on' | 'disabling' | 'failed';
+export type PowerSource = 'ac' | 'battery' | 'unknown';
 export type LowBatteryAction = 'warn' | 'turnOff';
 export type KeepAwakeNotice =
   | 'acRequired'
@@ -149,6 +150,12 @@ export interface KeepAwakeOptions {
   lowBatteryAction: LowBatteryAction;
 }
 
+export interface LongRunningProcess {
+  pid: number;
+  name: string;
+  elapsedSecs: number;
+}
+
 // Runtime sleep-prevention state (not part of AppSettings — it never persists).
 export interface KeepAwakeStatus {
   // Sleep prevention is on.
@@ -158,6 +165,11 @@ export interface KeepAwakeStatus {
   phase: KeepAwakePhase;
   options: KeepAwakeOptions;
   notice: KeepAwakeNotice | null;
+  powerSource: PowerSource;
+  batteryPercent: number | null;
+  kernelSleepDisabled: boolean | null;
+  ownsLidClose: boolean;
+  longRunningProcesses: LongRunningProcess[];
   // Monotonic ordering stamp, assigned by the backend as it emits. Several
   // backend threads emit, so events can arrive out of order; the panel drops any
   // snapshot older than one it has already applied. Not for display.

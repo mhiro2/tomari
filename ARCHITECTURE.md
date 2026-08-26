@@ -584,7 +584,9 @@ already applied, rather than being stranded on a transition that has since
 finished.
 
 A ten-second backend monitor keeps session-only safety policy independent of the
-settings window. It refreshes AC/battery data. Absolute auto-off deadlines, AC-only operation, and
+settings window. It refreshes AC/battery data, the actual kernel
+`SleepDisabled` flag, and a bounded list of known developer processes running
+for at least five minutes. Absolute auto-off deadlines, AC-only operation, and
 the low-battery warn/turn-off policy are evaluated in that order by the tested
 pure `safety_decision`, which commits its verdict — the notice and the transition
 stamp both, via `begin_disable` — in the same critical section that made it, so

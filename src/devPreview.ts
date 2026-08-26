@@ -46,6 +46,14 @@ export async function installDevPreview() {
       lowBatteryAction: 'warn',
     },
     notice: null,
+    powerSource: 'ac',
+    batteryPercent: 86,
+    kernelSleepDisabled: false,
+    ownsLidClose: false,
+    longRunningProcesses: [
+      { pid: 4218, name: 'codex', elapsedSecs: 1_942 },
+      { pid: 4330, name: 'cargo', elapsedSecs: 694 },
+    ],
     revision: 1,
   };
   const modifierRules: ModifierRule[] = [
