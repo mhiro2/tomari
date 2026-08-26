@@ -134,7 +134,20 @@ export interface AppSettings {
 // declined veto turns keep-awake off entirely rather than reporting it.)
 export type LidCloseState = 'off' | 'pending' | 'engaged' | 'unavailable';
 export type KeepAwakePhase = 'off' | 'enabling' | 'on' | 'disabling' | 'failed';
-export type KeepAwakeNotice = 'authorizationDeclined';
+export type LowBatteryAction = 'warn' | 'turnOff';
+export type KeepAwakeNotice =
+  | 'acRequired'
+  | 'acDisconnected'
+  | 'lowBattery'
+  | 'timerElapsed'
+  | 'authorizationDeclined';
+
+export interface KeepAwakeOptions {
+  durationSecs: number | null;
+  endsAtMs: number | null;
+  acOnly: boolean;
+  lowBatteryAction: LowBatteryAction;
+}
 
 // Runtime sleep-prevention state (not part of AppSettings — it never persists).
 export interface KeepAwakeStatus {
@@ -143,6 +156,7 @@ export interface KeepAwakeStatus {
   // Lid-close veto state — when "engaged", work continues with the lid shut.
   lidClose: LidCloseState;
   phase: KeepAwakePhase;
+  options: KeepAwakeOptions;
   notice: KeepAwakeNotice | null;
   // Monotonic ordering stamp, assigned by the backend as it emits. Several
   // backend threads emit, so events can arrive out of order; the panel drops any

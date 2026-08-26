@@ -188,6 +188,27 @@ prompt—not merely until the backend worker starts. Canceling from Settings
 safely drives the kernel back toward the preceding stable state; a
 failed authorization can be retried without guessing which direction failed.
 
+Session-only safety controls can bound the operation:
+
+- turn it off after 30 minutes, after one hour, or at a selected date and time;
+- allow it only while connected to AC power;
+- warn at 20% battery, or begin turning it off automatically;
+- follow the remaining time in a live countdown.
+
+The 30-minute and one-hour presets start counting when Prevent Sleep actually
+turns on, so they work the same from the tray or a shortcut. A selected end time
+that has already passed is treated as spent: turning Prevent Sleep on clears it
+and starts an unbounded session rather than refusing, and Settings drops the
+stale time from the picker. Pick a new end time to bound the new session.
+
+Automatic turn-off starts the same verified disable flow as a manual switch,
+so macOS may request administrator approval to clear `disablesleep`. Because you
+can decline it, a guard turns Prevent Sleep off at most once per session rather
+than reopening the password prompt every few seconds; the Settings banner then
+offers a retry. The safety
+monitor runs in the backend every ten seconds, including while Settings is
+closed.
+
 The state lasts **only for the current session**: Tomari always starts with
 Prevent Sleep off. Even if the app crashes while it is on, a consistency check at
 launch and cleanup at exit reliably clear `disablesleep`, so you are never left

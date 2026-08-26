@@ -572,15 +572,36 @@ persisted: it always starts off at launch. A toggle reaches it from the tray (a
 `CheckMenuItem`), the panel (`get_keep_awake` / `set_keep_awake` commands), and
 `AppAction::ToggleKeepAwake` (hotkeys / taps). Every change emits
 `tomari:keep-awake-changed` and rebuilds the tray, so the panel toggle and the
-tray checkmark stay in sync regardless of which surface initiated it. Commands
-and reconcile workers both emit, and each snapshots under the state lock but
-emits outside it, so the events themselves can arrive out of order. Every
-snapshot the frontend can receive — reads and events alike — therefore takes a
-`revision` under that same lock, so a snapshot issued later always outranks one
-issued earlier. The panel treats the event, never a command's return value, as
-the state; it subscribes before its first read (an event emitted in that gap
-would simply be lost) and drops any snapshot older than one it has already
-applied, rather than being stranded on a transition that has since finished.
+tray checkmark stay in sync regardless of which surface initiated it. Commands,
+reconcile workers, and the safety monitor all emit, and each snapshots under the
+state lock but emits outside it, so the events themselves can arrive out of
+order. Every snapshot the frontend can receive — reads and events alike —
+therefore takes a `revision` under that same lock, so a snapshot issued later
+always outranks one issued earlier. The panel treats the event, never a command's
+return value, as the state; it subscribes before its first read (an event emitted
+in that gap would simply be lost) and drops any snapshot older than one it has
+already applied, rather than being stranded on a transition that has since
+finished.
+
+A ten-second backend monitor keeps session-only safety policy independent of the
+settings window. It refreshes AC/battery data. Absolute auto-off deadlines, AC-only operation, and
+the low-battery warn/turn-off policy are evaluated in that order by the tested
+pure `safety_decision`, which commits its verdict — the notice and the transition
+stamp both, via `begin_disable` — in the same critical section that made it, so
+an option edit landing in the gap cannot have a stale verdict applied to it.
+Automatic turn-off enters the same administrator-backed disable transition as a
+manual request. Because that clear can be declined, a
+guard fires at most once per session (`guards_blocked`, re-armed only by an
+explicit request in `set` — never by settling back on, which is where cancelling
+an automatic turn-off lands), which keeps a decline from reopening the dialog
+every tick — but `failed` itself does not disarm the
+guards: a session left running by a declined manual off is still holding sleep
+off, and is exactly when a deadline or a dying battery must still act. Relative presets are re-armed on every
+engage, and an absolute end time already in the past is spent rather than a
+reason to refuse: engaging drops it, so the tray item and the global shortcut —
+neither of which can edit the deadline — never dead-end on a stale one. The
+frontend derives its countdown from the backend deadline and mirrors the options
+the backend reports back, so it never enforces or resurrects a deadline itself.
 
 Both recovery paths — `reconcile_on_launch` and exit-time `cleanup_blocking` —
 clear through the same verified `cleanup_lid_close_with`, so a setter reporting

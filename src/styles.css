@@ -1606,7 +1606,8 @@ kbd,
 /* Prevent Sleep */
 
 .session-state {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
   min-height: 112px;
@@ -1687,6 +1688,10 @@ kbd,
   }
 }
 
+.session-state__copy {
+  min-width: 0;
+}
+
 .session-state strong {
   font-size: 15px;
 }
@@ -1695,6 +1700,29 @@ kbd,
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.session-state__countdown {
+  display: grid;
+  min-width: 104px;
+  justify-items: end;
+  padding-left: 16px;
+  border-left: 1px solid var(--line);
+}
+
+.session-state__countdown span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.session-state__countdown strong {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
 }
 
 .session-view > .alert {
@@ -1829,6 +1857,18 @@ kbd,
   .modifier-table th:nth-child(3),
   .modifier-table td:nth-child(3) {
     display: none;
+  }
+
+  .session-state {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .session-state__countdown {
+    grid-column: 1 / -1;
+    justify-items: start;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 }
 

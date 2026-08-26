@@ -129,6 +129,7 @@ fn main() {
             commands::install_update,
             commands::get_keep_awake,
             commands::set_keep_awake,
+            commands::configure_keep_awake,
             commands::cancel_keep_awake_transition,
             commands::retry_keep_awake_transition,
             commands::get_menu_bar,
@@ -209,6 +210,7 @@ fn main() {
             // Keep-awake never persists as "on", so clear any lid-close sleep
             // override a previous run left behind after an unclean exit.
             keepawake::reconcile_on_launch(&handle);
+            keepawake::start_monitor(&handle);
 
             // Put the menu bar divider back if tidying is switched on. Always
             // collapsed to start with, so a launch looks the same every time.

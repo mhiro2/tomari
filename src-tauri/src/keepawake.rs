@@ -49,7 +49,7 @@
 //! and always drive the system toward the current desired state. This also
 //! serializes the cleanup that follows an authorization cancellation.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::locks::MutexExt;
@@ -76,6 +76,8 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 #[cfg(target_os = "macos")]
 static AUTH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+const LOW_BATTERY_PERCENT: u8 = 20;
+
 /// Runtime keep-awake state. Not persisted — always starts inactive.
 #[derive(Debug)]
 pub struct KeepAwake {
@@ -100,10 +102,23 @@ pub struct KeepAwake {
     /// User-visible transition state. Unlike `active`, this distinguishes an
     /// administrator prompt from a settled system state.
     phase: KeepAwakePhase,
-    /// Last authorization outcome that needs the user's attention.
+    /// Session-only safety policy selected in the panel.
+    options: KeepAwakeOptions,
+    /// Last safety or authorization outcome that needs the user's attention.
     notice: Option<KeepAwakeNotice>,
     /// Target of the last failed transition, used by the explicit retry action.
     retry_target: Option<bool>,
+    /// Whether a safety guard has already driven an automatic turn-off for this
+    /// session, so each session gets one automatic attempt: the clear needs an
+    /// administrator prompt that can be declined, and re-deciding every tick
+    /// would reopen that dialog on a loop. Cleared *only* by an explicit request
+    /// in [`set`] — notably not by settling back on, which is where cancelling
+    /// an automatic turn-off lands with its trigger usually still true.
+    auto_off_attempted: bool,
+    /// Cached power state, refreshed by the safety monitor. Internal for now:
+    /// the guards act on it, nothing renders it.
+    power_source: PowerSource,
+    battery_percent: Option<u8>,
     /// Monotonic stamp taken by every snapshot the frontend can receive — both
     /// [`status`] reads and [`emit_status`] events — under the same lock that
     /// produced it. It counts snapshots issued, not state changes: what matters
@@ -124,8 +139,12 @@ impl Default for KeepAwake {
             we_own_override: false,
             generation: 0,
             phase: KeepAwakePhase::Off,
+            options: KeepAwakeOptions::default(),
             notice: None,
             retry_target: None,
+            auto_off_attempted: false,
+            power_source: PowerSource::Unknown,
+            battery_percent: None,
             revision: 0,
         }
     }
@@ -149,9 +168,43 @@ impl KeepAwakePhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LowBatteryAction {
+    #[default]
+    Warn,
+    TurnOff,
+}
+
+/// Session-only safety controls. `ends_at_ms` is an absolute Unix timestamp so
+/// the backend, tray, and panel agree even if the panel is closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepAwakeOptions {
+    /// Relative timer preset. Re-armed on every transition to on.
+    pub duration_secs: Option<u64>,
+    /// Materialized deadline, or a user-selected absolute end time.
+    pub ends_at_ms: Option<u64>,
+    pub ac_only: bool,
+    pub low_battery_action: LowBatteryAction,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PowerSource {
+    Ac,
+    Battery,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KeepAwakeNotice {
+    AcRequired,
+    AcDisconnected,
+    LowBattery,
+    TimerElapsed,
     AuthorizationDeclined,
 }
 
@@ -181,6 +234,7 @@ pub struct KeepAwakeStatus {
     /// Lid-close veto state.
     pub lid_close: LidCloseState,
     pub phase: KeepAwakePhase,
+    pub options: KeepAwakeOptions,
     pub notice: Option<KeepAwakeNotice>,
     /// See [`KeepAwake::revision`]. Ordering stamp, not a value to render.
     pub revision: u64,
@@ -202,23 +256,44 @@ fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
         active: k.active,
         lid_close: k.lid_close,
         phase: k.phase,
+        options: k.options,
         notice: k.notice,
         revision: k.revision,
     }
 }
 
 /// Turn sleep prevention on or off, returning the resulting status.
-pub fn set(app: &AppHandle, enabled: bool) -> KeepAwakeStatus {
+pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     {
         let mut k = state.keep_awake.lock_safe();
-        // An administrator prompt is already up: the switch is locked until it
-        // settles, so an ordinary toggle is dropped rather than queued behind it.
         if k.phase.is_pending() {
             return status_from(&k);
         }
+        if let Some(options) = options {
+            k.options = options;
+        }
         k.notice = None;
         k.retry_target = None;
+        // An explicit request re-arms the guards, so a declined automatic
+        // turn-off can be retried once more for the session it left running.
+        k.auto_off_attempted = false;
+        // An absolute end time that has already passed cannot bound this session,
+        // so it is stale rather than a reason to refuse: drop it and carry on.
+        // Refusing instead would dead-end the tray item and the global shortcut —
+        // neither can edit the end time, so keep-awake would silently do nothing
+        // until the panel was reopened and the deadline changed by hand.
+        if enabled && deadline_is_stale(k.options, unix_time_ms()) {
+            k.options.ends_at_ms = None;
+        }
+        if enabled && k.options.ac_only && k.power_source != PowerSource::Ac {
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::AcRequired);
+            k.retry_target = Some(true);
+            drop(k);
+            notify(app);
+            return status(state.inner());
+        }
     }
     if enabled { engage(app) } else { disengage(app) }
 }
@@ -233,15 +308,31 @@ pub fn toggle(app: &AppHandle) -> KeepAwakeStatus {
     }
     let active = k.active;
     drop(k);
-    set(app, !active)
+    set(app, !active, None)
 }
 
-/// Retry whichever direction most recently failed authorization. No-op when
-/// there is no failed transition.
+/// Update the session-only timer and power guards without changing the master
+/// switch. Active sessions pick up the new policy on the next monitor tick.
+pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    let mut k = state.keep_awake.lock_safe();
+    k.options = options;
+    if !k.active && k.options.duration_secs.is_some() {
+        k.options.ends_at_ms = None;
+    } else if k.active && k.options.duration_secs.is_some() && k.options.ends_at_ms.is_none() {
+        arm_duration(&mut k.options);
+    }
+    drop(k);
+    notify(app);
+    status(state.inner())
+}
+
+/// Retry whichever direction most recently failed authorization or a safety
+/// precondition. No-op when there is no failed transition.
 pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     let target = state.keep_awake.lock_safe().retry_target;
-    target.map_or_else(|| status(state.inner()), |target| set(app, target))
+    target.map_or_else(|| status(state.inner()), |target| set(app, target, None))
 }
 
 /// Cancel the administrator prompt and drive the system back toward the stable
@@ -279,6 +370,143 @@ pub fn cancel_transition(app: &AppHandle) -> KeepAwakeStatus {
     status(state.inner())
 }
 
+/// Start the low-frequency system monitor that enforces timers and power guards
+/// even while the settings window is closed.
+pub fn start_monitor(app: &AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            refresh_system_status(&handle);
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+}
+
+fn refresh_system_status(app: &AppHandle) {
+    let (power_source, battery_percent) = read_power_status();
+    let now = unix_time_ms();
+    let state = app.state::<AppState>();
+    // `Some(request_generation)` once a guard has stamped its turn-off; the
+    // worker is spawned after the lock is released.
+    let mut automatic_off: Option<Option<u64>> = None;
+    let changed = {
+        let mut k = state.keep_awake.lock_safe();
+        let before = (k.power_source, k.battery_percent, k.notice);
+        k.power_source = power_source;
+        k.battery_percent = battery_percent;
+
+        // A guard must not interrupt an administrator prompt that is already up,
+        // and must fire at most once per session: `disengage` needs its own
+        // (declinable) prompt, so re-deciding every tick while a declined
+        // auto-off sits in `Failed` would reopen that dialog every ten seconds.
+        // Note the block is *not* `phase != On` — that would also disarm every
+        // guard for a session left in `Failed` by a declined manual off, which
+        // is still holding sleep off and is exactly when the guards matter.
+        let blocked = guards_blocked(k.phase, k.auto_off_attempted);
+        match safety_decision(
+            k.active,
+            blocked,
+            k.options,
+            power_source,
+            battery_percent,
+            now,
+        ) {
+            SafetyDecision::None if k.notice == Some(KeepAwakeNotice::LowBattery) => {
+                k.notice = None
+            }
+            SafetyDecision::None => {}
+            SafetyDecision::WarnLowBattery => k.notice = Some(KeepAwakeNotice::LowBattery),
+            // Commit the decision — the notice *and* the transition itself —
+            // under the same lock that made it, so an option edit landing in
+            // between cannot have a stale verdict applied to it.
+            SafetyDecision::TurnOff(notice) => {
+                k.notice = Some(notice);
+                k.auto_off_attempted = true;
+                // The deadline has been spent. Clearing it here keeps the status
+                // the panel renders honest (no countdown against a time already
+                // past) and leaves the next session unbounded rather than
+                // pre-expired.
+                if notice == KeepAwakeNotice::TimerElapsed {
+                    k.options.ends_at_ms = None;
+                }
+                automatic_off = Some(begin_disable(&mut k));
+            }
+        }
+        before != (k.power_source, k.battery_percent, k.notice)
+    };
+
+    if let Some(request_generation) = automatic_off {
+        finish_disable(app, request_generation);
+    } else if changed {
+        emit_status(app);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafetyDecision {
+    None,
+    WarnLowBattery,
+    TurnOff(KeepAwakeNotice),
+}
+
+/// Whether the safety guards must stay quiet. They are blocked while an
+/// administrator prompt is up, and once a guard has already driven an automatic
+/// turn-off for this session. They are deliberately *not* blocked by `Failed`:
+/// a declined manual off leaves the session running with sleep still prevented,
+/// which is exactly when a deadline or a dying battery should still act.
+fn guards_blocked(phase: KeepAwakePhase, auto_off_attempted: bool) -> bool {
+    phase.is_pending() || auto_off_attempted
+}
+
+fn safety_decision(
+    active: bool,
+    transition_blocked: bool,
+    options: KeepAwakeOptions,
+    power_source: PowerSource,
+    battery_percent: Option<u8>,
+    now: u64,
+) -> SafetyDecision {
+    if !active || transition_blocked {
+        return SafetyDecision::None;
+    }
+    if options.ends_at_ms.is_some_and(|deadline| deadline <= now) {
+        SafetyDecision::TurnOff(KeepAwakeNotice::TimerElapsed)
+    } else if options.ac_only && power_source == PowerSource::Battery {
+        SafetyDecision::TurnOff(KeepAwakeNotice::AcDisconnected)
+    } else if battery_percent.is_some_and(|percent| percent <= LOW_BATTERY_PERCENT) {
+        match options.low_battery_action {
+            LowBatteryAction::Warn => SafetyDecision::WarnLowBattery,
+            LowBatteryAction::TurnOff => SafetyDecision::TurnOff(KeepAwakeNotice::LowBattery),
+        }
+    } else {
+        SafetyDecision::None
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+/// Whether the configured absolute end time is already spent, so engaging would
+/// otherwise start a session the very next monitor tick tears down. Relative
+/// presets are excluded: [`arm_duration`] re-materializes those on every engage,
+/// so their `ends_at_ms` is never stale.
+fn deadline_is_stale(options: KeepAwakeOptions, now: u64) -> bool {
+    options.duration_secs.is_none() && options.ends_at_ms.is_some_and(|deadline| deadline <= now)
+}
+
+fn arm_duration(options: &mut KeepAwakeOptions) {
+    if let Some(duration_secs) = options.duration_secs {
+        options.ends_at_ms =
+            Some(unix_time_ms().saturating_add(duration_secs.saturating_mul(1_000)));
+    }
+}
+
 fn engage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     // Once shutdown cleanup has begun, refuse to turn on — otherwise a worker
@@ -313,6 +541,9 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
         if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
             return status_from(&k);
         }
+        // Relative presets begin when the session actually engages, including
+        // tray and shortcut starts that happen after the panel was closed.
+        arm_duration(&mut k.options);
         // The idle-sleep assertion is the foundation of keep-awake — it needs no
         // permission and is what actually holds sleep off for the lid-open case.
         // Take it synchronously and flip `active` on *only once it succeeds*, so a
@@ -360,48 +591,66 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
     status(state.inner())
 }
 
+/// Stamp a turn-off onto state the caller already holds the lock for, returning
+/// the generation a reconcile worker must carry (`None` when there is no worker
+/// to spawn). Split out from [`disengage`] so a caller that *decided* to turn off
+/// under the lock — the safety monitor — can commit that decision in the same
+/// critical section: otherwise an option edit landing in the gap would have a
+/// stale verdict applied to it, and a toggle in the same gap could leave two
+/// workers racing the same transition.
+fn begin_disable(k: &mut KeepAwake) -> Option<u64> {
+    if !k.active {
+        k.phase = KeepAwakePhase::Off;
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Do *not* flip `active` or release the assertion yet. Turning off means
+        // clearing the lid-close override, which needs an admin dialog that can
+        // be declined — and until it is cleared, sleep is still prevented. The
+        // worker commits the off (`active = false`, assertion released) only once
+        // the clear succeeds; a declined clear keeps keep-awake on rather than
+        // show it off while sleep stays blocked. Stamp this transition so an
+        // explicit cancellation can supersede it.
+        k.generation = k.generation.wrapping_add(1);
+        k.phase = KeepAwakePhase::Disabling;
+        Some(k.generation)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No lid-close veto off-platform, so the off is immediate.
+        k.active = false;
+        k.lid_close = LidCloseState::Off;
+        k.phase = KeepAwakePhase::Off;
+        None
+    }
+}
+
+/// Publish a stamped turn-off and hand the (slow, admin-authed) clear to a
+/// worker. Always called after [`begin_disable`], with the state lock released.
+fn finish_disable(app: &AppHandle, request_generation: Option<u64>) {
+    // Publish the pending phase immediately so every entry point is disabled
+    // while the administrator prompt is open.
+    notify(app);
+    #[cfg(target_os = "macos")]
+    if let Some(request_generation) = request_generation {
+        spawn_reconcile(app.clone(), false, request_generation);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = request_generation;
+}
+
 fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
-    // The generation stamped on this disengage, captured under the lock that
-    // bumps it (see [`engage`]).
-    #[cfg(target_os = "macos")]
-    let request_generation;
-    {
+    let request_generation = {
         let mut k = state.keep_awake.lock_safe();
         if !k.active {
             k.phase = KeepAwakePhase::Off;
             return status_from(&k);
         }
-        #[cfg(target_os = "macos")]
-        {
-            // Do *not* flip `active` or release the assertion yet. Turning off
-            // means clearing the lid-close override, which needs an admin dialog
-            // that can be declined — and until it is cleared, sleep is still
-            // prevented. The worker commits the off (`active = false`, assertion
-            // released) only once the clear succeeds; a declined clear keeps
-            // keep-awake on rather than show it off while sleep stays blocked.
-            // Stamp this transition so an explicit cancellation can supersede it.
-            k.generation = k.generation.wrapping_add(1);
-            request_generation = k.generation;
-            k.phase = KeepAwakePhase::Disabling;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // No lid-close veto off-platform, so the off is immediate.
-            k.active = false;
-            k.lid_close = LidCloseState::Off;
-            k.phase = KeepAwakePhase::Off;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Publish the pending phase immediately so every entry point is disabled
-        // while the administrator prompt is open.
-        notify(app);
-        spawn_reconcile(app.clone(), false, request_generation);
-    }
-    #[cfg(not(target_os = "macos"))]
-    notify(app);
+        begin_disable(&mut k)
+    };
+    finish_disable(app, request_generation);
     status(state.inner())
 }
 
@@ -839,6 +1088,12 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
                 k.phase = KeepAwakePhase::On;
                 k.notice = None;
                 k.retry_target = None;
+                // `auto_off_attempted` is deliberately *not* cleared here.
+                // Cancelling an automatic turn-off lands right in this arm, and
+                // the condition that triggered it (on battery, battery low) is
+                // usually still true — re-arming would put the administrator
+                // prompt back on screen on the very next monitor tick. Only an
+                // explicit request from the user re-arms it, in `set`.
             }
             ReconcileWriteback::Off => {
                 if let Some(id) = k.assertion.take() {
@@ -976,6 +1231,44 @@ fn read_sleep_disabled() -> Option<bool> {
     Some(false)
 }
 
+fn read_power_status() -> (PowerSource, Option<u8>) {
+    #[cfg(target_os = "macos")]
+    {
+        let output = match std::process::Command::new("/usr/bin/pmset")
+            .args(["-g", "batt"])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => return (PowerSource::Unknown, None),
+        };
+        parse_power_status(&String::from_utf8_lossy(&output.stdout))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (PowerSource::Unknown, None)
+    }
+}
+
+fn parse_power_status(text: &str) -> (PowerSource, Option<u8>) {
+    let source = if text.contains("'AC Power'") {
+        PowerSource::Ac
+    } else if text.contains("'Battery Power'") {
+        PowerSource::Battery
+    } else {
+        PowerSource::Unknown
+    };
+    let percent = text.lines().find_map(|line| {
+        let marker = line.find('%')?;
+        let digits = line[..marker]
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        digits.chars().rev().collect::<String>().parse::<u8>().ok()
+    });
+    (source, percent)
+}
+
 /// Path to the failsafe marker: present while we may hold a lid-close override.
 #[cfg(target_os = "macos")]
 fn marker_path() -> Option<std::path::PathBuf> {
@@ -1075,6 +1368,108 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_status_reports_source_and_percentage() {
+        assert_eq!(
+            parse_power_status(
+                "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t82%; charging;"
+            ),
+            (PowerSource::Ac, Some(82))
+        );
+        assert_eq!(
+            parse_power_status(
+                "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t19%; discharging;"
+            ),
+            (PowerSource::Battery, Some(19))
+        );
+    }
+
+    #[test]
+    fn safety_guards_prioritize_deadline_then_power_then_battery() {
+        let options = KeepAwakeOptions {
+            duration_secs: None,
+            ends_at_ms: Some(1_000),
+            ac_only: true,
+            low_battery_action: LowBatteryAction::TurnOff,
+        };
+        assert_eq!(
+            safety_decision(true, false, options, PowerSource::Battery, Some(5), 1_000),
+            SafetyDecision::TurnOff(KeepAwakeNotice::TimerElapsed)
+        );
+
+        let options = KeepAwakeOptions {
+            ends_at_ms: None,
+            ..options
+        };
+        assert_eq!(
+            safety_decision(true, false, options, PowerSource::Battery, Some(5), 0),
+            SafetyDecision::TurnOff(KeepAwakeNotice::AcDisconnected)
+        );
+
+        let options = KeepAwakeOptions {
+            ac_only: false,
+            low_battery_action: LowBatteryAction::Warn,
+            ..options
+        };
+        assert_eq!(
+            safety_decision(true, false, options, PowerSource::Battery, Some(20), 0),
+            SafetyDecision::WarnLowBattery
+        );
+    }
+
+    #[test]
+    fn safety_guards_do_not_interrupt_an_authorization_transition() {
+        let options = KeepAwakeOptions {
+            duration_secs: None,
+            ends_at_ms: Some(0),
+            ac_only: true,
+            low_battery_action: LowBatteryAction::TurnOff,
+        };
+        assert_eq!(
+            safety_decision(true, true, options, PowerSource::Battery, Some(1), 1),
+            SafetyDecision::None
+        );
+    }
+
+    #[test]
+    fn guards_pause_for_a_prompt_and_for_one_automatic_turn_off_only() {
+        assert!(guards_blocked(KeepAwakePhase::Enabling, false));
+        assert!(guards_blocked(KeepAwakePhase::Disabling, false));
+        assert!(!guards_blocked(KeepAwakePhase::On, false));
+        // The clear needs an administrator prompt that can be declined, so a
+        // guard fires once per session — otherwise a decline would reopen that
+        // dialog on every monitor tick.
+        assert!(guards_blocked(KeepAwakePhase::Failed, true));
+        assert!(guards_blocked(KeepAwakePhase::On, true));
+        // A session left running by a *declined manual off* sits in `Failed`
+        // with sleep still prevented; its guards must stay armed.
+        assert!(!guards_blocked(KeepAwakePhase::Failed, false));
+    }
+
+    #[test]
+    fn a_spent_end_time_is_stale_but_a_relative_preset_never_is() {
+        let at_time = KeepAwakeOptions {
+            duration_secs: None,
+            ends_at_ms: Some(1_000),
+            ac_only: false,
+            low_battery_action: LowBatteryAction::Warn,
+        };
+        // Already reached: engaging would be torn down on the next monitor tick,
+        // so the deadline is dropped rather than the switch refusing — a refusal
+        // would leave the tray item and the shortcut with no way to recover.
+        assert!(deadline_is_stale(at_time, 1_000));
+        assert!(!deadline_is_stale(at_time, 999));
+        // A relative preset is re-armed by `arm_duration` on every engage, so a
+        // leftover materialized deadline from an earlier session is not stale.
+        assert!(!deadline_is_stale(
+            KeepAwakeOptions {
+                duration_secs: Some(1_800),
+                ..at_time
+            },
+            u64::MAX
+        ));
+    }
 
     #[test]
     fn reconcile_without_marker_does_nothing() {

@@ -47,7 +47,9 @@ same foundation over time.
 - Keep long-running jobs alive **even with the lid closed**. Toggle it from the
   tray, settings, or a global shortcut. Turning it on or off asks for your
   administrator password; the switch stays locked while that prompt is open,
-  and the prompt can be canceled or retried from Settings.
+  and the prompt can be canceled or retried from Settings. Optional deadlines,
+  AC-only operation, low-battery protection, and a live countdown keep the
+  session bounded.
 
 ### And more
 

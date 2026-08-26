@@ -57,6 +57,9 @@ still prevented until it is cleared).
 
 The switch remains unavailable for the entire authorization prompt. You can
 cancel that prompt from Settings, and retry a declined or unconfirmed change.
+Automatic deadlines, AC disconnects, and the optional low-battery auto-off
+initiate this same administrator-approved clear, so macOS can show the password
+prompt when a safety guard fires.
 
 ## Trying things without permissions
 

@@ -9,6 +9,7 @@ import type {
   AppSettings,
   DisplayDirection,
   Hotkey,
+  KeepAwakeOptions,
   KeepAwakeStatus,
   MenuBarInventory,
   MenuBarItemZone,
@@ -105,8 +106,13 @@ export const getKeepAwake = (): Promise<KeepAwakeStatus> => invoke('get_keep_awa
 
 // Turn sleep prevention on or off. The first response can be an explicit
 // enabling/disabling phase; completion is signalled by the changed event.
-export const setKeepAwake = (enabled: boolean): Promise<KeepAwakeStatus> =>
-  invoke('set_keep_awake', { enabled });
+export const setKeepAwake = (
+  enabled: boolean,
+  options?: KeepAwakeOptions,
+): Promise<KeepAwakeStatus> => invoke('set_keep_awake', { enabled, options });
+
+export const configureKeepAwake = (options: KeepAwakeOptions): Promise<KeepAwakeStatus> =>
+  invoke('configure_keep_awake', { options });
 
 export const cancelKeepAwakeTransition = (): Promise<KeepAwakeStatus> =>
   invoke('cancel_keep_awake_transition');

@@ -39,6 +39,12 @@ export async function installDevPreview() {
     active: false,
     lidClose: 'off',
     phase: 'off',
+    options: {
+      durationSecs: null,
+      endsAtMs: null,
+      acOnly: false,
+      lowBatteryAction: 'warn',
+    },
     notice: null,
     revision: 1,
   };
@@ -198,6 +204,7 @@ export async function installDevPreview() {
         return true;
       case 'get_keep_awake':
       case 'set_keep_awake':
+      case 'configure_keep_awake':
       case 'cancel_keep_awake_transition':
       case 'retry_keep_awake_transition':
         return keepAwake;

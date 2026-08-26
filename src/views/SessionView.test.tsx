@@ -18,6 +18,7 @@ const OFF: KeepAwakeStatus = {
   active: false,
   lidClose: 'off',
   phase: 'off',
+  options: { durationSecs: null, endsAtMs: null, acOnly: false, lowBatteryAction: 'warn' },
   notice: null,
   revision: 1,
 };
@@ -269,5 +270,89 @@ describe('SessionView', () => {
       ).toHaveLength(1),
     );
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(0);
+  });
+
+  it('stores a 30-minute preset that the backend arms when enabled', async () => {
+    mockInvoke.mockImplementation((cmd, args) => {
+      if (cmd === 'get_keep_awake') return Promise.resolve(OFF);
+      if (cmd === 'configure_keep_awake') {
+        return Promise.resolve({
+          ...OFF,
+          options: (args as { options: KeepAwakeStatus['options'] }).options,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<SessionView />);
+    const timer = await screen.findByRole('combobox', { name: 'Turn off automatically' });
+    fireEvent.change(timer, { target: { value: '30m' } });
+
+    await waitFor(() => {
+      const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'configure_keep_awake');
+      expect(call?.[1]).toEqual({
+        options: {
+          durationSecs: 30 * 60,
+          endsAtMs: null,
+          acOnly: false,
+          lowBatteryAction: 'warn',
+        },
+      });
+    });
+  });
+
+  it('drops an end time the backend reports as spent instead of re-sending it', async () => {
+    const spent = Date.now() - 60_000;
+    mockCommands({
+      get_keep_awake: { ...OFF, options: { ...OFF.options, endsAtMs: spent } },
+    });
+
+    render(<SessionView />);
+    const timer = await screen.findByRole('combobox', { name: 'Turn off automatically' });
+    await waitFor(() => expect(timer).toHaveValue('time'));
+
+    // Engaging clears an end time that is already in the past, so the panel must
+    // follow the backend rather than resurrect the deadline on the next toggle —
+    // which would refuse the session it was just asked to start.
+    keepAwakeChanged?.(OFF);
+    await waitFor(() => expect(timer).toHaveValue('never'));
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Keep this Mac awake' }));
+    await waitFor(() => {
+      const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'set_keep_awake');
+      expect(call?.[1]).toEqual({ enabled: true, options: OFF.options });
+    });
+  });
+
+  it('clears the stored deadline when the end-time field is emptied', async () => {
+    const deadline = Date.now() + 3_600_000;
+    mockCommands({
+      get_keep_awake: { ...OFF, options: { ...OFF.options, endsAtMs: deadline } },
+    });
+
+    render(<SessionView />);
+    const endTime = await screen.findByLabelText('End time');
+    fireEvent.change(endTime, { target: { value: '' } });
+
+    // Without this the backend would keep enforcing an end time the panel no
+    // longer shows, and the next event would restore it into the field.
+    await waitFor(() => {
+      const call = mockInvoke.mock.calls.findLast(([cmd]) => cmd === 'configure_keep_awake');
+      expect(call?.[1]).toEqual({
+        options: { durationSecs: null, endsAtMs: null, acOnly: false, lowBatteryAction: 'warn' },
+      });
+    });
+  });
+
+  it('renders the backend deadline as a live countdown', async () => {
+    const now = 1_800_000_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    mockCommands({
+      get_keep_awake: { ...ON, options: { ...ON.options, endsAtMs: now + 65_000 } },
+    });
+
+    render(<SessionView />);
+
+    expect(await screen.findByLabelText('Time remaining')).toHaveTextContent('1:05');
   });
 });

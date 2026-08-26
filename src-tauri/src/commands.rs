@@ -824,8 +824,20 @@ pub fn get_keep_awake(state: State<'_, AppState>) -> crate::keepawake::KeepAwake
 /// it settles via the `tomari:keep-awake-changed` event. Every toggle surface
 /// stays disabled during those phases.
 #[tauri::command]
-pub fn set_keep_awake(app: AppHandle, enabled: bool) -> crate::keepawake::KeepAwakeStatus {
-    crate::keepawake::set(&app, enabled)
+pub fn set_keep_awake(
+    app: AppHandle,
+    enabled: bool,
+    options: Option<crate::keepawake::KeepAwakeOptions>,
+) -> crate::keepawake::KeepAwakeStatus {
+    crate::keepawake::set(&app, enabled, options)
+}
+
+#[tauri::command]
+pub fn configure_keep_awake(
+    app: AppHandle,
+    options: crate::keepawake::KeepAwakeOptions,
+) -> crate::keepawake::KeepAwakeStatus {
+    crate::keepawake::configure(&app, options)
 }
 
 #[tauri::command]

@@ -61,6 +61,12 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
           active: false,
           lidClose: 'off',
           phase: 'off',
+          options: {
+            durationSecs: null,
+            endsAtMs: null,
+            acOnly: false,
+            lowBatteryAction: 'warn',
+          },
           notice: null,
           revision: 1,
         });
