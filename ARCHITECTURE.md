@@ -264,12 +264,48 @@ before any window mutation.
 
 **Drag-to-snap** (`drag_to_snap.rs`) is a second, listen-only CGEventTap, opt-in
 and modifier-free: on mouse-down the window under the cursor is hit-tested; on
-the first drag that actually moves its frame the drag arms. Edge detection needs
+the first drag that actually moves its frame the drag arms.
+
+Listen-only means the tap cannot *modify* events, not that it stays out of the
+way: the system still holds the event until the callback returns, which is why a
+slow one gets the tap disabled by timeout. So this callback obeys the same rule
+as the active drag-to-move one — no call into another process, no lock. It reads
+the event's location and flags, checks the `ENABLED` atomic mirrored out of the
+settings by `restart_result`, posts a command down a channel and returns.
+Everything with an Accessibility round-trip in it — the hit-test, the frame
+reads that separate a window drag from a text selection, the snap on release —
+runs on a single worker thread (`tomari-dragsnap-apply`) started with the tap.
+Commands carry the generation of the press they belong to and the queue is
+drained before every step, so a press superseded while a call was in flight is
+folded into the intent and dropped without a call of its own; the decision of
+what to do next (`next_step`) is pure and unit-tested. A press released without
+the cursor ever leaving it is an ordinary click, and costs no Accessibility call
+when the worker sees both together — opportunistic, since a click whose press it
+reaches first is hit-tested like any other.
+
+Because the hit-test no longer runs inside the mouse-down, it is only truthful
+while the window is still where it was pressed: a press the worker could not
+reach within `PRESS_FRESHNESS` is dropped rather than hit-tested against
+coordinates that may by now sit over a different window — one missed snap is
+better than snapping the wrong window and recording that in the undo history. A
+release is exempt from the frame-read throttle exactly once, so a drag quick
+enough to finish inside one interval can still arm, and a window that never
+moved is not asked again.
+
+Blocking that callback was not merely a latency cost. With macOS *three-finger
+drag* enabled the trackpad synthesizes the left button from finger movement, so
+the beginning of a four-finger swipe arrives at this tap as a mouse-down — and a
+hit-test holding that event long enough stopped WindowServer from recognizing the
+swipe, which surfaced as Mission Control's space-switching gestures
+intermittently not working while Tomari ran.
+
+Edge detection needs
 each display's full frame and work area, which only the main thread can read
 (`WindowManager::screens_cg`) — so that geometry is **cached** in `AppState`
 (primed at startup and refreshed whenever the displays change, via the
 `NSApplicationDidChangeScreenParametersNotification` observer in `displays.rs`)
-and the tap thread reads the cache, never blocking on a main-thread round-trip.
+and the worker reads the cache on arm, never blocking on a main-thread
+round-trip.
 Before the Accessibility hit-test, a front-to-back Window Server snapshot lists
 the processes owning a surface at the pointer, and each is AX hit-tested in that
 order until one yields a window (`pointer_window_owners` → `window_at_point`);
@@ -291,13 +327,25 @@ Armed drags then resolve the target purely from the cursor (`screen_at_cursor` +
 `edge_snap_preset`), and only a change of target (preset _and_ display) touches
 the preview. The preview is a translucent, click-through `NSPanel` in
 `overlay.rs` — created lazily and held in a main-thread `thread_local!`, since
-AppKit windows are not `Send` — driven from the tap thread through
+AppKit windows are not `Send` — driven from the worker through
 `overlay::show` / `hide`, which hop to the main thread. On release the window
-snaps to the previewed zone and the move is recorded for undo. A lost mouse-up
-(tap disabled by the system) drops the drag and tears down its preview.
-The mouse-down frame is retained as the history entry's `before` value, so Undo
-returns to the true drag origin rather than the temporary screen-edge frame at
-release.
+snaps to the zone the newest cursor position selected — the mouse-up's own
+coordinates are deliberately ignored, so a release that drifts out of the edge
+band still lands where the drag pointed — and the move is recorded for undo.
+That is normally the zone on screen; when a release folds in with the drag
+before it, the preview for that last position can be superseded before it
+renders, so the drop follows the cursor rather than the last frame the user saw.
+A lost mouse-up (tap disabled by the system) drops the drag and tears down its preview, as does
+`SnapTapState::drop`, which cancels the press, closes the channel and joins the
+worker on the tap thread as it shuts down — before `RunningTap::drop`'s own
+thread join returns, so normally no Accessibility call from a torn-down tap is
+still in flight once the next tap is live. That wait is short because an
+in-flight call is bounded by the AX messaging timeout, but the bound is
+best-effort, and `RunningTap` detaches a tap thread that overruns it — so, as
+with drag-to-move, the guarantee is "normally", not "always".
+The frame read when the press was resolved is retained as the history entry's
+`before` value, so Undo returns to the drag origin rather than the temporary
+screen-edge frame at release.
 `overlay` gives every issued `show`/`hide` a fresh generation and applies a
 queued operation on the main thread only while its generation is still the
 current one — last writer wins, with no assumption about delivery order — so a
