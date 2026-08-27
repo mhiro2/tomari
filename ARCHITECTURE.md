@@ -270,10 +270,23 @@ each display's full frame and work area, which only the main thread can read
 (primed at startup and refreshed whenever the displays change, via the
 `NSApplicationDidChangeScreenParametersNotification` observer in `displays.rs`)
 and the tap thread reads the cache, never blocking on a main-thread round-trip.
-Before the Accessibility hit-test, a front-to-back Window Server snapshot
-selects the owning external process at the pointer; AX is then scoped to that
-application. Tomari's own AppKit accessibility is therefore never entered from
-the tap worker, while floating external windows remain eligible targets.
+Before the Accessibility hit-test, a front-to-back Window Server snapshot lists
+the processes owning a surface at the pointer, and each is AX hit-tested in that
+order until one yields a window (`pointer_window_owners` → `window_at_point`);
+AX is always scoped to a single application, so Tomari's own AppKit
+accessibility is never entered from a worker thread, while floating external
+windows remain eligible targets. Finding *our own* surface in front stops the
+search — a gesture over Tomari's window is not for what it covers.
+
+Trying candidates in order, rather than trusting the frontmost owner, is what
+makes the pointer gestures work at all on current macOS: the Dock owns a window
+covering the entire display (wallpaper / Stage Manager) in front of every app
+window, and it is not flagged as a desktop element, so the window list keeps it.
+Answering with the frontmost owner alone therefore returned "the Dock" for every
+point on screen, and since the Dock has no accessible element there, both
+drag-to-snap and drag-to-move resolved nothing. Only a candidate with nothing at
+the point is looked behind: one that answers with a real element it cannot trace
+to a window — a menu, the menu bar — still blocks what is underneath.
 Armed drags then resolve the target purely from the cursor (`screen_at_cursor` +
 `edge_snap_preset`), and only a change of target (preset _and_ display) touches
 the preview. The preview is a translucent, click-through `NSPanel` in

@@ -218,25 +218,57 @@ struct CgWindowInfo {
     bounds: Rect,
 }
 
-/// Resolve the owner of the frontmost Window Server surface at a point.
+/// How many distinct surface owners at a point are worth AX hit-testing before
+/// giving up. One is the common case; the extras cover the system chrome that
+/// can sit in front of every window (see [`pointer_window_owners`]). Bounded so
+/// a point stacked deep in surfaces cannot turn one gesture into a long run of
+/// Accessibility round-trips.
+const POINTER_OWNER_CANDIDATES: usize = 8;
+
+/// Resolve the owners of the Window Server surfaces at a point, front to back.
 ///
-/// The list is already ordered front-to-back. Keep every layer: floating app
-/// windows are valid drag targets, while menu bars, popovers and other surfaces
-/// must block unrelated windows underneath. The later app-scoped AX walk decides
-/// whether the selected owner's surface actually belongs to a draggable window.
-fn pointer_window_owner(windows: &[CgWindowInfo], x: f64, y: f64) -> Option<pid_t> {
-    windows
+/// The list is already ordered front-to-back, and every layer is kept: floating
+/// app windows are valid drag targets, while menu bars, popovers and other
+/// surfaces must block unrelated windows underneath.
+///
+/// The frontmost surface is not necessarily the answer, though, which is why
+/// this returns *candidates* and leaves the choice to the app-scoped AX
+/// hit-test, which only looks behind a candidate that has nothing at the point
+/// at all (see [`PointerHit`]). macOS keeps full-screen surfaces of its own in front of every app
+/// window — the Dock owns one covering the entire display (wallpaper / Stage
+/// Manager), the Window Server owns its chrome — and neither is flagged as a
+/// desktop element, so the window list does not exclude them. Answering with
+/// the frontmost owner alone therefore returned "the Dock" for *every* point on
+/// screen, and since the Dock has no accessible element there, both pointer
+/// gestures resolved nothing at all: drag-to-snap never armed and drag-to-move
+/// never found a window. A surface with no Accessibility presence at the point
+/// has to be transparent to the search.
+///
+/// Duplicate owners are collapsed: one application with several stacked windows
+/// at the point is one candidate, hit-tested once.
+fn pointer_window_owners(windows: &[CgWindowInfo], x: f64, y: f64) -> Vec<pid_t> {
+    let mut owners: Vec<pid_t> = Vec::new();
+    for window in windows
         .iter()
-        .find(|window| rect_contains(window.bounds, x, y))
-        .map(|window| window.owner_pid)
+        .filter(|window| rect_contains(window.bounds, x, y))
+    {
+        if owners.len() >= POINTER_OWNER_CANDIDATES {
+            break;
+        }
+        if !owners.contains(&window.owner_pid) {
+            owners.push(window.owner_pid);
+        }
+    }
+    owners
 }
 
-/// Snapshot enough Window Server metadata to choose the process to AX hit-test.
+/// Snapshot enough Window Server metadata to choose the processes to AX
+/// hit-test.
 ///
 /// This path deliberately uses no Accessibility objects. In particular, it is
 /// safe to call from an event-tap thread while Tomari's main thread is handling
 /// its own AppKit controls.
-fn pointer_window_owner_at_point(x: f64, y: f64) -> Option<pid_t> {
+fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<pid_t> {
     let list = unsafe {
         CGWindowListCopyWindowInfo(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -244,7 +276,7 @@ fn pointer_window_owner_at_point(x: f64, y: f64) -> Option<pid_t> {
         )
     };
     if list.is_null() {
-        return None;
+        return Vec::new();
     }
     let list = CFOwned(list as CFTypeRef);
     let count = unsafe { CFArrayGetCount(list.0 as _) };
@@ -262,7 +294,7 @@ fn pointer_window_owner_at_point(x: f64, y: f64) -> Option<pid_t> {
         };
         windows.push(CgWindowInfo { owner_pid, bounds });
     }
-    pointer_window_owner(&windows, x, y)
+    pointer_window_owners(&windows, x, y)
 }
 
 /// Find the PID owning the frontmost on-screen window that is not `exclude_pid`.
@@ -788,9 +820,16 @@ unsafe fn element_role(element: CFTypeRef) -> Option<String> {
 /// Tomari's own windows are deliberately excluded: pointer gestures run on
 /// worker threads, and even a read-only system-wide AX hit-test can synchronously
 /// enter Tomari's AppKit accessibility implementation off the main thread.
-/// Resolve an external owner with Window Server metadata first, then constrain
-/// the AX hit-test to that application's element so it cannot route back into
+/// Resolve external owners with Window Server metadata first, then constrain
+/// each AX hit-test to one application's element so it cannot route back into
 /// Tomari even if the window ordering changes between the two operations.
+///
+/// The surfaces at a point are tried front to back (see
+/// [`pointer_window_owners`]): one with no accessible element there — macOS's
+/// own full-screen Dock and Window Server chrome — is transparent to the search
+/// rather than a wall in front of the app window beneath it. Tomari's own
+/// surface is the exception: finding it in front stops the search, because a
+/// gesture over our own window is not for whatever it covers.
 pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
     unsafe {
         if AXIsProcessTrusted() == 0 {
@@ -798,16 +837,14 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
         }
 
         let own_pid = std::process::id() as pid_t;
-        let Some(owner_pid) = pointer_window_owner_at_point(x, y) else {
-            return Err(Error::NoFocusedWindow);
-        };
-        if !is_external_window_pid(Some(owner_pid), own_pid) {
+        let owners = pointer_window_owners_at_point(x, y);
+        if owners.is_empty() {
             return Err(Error::NoFocusedWindow);
         }
 
         // A timeout set on the system-wide object applies globally to this AX
         // client process. We never hit-test that object: creating it only keeps
-        // the app-scoped hit and every returned child/parent element bounded.
+        // the app-scoped hits and every returned child/parent element bounded.
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
             return Err(Error::NoFocusedWindow);
@@ -815,32 +852,89 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
         let system = CFOwned(system);
         set_messaging_timeout(system.0);
 
-        let application = AXUIElementCreateApplication(owner_pid);
-        if application.is_null() {
-            return Err(Error::NoFocusedWindow);
-        }
-        let application = CFOwned(application);
-
-        let mut hit: CFTypeRef = std::ptr::null();
-        let err = AXUIElementCopyElementAtPosition(application.0, x as f32, y as f32, &mut hit);
-        if err != kAXErrorSuccess || hit.is_null() {
-            return Err(Error::NoFocusedWindow);
-        }
-        let mut element = CFOwned(hit);
-
-        for _ in 0..32 {
-            if element_role(element.0).as_deref() == Some("AXWindow") {
-                return DragWindow::new(element);
+        for owner_pid in owners {
+            if !is_external_window_pid(Some(owner_pid), own_pid) {
+                return Err(Error::NoFocusedWindow);
             }
-            if let Ok(window) = copy_attr(element.0, "AXWindow") {
-                return DragWindow::new(window);
-            }
-            match copy_attr(element.0, "AXParent") {
-                Ok(parent) => element = parent,
-                Err(_) => break,
+            match window_in_app_at_point(owner_pid, x, y) {
+                PointerHit::Window(window) => return DragWindow::new(window),
+                // A real surface with nothing draggable behind it as far as this
+                // gesture is concerned: a menu, the menu bar, a status item.
+                PointerHit::Blocked => return Err(Error::NoFocusedWindow),
+                // Nothing there at all; keep looking behind it.
+                PointerHit::NoHit => continue,
             }
         }
         Err(Error::NoFocusedWindow)
+    }
+}
+
+/// How far up the `AXParent` chain to look for the window owning a hit element.
+/// Deep view hierarchies are common; an unbounded walk is not, since a cycle or
+/// a pathological hierarchy would spin an AX round-trip per step.
+const PARENT_WALK_LIMIT: usize = 32;
+
+/// What one application had at a hit-tested point.
+///
+/// The distinction between the two failures is what keeps
+/// [`pointer_window_owners`]'s candidate walk honest: only a surface that is not
+/// *there* may be looked behind.
+enum PointerHit {
+    /// The window owning whatever was hit.
+    Window(CFOwned),
+    /// The application answered with a real element that belongs to no window —
+    /// a menu, the menu bar, a status item. It is a surface the user can see and
+    /// it must block whatever is behind it, exactly as before this walk existed.
+    Blocked,
+    /// The application has nothing at that point: the hit-test failed, returned
+    /// nothing, or answered with the application element itself (which is how
+    /// the Dock's full-screen wallpaper surface answers — it identifies no
+    /// element there, so it is not really "there").
+    NoHit,
+}
+
+/// AX hit-test one application at a screen point and walk up to the window that
+/// owns whatever was hit.
+///
+/// # Safety
+/// The caller must have bounded this process's AX messaging timeout (see
+/// [`set_messaging_timeout`]) before calling this, or a wedged application can
+/// block the calling thread indefinitely.
+unsafe fn window_in_app_at_point(owner_pid: pid_t, x: f64, y: f64) -> PointerHit {
+    let application = unsafe { AXUIElementCreateApplication(owner_pid) };
+    if application.is_null() {
+        return PointerHit::NoHit;
+    }
+    let application = CFOwned(application);
+
+    let mut hit: CFTypeRef = std::ptr::null();
+    let err =
+        unsafe { AXUIElementCopyElementAtPosition(application.0, x as f32, y as f32, &mut hit) };
+    if err != kAXErrorSuccess || hit.is_null() {
+        return PointerHit::NoHit;
+    }
+    let mut element = CFOwned(hit);
+
+    // "The application itself" is not an element at the point; anything else is.
+    let mut hit_a_real_element = false;
+    for _ in 0..PARENT_WALK_LIMIT {
+        let role = unsafe { element_role(element.0) };
+        if role.as_deref() == Some("AXWindow") {
+            return PointerHit::Window(element);
+        }
+        hit_a_real_element |= role.as_deref() != Some("AXApplication");
+        if let Ok(window) = unsafe { copy_attr(element.0, "AXWindow") } {
+            return PointerHit::Window(window);
+        }
+        match unsafe { copy_attr(element.0, "AXParent") } {
+            Ok(parent) => element = parent,
+            Err(_) => break,
+        }
+    }
+    if hit_a_real_element {
+        PointerHit::Blocked
+    } else {
+        PointerHit::NoHit
     }
 }
 
@@ -886,9 +980,10 @@ mod tests {
             },
         ];
 
-        let owner = pointer_window_owner(&windows, 200.0, 200.0);
-        assert_eq!(owner, Some(own_pid));
-        assert!(!is_external_window_pid(owner, own_pid));
+        let owners = pointer_window_owners(&windows, 200.0, 200.0);
+        assert_eq!(owners, vec![own_pid, 99]);
+        // The search stops at our own surface rather than looking behind it.
+        assert!(!is_external_window_pid(owners.first().copied(), own_pid));
     }
 
     #[test]
@@ -904,8 +999,56 @@ mod tests {
             },
         ];
 
-        assert_eq!(pointer_window_owner(&windows, 500.0, 20.0), Some(7));
-        assert_eq!(pointer_window_owner(&windows, 500.0, 200.0), Some(99));
+        assert_eq!(pointer_window_owners(&windows, 500.0, 20.0), vec![7, 99]);
+        assert_eq!(pointer_window_owners(&windows, 500.0, 200.0), vec![99]);
+    }
+
+    #[test]
+    fn pointer_hit_looks_behind_a_full_screen_system_surface() {
+        // What macOS actually puts on screen: the Dock owns a window covering
+        // the whole display in front of every app window. It has no accessible
+        // element at the pointer, so the app behind it has to stay reachable.
+        let dock_pid = 1_827;
+        let windows = [
+            CgWindowInfo {
+                owner_pid: dock_pid,
+                bounds: Rect::new(0.0, 0.0, 1_800.0, 1_169.0),
+            },
+            CgWindowInfo {
+                owner_pid: 99,
+                bounds: Rect::new(0.0, 39.0, 1_800.0, 1_040.0),
+            },
+        ];
+
+        assert_eq!(
+            pointer_window_owners(&windows, 500.0, 500.0),
+            vec![dock_pid, 99]
+        );
+    }
+
+    #[test]
+    fn pointer_hit_lists_each_owner_once_and_stops_at_the_cap() {
+        // An application with several windows stacked at the point is one
+        // candidate, and a deep stack cannot grow the AX round-trips without
+        // bound.
+        let stacked: Vec<CgWindowInfo> = (0..POINTER_OWNER_CANDIDATES + 4)
+            .map(|i| CgWindowInfo {
+                owner_pid: i as pid_t + 1,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            })
+            .chain(std::iter::repeat_n(
+                CgWindowInfo {
+                    owner_pid: 1,
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                },
+                3,
+            ))
+            .collect();
+
+        let owners = pointer_window_owners(&stacked, 10.0, 10.0);
+        assert_eq!(owners.len(), POINTER_OWNER_CANDIDATES);
+        assert_eq!(owners[0], 1);
+        assert_eq!(owners.iter().filter(|pid| **pid == 1).count(), 1);
     }
 
     #[test]
