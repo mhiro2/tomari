@@ -59,6 +59,7 @@ updates:
           - "oxfmt"
           - "oxlint"
           - "oxlint-tsgolint"
+          - "oxlint-plugin-react-doctor"
       tauri:
         patterns:
           - "@tauri-apps/*"
