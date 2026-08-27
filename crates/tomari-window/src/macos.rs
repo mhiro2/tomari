@@ -111,6 +111,12 @@ impl Drop for CFOwned {
 /// opposed to the messaging round-trip itself failing).
 const kAXErrorNoValue: AXError = -25212;
 
+/// `kAXErrorAttributeUnsupported`: the element has no such attribute at all —
+/// e.g. an application that exposes no `AXFocusedWindow`, or a window element
+/// with no `AXPosition`. Like [`kAXErrorNoValue`] it means "nothing to act on
+/// here", not a failure worth showing the user a raw code for.
+const kAXErrorAttributeUnsupported: AXError = -25205;
+
 /// Read a +1-retained attribute value off an element.
 ///
 /// Returns the raw `AXError` on failure rather than collapsing it, so callers
@@ -138,13 +144,16 @@ unsafe fn copy_attr(element: CFTypeRef, name: &str) -> std::result::Result<CFOwn
     }
 }
 
-/// Map an `AXError` from [`copy_attr`] to this crate's [`Error`]. `kAXErrorNoValue`
-/// keeps the existing "nothing to act on" behavior (`NoFocusedWindow`); every
-/// other code — including transient failures like `kAXErrorCannotComplete` —
-/// is preserved as [`Error::Ax`] so [`Error::window_gone`] can tell a hung app
-/// apart from one that has truly gone away.
+/// Map an `AXError` from [`copy_attr`] to this crate's [`Error`].
+/// `kAXErrorNoValue` and `kAXErrorAttributeUnsupported` both mean the thing
+/// asked for is not there, so both keep the "nothing to act on" behavior
+/// (`NoFocusedWindow`) and reach the user as that message rather than as a bare
+/// error code. Every other code — including transient failures like
+/// `kAXErrorCannotComplete` — is preserved as [`Error::Ax`] so
+/// [`Error::window_gone`] and [`Error::retryable`] can tell a hung app apart
+/// from one that has truly gone away.
 fn map_attr_err(err: AXError) -> Error {
-    if err == kAXErrorNoValue {
+    if err == kAXErrorNoValue || err == kAXErrorAttributeUnsupported {
         Error::NoFocusedWindow
     } else {
         Error::Ax(err)
@@ -297,13 +306,45 @@ fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<pid_t> {
     pointer_window_owners(&windows, x, y)
 }
 
-/// Find the PID owning the frontmost on-screen window that is not `exclude_pid`.
+/// How many of the frontmost applications to ask for a focused window before
+/// giving up. One is the common case; the extras cover the processes that own a
+/// normal-level window without answering for one (see
+/// [`frontmost_other_app_pids`]). Bounded so resolving the focused window cannot
+/// turn into a long run of Accessibility round-trips.
+const FOCUSED_WINDOW_CANDIDATES: usize = 8;
+
+/// The owners of the frontmost normal-level (`kCGWindowLayer == 0`) on-screen
+/// windows that are not `exclude_pid`, front to back — the applications visible
+/// behind our own frontmost window.
 ///
-/// Walks the system's on-screen window list (front-to-back order, desktop
-/// elements excluded) and returns the owner of the first normal-level
-/// (`kCGWindowLayer == 0`) window belonging to a different process — i.e. the
-/// application actually visible behind our own frontmost window.
-fn frontmost_other_app_pid(exclude_pid: pid_t) -> Option<pid_t> {
+/// Candidates rather than one answer, for the same reason as
+/// [`pointer_window_owners`]: owning a window on screen does not mean answering
+/// `AXFocusedWindow` for it. A process whose windows are not exposed through
+/// Accessibility used to make the whole lookup fail with its raw AX error, which
+/// surfaced in the UI as an unexplained code even though a perfectly ordinary
+/// application sat right behind it.
+///
+/// Duplicate owners are collapsed: one application with several windows on
+/// screen is one candidate, asked once.
+fn frontmost_other_app_pids(windows: &[(i32, pid_t)], exclude_pid: pid_t) -> Vec<pid_t> {
+    let mut pids: Vec<pid_t> = Vec::new();
+    for (_, owner_pid) in windows
+        .iter()
+        .filter(|(layer, owner_pid)| *layer == 0 && *owner_pid != exclude_pid)
+    {
+        if pids.len() >= FOCUSED_WINDOW_CANDIDATES {
+            break;
+        }
+        if !pids.contains(owner_pid) {
+            pids.push(*owner_pid);
+        }
+    }
+    pids
+}
+
+/// Snapshot the on-screen window list (front-to-back, desktop elements excluded)
+/// as `(layer, owner pid)` pairs and pick the candidates from it.
+fn frontmost_other_app_pids_on_screen(exclude_pid: pid_t) -> Vec<pid_t> {
     let list = unsafe {
         CGWindowListCopyWindowInfo(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -311,27 +352,26 @@ fn frontmost_other_app_pid(exclude_pid: pid_t) -> Option<pid_t> {
         )
     };
     if list.is_null() {
-        return None;
+        return Vec::new();
     }
     let list = CFOwned(list as CFTypeRef);
 
     let count = unsafe { CFArrayGetCount(list.0 as _) };
+    let mut windows = Vec::with_capacity(count as usize);
     for i in 0..count {
         let entry = unsafe { CFArrayGetValueAtIndex(list.0 as _, i) } as CFTypeRef;
         if entry.is_null() {
             continue;
         }
-        let layer = dict_get_i32(entry, unsafe { kCGWindowLayer });
-        if layer != Some(0) {
+        let Some(layer) = dict_get_i32(entry, unsafe { kCGWindowLayer }) else {
             continue;
-        }
-        let owner_pid = dict_get_i32(entry, unsafe { kCGWindowOwnerPID });
-        match owner_pid {
-            Some(pid) if pid != exclude_pid => return Some(pid),
-            _ => continue,
-        }
+        };
+        let Some(owner_pid) = dict_get_i32(entry, unsafe { kCGWindowOwnerPID }) else {
+            continue;
+        };
+        windows.push((layer, owner_pid));
     }
-    None
+    frontmost_other_app_pids(&windows, exclude_pid)
 }
 
 /// Resolve the system-wide focused window, returning the owned CF handles for
@@ -365,15 +405,32 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
 
     let own_pid = std::process::id() as pid_t;
     if unsafe { element_pid(app.0) } == Some(own_pid) {
-        let other_pid = frontmost_other_app_pid(own_pid).ok_or(Error::NoFocusedWindow)?;
-        let other_app = unsafe { AXUIElementCreateApplication(other_pid) };
-        if other_app.is_null() {
-            return Err(Error::NoFocusedWindow);
+        // Ask the applications behind us in turn: the frontmost of them may own
+        // a window without exposing one through Accessibility, and the one
+        // behind it is then the honest answer.
+        let mut retryable = None;
+        for other_pid in frontmost_other_app_pids_on_screen(own_pid) {
+            let other_app = unsafe { AXUIElementCreateApplication(other_pid) };
+            if other_app.is_null() {
+                continue;
+            }
+            let other_app = CFOwned(other_app);
+            // Covered by the process-global timeout set on `system` above.
+            match unsafe { copy_attr(other_app.0, "AXFocusedWindow") } {
+                Ok(window) => return Ok((system, other_app, window)),
+                Err(err) => {
+                    // An application that did not answer in time is worth
+                    // retrying at a higher level, so keep the first such error
+                    // in case nothing behind it answers either — reporting
+                    // "nothing to act on" would lose that retry.
+                    let error = map_attr_err(err);
+                    if error.retryable() && retryable.is_none() {
+                        retryable = Some(error);
+                    }
+                }
+            }
         }
-        let other_app = CFOwned(other_app);
-        // Covered by the process-global timeout set on `system` above.
-        let window = unsafe { copy_attr(other_app.0, "AXFocusedWindow") }.map_err(map_attr_err)?;
-        return Ok((system, other_app, window));
+        return Err(retryable.unwrap_or(Error::NoFocusedWindow));
     }
 
     let window = unsafe { copy_attr(app.0, "AXFocusedWindow") }.map_err(map_attr_err)?;
@@ -1049,6 +1106,54 @@ mod tests {
         assert_eq!(owners.len(), POINTER_OWNER_CANDIDATES);
         assert_eq!(owners[0], 1);
         assert_eq!(owners.iter().filter(|pid| **pid == 1).count(), 1);
+    }
+
+    #[test]
+    fn nothing_there_reads_as_no_window_rather_than_a_raw_code() {
+        // Both "no such attribute" and "no value" mean there is nothing to act
+        // on, and the UI has a sentence for that. Anything else keeps its code,
+        // so a hung app stays retryable.
+        assert!(matches!(
+            map_attr_err(kAXErrorAttributeUnsupported),
+            Error::NoFocusedWindow
+        ));
+        assert!(matches!(
+            map_attr_err(kAXErrorNoValue),
+            Error::NoFocusedWindow
+        ));
+        assert!(matches!(map_attr_err(-25204), Error::Ax(-25204)));
+        assert!(map_attr_err(-25204).retryable());
+    }
+
+    #[test]
+    fn focused_window_candidates_are_the_normal_level_windows_behind_us() {
+        let own_pid = 42;
+        let windows = [
+            (25, 1_184), // Control Center status item
+            (24, 605),   // the menu bar
+            (20, 1_827), // the Dock's full-screen surface
+            (0, own_pid),
+            (0, 1_796),
+            (0, 1_830),
+            (0, 1_796), // the same application again
+        ];
+
+        assert_eq!(
+            frontmost_other_app_pids(&windows, own_pid),
+            vec![1_796, 1_830]
+        );
+    }
+
+    #[test]
+    fn focused_window_candidates_stop_at_the_cap() {
+        let stacked: Vec<(i32, pid_t)> = (0..FOCUSED_WINDOW_CANDIDATES + 4)
+            .map(|i| (0, i as pid_t + 1))
+            .collect();
+
+        assert_eq!(
+            frontmost_other_app_pids(&stacked, 0).len(),
+            FOCUSED_WINDOW_CANDIDATES
+        );
     }
 
     #[test]

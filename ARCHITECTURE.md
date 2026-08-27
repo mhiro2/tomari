@@ -224,9 +224,13 @@ Three layers:
    bindings to the stable HIServices C functions). Focused-window resolution
    normally reads the system-wide `AXFocusedApplication`/`AXFocusedWindow`, but
    if that application turns out to be Tomari itself (e.g. a click landed on
-   the settings window), it falls back to the frontmost *other* app's focused
-   window via the on-screen `CGWindowList`, so an operation triggered from
-   Tomari's own UI never targets Tomari's own window. `FocusedWindow` also
+   the settings window), it falls back to the applications behind us, taken
+   front to back from the on-screen `CGWindowList` and asked in turn until one
+   answers with a focused window — owning a normal-level window does not mean
+   exposing one through Accessibility, and one that does not must not make the
+   whole lookup fail. So an operation triggered from Tomari's own UI never
+   targets Tomari's own window, and "there is no window to act on" reaches the
+   UI as that sentence rather than as a bare AX error code. `FocusedWindow` also
    carries the owning application's bundle id and localized name; it does not
    read or expose the window title.
 3. **Orchestration** (`src-tauri/src/window_ops.rs`) — every input path goes
