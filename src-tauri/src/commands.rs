@@ -51,8 +51,22 @@ pub struct PermissionsChanged {
 
 /// An update found by [`check_for_update`], held until [`install_update`]
 /// consumes it so the install does not have to hit the endpoint again.
+///
+/// The slot is tagged with a generation that every successful check bumps.
+/// `install_update` downloads with the lock released — a check can land in the
+/// meantime — so it remembers the generation it took and only restores the
+/// update it consumed if the slot has not moved on. Without that tag a failed
+/// install would put its stale update back over a fresher check result.
 #[derive(Default)]
-pub struct PendingUpdate(pub std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+pub struct PendingUpdate(pub std::sync::Mutex<PendingUpdateSlot>);
+
+#[derive(Default)]
+pub struct PendingUpdateSlot {
+    update: Option<tauri_plugin_updater::Update>,
+    /// Incremented on every check that stores a result; an install compares it
+    /// to decide whether restoring its update on failure is still correct.
+    generation: u64,
+}
 
 /// Commands reject with a [`CmdError`] (a `{ code, message }` pair) so the
 /// frontend can localize the frequent failures and fall back to the message
@@ -355,7 +369,9 @@ pub async fn check_for_update(
         version: u.version.clone(),
         notes: u.body.clone(),
     });
-    *pending.0.lock_safe() = update;
+    let mut slot = pending.0.lock_safe();
+    slot.update = update;
+    slot.generation = slot.generation.wrapping_add(1);
     Ok(info)
 }
 
@@ -363,15 +379,24 @@ pub async fn check_for_update(
 /// relaunch the app.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> CmdResult<()> {
-    let update = pending
-        .0
-        .lock_safe()
-        .take()
-        .ok_or("no pending update — check for updates first")?;
+    let (update, generation) = {
+        let mut slot = pending.0.lock_safe();
+        let update = slot
+            .update
+            .take()
+            .ok_or("no pending update — check for updates first")?;
+        (update, slot.generation)
+    };
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
         let message = e.to_string();
-        // Put the update back so a retry doesn't need a fresh check.
-        *pending.0.lock_safe() = Some(update);
+        // Put the update back so a retry doesn't need a fresh check — but only
+        // if no check has stored a newer one while the download ran. Restoring
+        // over a fresher result would make the next install apply the older
+        // update the UI is no longer offering.
+        let mut slot = pending.0.lock_safe();
+        if slot.generation == generation && slot.update.is_none() {
+            slot.update = Some(update);
+        }
         return Err(CmdError::other(message));
     }
     // `restart` does not guarantee an `ExitRequested` event, so release sleep
