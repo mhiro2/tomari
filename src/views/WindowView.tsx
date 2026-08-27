@@ -142,13 +142,11 @@ function shortcutOptions(t: Translator): HotkeyActionOption[] {
     },
     { key: 'undo', label: t('action.undoWindow'), action: { type: 'undoWindow' } },
     { key: 'redo', label: t('action.redoWindow'), action: { type: 'redoWindow' } },
-    ...WINDOW_PRESETS.map(
-      (preset): HotkeyActionOption => ({
-        key: preset,
-        label: t('action.snap', { target: presetLabel(preset, t) }),
-        action: { type: 'snapWindow', value: preset },
-      }),
-    ),
+    ...WINDOW_PRESETS.map((preset): HotkeyActionOption => ({
+      key: preset,
+      label: t('action.snap', { target: presetLabel(preset, t) }),
+      action: { type: 'snapWindow', value: preset },
+    })),
   ];
 }
 
