@@ -338,10 +338,6 @@ fn run_deferred_caps_reconcile(app: &AppHandle) {
 /// CGEventTap callback is `Fn`, not `FnMut`.
 #[derive(Default)]
 struct TapState {
-    /// Caps Lock's flag reflects the lock state, not the key, so its down/up
-    /// must be tracked by toggling (all other modifiers derive theirs from
-    /// the event's own flags).
-    caps_down: bool,
     /// Whether *any* hyper key is currently held (tracked off the engine's held
     /// set, so holding two and releasing one keeps hyper active).
     hyper_active: bool,
@@ -383,8 +379,8 @@ fn handle_event(
 ) -> CallbackResult {
     // The system disabled the tap (timeout / heavy input): re-enable it. While
     // disabled the tap sees no events, so a key-up released mid-outage is lost —
-    // the engine's `held`/`press` and this thread's `TapState` (caps parity,
-    // hyper-held, remap stamp) would otherwise linger, and every later keystroke
+    // the engine's `held`/`press` and this thread's `TapState` (hyper-held,
+    // remap stamp) would otherwise linger, and every later keystroke
     // would carry a stale Hyper combo or remap target while a solo tap misfired
     // as a chord. Drop all transient hold/press state before re-arming, mirroring
     // how the drag taps discard an in-flight gesture on disable. The Caps Lock
@@ -410,14 +406,6 @@ fn handle_event(
             // before that must not carry a stale Hyper combo or remap target.
             ts.hyper_active = false;
             ts.remap_stamp = (Vec::new(), Vec::new());
-            // `caps_down` is deliberately left intact. Unlike the stamps it is a
-            // parity tracker for the *physical* Caps Lock (its flag reflects lock
-            // state, not key state), which this reset cannot observe. Zeroing it
-            // would make the next Caps Lock event — the release of a key held
-            // across the outage — toggle to "down" and re-add the very phantom
-            // hold this reset exists to remove; leaving it makes that release a
-            // no-op instead. (Only the no-HID-proxy path drives Caps Lock through
-            // `caps_down`; with a Caps rule it arrives as F18 key-down/up.)
         }
         tap::reenable(port_holder);
         return CallbackResult::Keep;
@@ -450,30 +438,38 @@ fn handle_event(
 /// Derive whether a `flagsChanged` event is a press (`true`) or release
 /// (`false`) from the event's flag bits, not from remembered down/up state.
 ///
-/// A tap restart (settings save, permission grant, new `TapState`) can swallow
-/// a transition mid-hold; a toggle would then read the eventual release as a
-/// press and stay inverted for that keycode from then on. Reading the flags
-/// instead keeps a stale state from inverting the interpretation.
+/// A tap restart (settings save, permission grant, new `TapState`) or a tap
+/// outage can swallow a transition mid-hold; a toggle would then read the
+/// eventual release as a press and stay inverted for that keycode from then on.
+/// Reading the flags instead keeps a stale state from inverting the
+/// interpretation.
 ///
 /// Left/right modifiers carry an IOKit device-specific bit while physically
-/// held; Fn tracks its generic flag bit directly. Caps Lock is the lone
-/// exception: its AlphaShift bit reflects the lock state, not the key, so its
-/// down/up can only be tracked by toggling `caps_down` (wrong only if a restart
-/// lands while Caps Lock itself is physically held — rare, as it is tapped).
-fn derive_is_down(
-    keycode: i64,
-    modkey: ModifierKey,
-    flags_bits: u64,
-    caps_down: &mut bool,
-) -> bool {
+/// held; Fn tracks its generic flag bit directly. Caps Lock never reaches this:
+/// its AlphaShift bit reflects the lock state, not the key, and macOS delivers
+/// one event per press with no release, so there is nothing here to derive a
+/// hold from — see [`on_flags_changed`].
+fn derive_is_down(keycode: i64, modkey: ModifierKey, flags_bits: u64) -> bool {
+    debug_assert_ne!(modkey, ModifierKey::CapsLock);
     if let Some(bit) = keycodes::device_flag_for_keycode(keycode) {
         flags_bits & bit != 0
-    } else if modkey != ModifierKey::CapsLock {
-        flags_bits & keycodes::flag_for(modkey).bits() != 0
     } else {
-        *caps_down = !*caps_down;
-        *caps_down
+        flags_bits & keycodes::flag_for(modkey).bits() != 0
     }
+}
+
+/// Whether a modifier's *native* `flagsChanged` events are fed to the engine as
+/// a hold. Everything but Caps Lock: see [`on_flags_changed`] for why the lock
+/// key is not, and [`on_key_down`] for how it is driven through F18 instead.
+fn tracks_native_modifier(modkey: ModifierKey) -> bool {
+    modkey != ModifierKey::CapsLock
+}
+
+/// What a native lock key's press feeds the engine instead of a hold: an
+/// ordinary key-down, which turns a modifier tap in progress into a chord
+/// without leaving any "held" belief behind.
+fn native_lock_key_event(now: u64) -> KeyEvent {
+    KeyEvent::OtherKeyDown { at_ms: now }
 }
 
 /// A managed modifier's down/up transition fed to [`drive_modifier`].
@@ -571,12 +567,29 @@ fn on_flags_changed(
         return CallbackResult::Keep;
     };
 
+    // A *native* Caps Lock event is passed through untouched and kept out of
+    // the engine's hold tracking. It only arrives here while no rule manages
+    // Caps Lock (with one, the HID remap turns the key into F18 key-down/up,
+    // handled in `on_key_down`/`on_key_up`), and as a lock key it offers nothing
+    // to track: macOS sends one `flagsChanged` per press and no release, and
+    // the AlphaShift bit is the lock state, not the key. Toggling a "down"
+    // belief off each event — as this used to — inverted after a single press,
+    // and a release lost to a tap outage or restart kept it inverted, so the
+    // engine believed Caps Lock held and read every other modifier's solo tap
+    // as a chord (suppressing the ⌘ IME toggle) until the next Caps Lock press.
+    // The press still counts as a key pressed *during* another modifier's hold,
+    // though: ⌘ down · Caps Lock · ⌘ up is a chord, not a ⌘ tap.
+    if !tracks_native_modifier(modkey) {
+        app_state
+            .engine
+            .lock_safe()
+            .process(native_lock_key_event(now));
+        return CallbackResult::Keep;
+    }
+
     // Derive down/up from the event itself, not remembered state (see
     // `derive_is_down`).
-    let is_down = {
-        let mut ts = state.lock_safe();
-        derive_is_down(keycode, modkey, event.get_flags().bits(), &mut ts.caps_down)
-    };
+    let is_down = derive_is_down(keycode, modkey, event.get_flags().bits());
 
     let (remap, hyper) = drive_modifier(
         app,
@@ -827,23 +840,75 @@ mod tests {
     }
 
     #[test]
+    fn native_caps_lock_is_never_tracked_as_a_hold() {
+        // Regression guard: Caps Lock's native event used to toggle a "down"
+        // belief, so a single press (macOS sends no release) or a release lost
+        // to a tap outage left the engine holding Caps Lock and reading every
+        // other modifier's solo tap as a chord. The lock key is kept out of
+        // hold tracking entirely; every momentary modifier still goes in.
+        assert!(!tracks_native_modifier(ModifierKey::CapsLock));
+        for modkey in [
+            ModifierKey::Command,
+            ModifierKey::Shift,
+            ModifierKey::Control,
+            ModifierKey::Option,
+            ModifierKey::Function,
+        ] {
+            assert!(tracks_native_modifier(modkey), "{modkey:?}");
+        }
+    }
+
+    #[test]
+    fn a_native_caps_lock_press_turns_a_pending_tap_into_a_chord() {
+        // ⌘ down · Caps Lock · ⌘ up must not fire ⌘'s tap: the lock key is not
+        // tracked as a hold, but its press still interrupts the pending tap —
+        // and leaves nothing held behind, so the next solo ⌘ tap fires.
+        use tomari_core::domain::action::ImeMode;
+        use tomari_core::domain::keyboard::ModifierRule;
+        let mut engine = tomari_keyboard::ModifierEngine::new(vec![ModifierRule {
+            id: "cmd".into(),
+            label: "cmd".into(),
+            modifier: ModifierKey::Command,
+            side: KeySide::Left,
+            remap_to: None,
+            hyper: false,
+            tap: AppAction::SwitchIme(ImeMode::Alphanumeric),
+            enabled: true,
+        }]);
+        let down = KeyEvent::ModifierDown {
+            key: ModifierKey::Command,
+            side: KeySide::Left,
+            at_ms: 0,
+        };
+        let up = |at_ms| KeyEvent::ModifierUp {
+            key: ModifierKey::Command,
+            side: KeySide::Left,
+            at_ms,
+        };
+        assert_eq!(engine.process(down), None);
+        assert_eq!(engine.process(native_lock_key_event(10)), None);
+        assert_eq!(engine.process(up(50)), None, "chorded with Caps Lock");
+        assert!(!engine.is_held(ModifierKey::CapsLock));
+        assert_eq!(engine.process(down), None);
+        assert_eq!(
+            engine.process(up(150)),
+            Some(AppAction::SwitchIme(ImeMode::Alphanumeric)),
+            "the next solo tap fires"
+        );
+    }
+
+    #[test]
     fn left_right_modifiers_read_their_device_bit() {
         // Left Command's down/up follows NX_DEVICELCMDKEYMASK in the flags,
         // never the (sideless) generic Command bit.
         let lcmd = keycode(ModifierKey::Command, KeySide::Left);
         let bit = keycodes::device_flag_for_keycode(lcmd).unwrap();
-        let mut caps = false;
 
-        assert!(derive_is_down(lcmd, ModifierKey::Command, bit, &mut caps));
-        assert!(!derive_is_down(lcmd, ModifierKey::Command, 0, &mut caps));
+        assert!(derive_is_down(lcmd, ModifierKey::Command, bit));
+        assert!(!derive_is_down(lcmd, ModifierKey::Command, 0));
         // The generic Command flag alone, without the device bit, is a release.
         let generic = keycodes::flag_for(ModifierKey::Command).bits();
-        assert!(!derive_is_down(
-            lcmd,
-            ModifierKey::Command,
-            generic,
-            &mut caps
-        ));
+        assert!(!derive_is_down(lcmd, ModifierKey::Command, generic));
     }
 
     #[test]
@@ -852,18 +917,12 @@ mod tests {
         let rshift = keycode(ModifierKey::Shift, KeySide::Right);
         let lbit = keycodes::device_flag_for_keycode(lshift).unwrap();
         let rbit = keycodes::device_flag_for_keycode(rshift).unwrap();
-        let mut caps = false;
 
         // Holding only the left side: left reads down, right reads up.
-        assert!(derive_is_down(lshift, ModifierKey::Shift, lbit, &mut caps));
-        assert!(!derive_is_down(rshift, ModifierKey::Shift, lbit, &mut caps));
+        assert!(derive_is_down(lshift, ModifierKey::Shift, lbit));
+        assert!(!derive_is_down(rshift, ModifierKey::Shift, lbit));
         // Both sides held: each reads its own bit.
-        assert!(derive_is_down(
-            rshift,
-            ModifierKey::Shift,
-            lbit | rbit,
-            &mut caps
-        ));
+        assert!(derive_is_down(rshift, ModifierKey::Shift, lbit | rbit));
     }
 
     #[test]
@@ -873,10 +932,9 @@ mod tests {
         // on every event regardless of accumulated parity.
         let lctrl = keycode(ModifierKey::Control, KeySide::Left);
         let bit = keycodes::device_flag_for_keycode(lctrl).unwrap();
-        let mut caps = false;
         for _ in 0..5 {
             assert!(
-                derive_is_down(lctrl, ModifierKey::Control, bit, &mut caps),
+                derive_is_down(lctrl, ModifierKey::Control, bit),
                 "a still-held key must keep reading as down"
             );
         }
@@ -887,48 +945,8 @@ mod tests {
         let fn_code = keycode(ModifierKey::Function, KeySide::Either);
         assert!(keycodes::device_flag_for_keycode(fn_code).is_none());
         let bit = keycodes::flag_for(ModifierKey::Function).bits();
-        let mut caps = false;
 
-        assert!(derive_is_down(
-            fn_code,
-            ModifierKey::Function,
-            bit,
-            &mut caps
-        ));
-        assert!(!derive_is_down(
-            fn_code,
-            ModifierKey::Function,
-            0,
-            &mut caps
-        ));
-    }
-
-    #[test]
-    fn caps_lock_toggles_because_its_flag_tracks_lock_not_key() {
-        let caps_code = keycode(ModifierKey::CapsLock, KeySide::Either);
-        assert!(keycodes::device_flag_for_keycode(caps_code).is_none());
-        let mut caps = false;
-
-        // The AlphaShift bit reflects lock state, so down/up alternates on each
-        // event regardless of the flags carried.
-        let alpha = keycodes::flag_for(ModifierKey::CapsLock).bits();
-        assert!(derive_is_down(
-            caps_code,
-            ModifierKey::CapsLock,
-            alpha,
-            &mut caps
-        ));
-        assert!(!derive_is_down(
-            caps_code,
-            ModifierKey::CapsLock,
-            0,
-            &mut caps
-        ));
-        assert!(derive_is_down(
-            caps_code,
-            ModifierKey::CapsLock,
-            alpha,
-            &mut caps
-        ));
+        assert!(derive_is_down(fn_code, ModifierKey::Function, bit));
+        assert!(!derive_is_down(fn_code, ModifierKey::Function, 0));
     }
 }
