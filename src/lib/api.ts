@@ -5,7 +5,6 @@ import { invoke } from '@tauri-apps/api/core';
 
 import type {
   AcceleratorCheck,
-  AppAction,
   AppSettings,
   DisplayDirection,
   Hotkey,
@@ -103,8 +102,6 @@ export const validateAccelerator = (accelerator: string): Promise<AcceleratorChe
 // so a shortcut being recorded reaches the panel instead of firing an action.
 export const setHotkeysSuspended = (suspended: boolean): Promise<void> =>
   invoke('set_hotkeys_suspended', { suspended });
-
-export const runAction = (action: AppAction): Promise<void> => invoke('run_action', { action });
 
 // Current sleep-prevention status, for the panel to render on open.
 export const getKeepAwake = (): Promise<KeepAwakeStatus> => invoke('get_keep_awake');

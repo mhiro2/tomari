@@ -3,10 +3,9 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tomari_core::{AppAction, AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot};
+use tomari_core::{AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot};
 use tomari_keyboard::accelerator;
 
-use crate::actions;
 use crate::error::CmdError;
 use crate::locks::MutexExt;
 use crate::shortcuts;
@@ -980,14 +979,6 @@ pub fn validate_accelerator(accelerator: String) -> AcceleratorCheck {
             error: Some(e.to_string()),
         },
     }
-}
-
-#[tauri::command]
-pub fn run_action(app: AppHandle, state: State<'_, AppState>, action: AppAction) -> CmdResult<()> {
-    // The same validator every stored action passes: an action that would be
-    // refused on save is refused to run once, too.
-    let action = crate::validate::sanitize_app_action(action)?;
-    actions::dispatch(&action, &app, state.inner())
 }
 
 /// Current sleep-prevention status, for the panel to render on open.

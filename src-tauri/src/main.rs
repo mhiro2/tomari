@@ -160,7 +160,6 @@ fn main() {
             commands::request_input_monitoring,
             commands::set_hotkeys_suspended,
             commands::validate_accelerator,
-            commands::run_action,
             commands::check_for_update,
             commands::install_update,
             commands::get_keep_awake,
