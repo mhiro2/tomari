@@ -177,6 +177,10 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
   const [savingHotkeyIds, setSavingHotkeyIds] = useState<ReadonlySet<string>>(new Set());
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextRequestRef = useRef<Promise<PlacementContext> | null>(null);
+  // Bumped by every post-mutation pull. A context request that started before
+  // a mutation describes the world before it; its result must not land on top
+  // of the pull that followed the mutation, however late it arrives.
+  const contextGenerationRef = useRef(0);
   const hotkeysRef = useRef(hotkeys);
 
   useLayoutEffect(() => {
@@ -209,16 +213,36 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     showStatus(formatCmdError(error, t), true, false, 'contextLoad'),
   );
 
-  async function refreshContext(resetActive: boolean, reportError = true) {
-    const request = contextRequestRef.current ?? api.getPlacementContext();
+  // The generation a refresh belongs to: a new one after a mutation, so every
+  // pull issued before it is stale from here on; the current one otherwise.
+  function refreshGeneration(afterMutation: boolean): number {
+    if (afterMutation) contextGenerationRef.current += 1;
+    return contextGenerationRef.current;
+  }
+
+  // `afterMutation`: the pull follows a change this view just made. It must
+  // then be a *new* request — one already in flight was issued against the
+  // pre-mutation state and may answer with it — and every older request's
+  // result is discarded when it lands. Focus/show refreshes (`false`) still
+  // coalesce onto whatever pull is in flight. `generation` lets a caller that
+  // refreshes several things at once hand them the same one.
+  async function refreshContext(
+    resetActive: boolean,
+    reportError = true,
+    afterMutation = false,
+    generation = refreshGeneration(afterMutation),
+  ) {
+    const request = (afterMutation ? null : contextRequestRef.current) ?? api.getPlacementContext();
     contextRequestRef.current = request;
     try {
       const next = await request;
+      if (generation !== contextGenerationRef.current) return null;
       setContext(next);
       if (resetActive) setActiveSlot(null);
       setStatus((current) => (current?.source === 'contextLoad' ? null : current));
       return next;
     } catch (error) {
+      if (generation !== contextGenerationRef.current) return null;
       setContext(null);
       setActiveSlot(null);
       if (reportError) reportContextLoadError(error);
@@ -228,23 +252,28 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     }
   }
 
-  async function refreshHistory(reportError = true) {
+  // Same staleness rule as `refreshContext`: undo/redo change the history, so
+  // a status pull that started before them must not overwrite the one after.
+  async function refreshHistory(reportError = true, generation = contextGenerationRef.current) {
     try {
       const next = await api.getWindowHistoryStatus();
+      if (generation !== contextGenerationRef.current) return null;
       const available = next ?? EMPTY_HISTORY;
       setHistory(available);
       return available;
     } catch (error) {
+      if (generation !== contextGenerationRef.current) return null;
       setHistory(EMPTY_HISTORY);
       if (reportError) reportLoadError(error);
       return null;
     }
   }
 
-  async function refreshWorkflow(resetActive: boolean, reportError = true) {
+  async function refreshWorkflow(resetActive: boolean, reportError = true, afterMutation = false) {
+    const generation = refreshGeneration(afterMutation);
     const [nextContext] = await Promise.all([
-      refreshContext(resetActive, reportError),
-      refreshHistory(reportError),
+      refreshContext(resetActive, reportError, afterMutation, generation),
+      refreshHistory(reportError, generation),
     ]);
     return nextContext;
   }
@@ -276,12 +305,12 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     setBusy(true);
     try {
       const result = await action(snapshot.target);
-      const nextContext = await refreshWorkflow(false, false);
+      const nextContext = await refreshWorkflow(false, false, true);
       if (!sameTarget(snapshot.target, nextContext?.target)) setActiveSlot(null);
       return { result, snapshot, nextContext };
     } catch (error) {
       showStatus(formatCmdError(error, t), true);
-      if (isWindowTargetChanged(error)) await refreshWorkflow(true, false);
+      if (isWindowTargetChanged(error)) await refreshWorkflow(true, false, true);
       return null;
     } finally {
       setBusy(false);
@@ -349,7 +378,9 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     setBusy(true);
     try {
       const result = await api.undoWindowPlacementEdit();
-      await refreshContext(false, false);
+      // The whole workflow, not just the context: bumping the generation
+      // discards any history pull in flight, so history must be re-pulled too.
+      await refreshWorkflow(false, false, true);
       showStatus(
         result === 'applied' ? t('window.savedEditUndone') : t('window.noSavedEditToUndo'),
         false,
@@ -366,7 +397,7 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     setBusy(true);
     try {
       const result = await action();
-      await refreshWorkflow(false, false);
+      await refreshWorkflow(false, false, true);
       const message =
         result === 'applied'
           ? t(verb === 'undo' ? 'window.undone' : 'window.redone')

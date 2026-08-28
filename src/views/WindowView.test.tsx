@@ -249,6 +249,123 @@ describe('WindowView', () => {
     expect(await screen.findByText('Editor')).toBeInTheDocument();
   });
 
+  it('pulls fresh context after a mutation and discards a pull that started before it', async () => {
+    // 1st pull: the initial load. 2nd: a focus refresh that hangs. 3rd: the
+    // post-mutation pull, which must be a new request rather than a reuse of
+    // the hanging one, and whose answer must not be overwritten when the
+    // hanging pre-mutation request finally lands with the old world.
+    let resolveStale: ((context: PlacementContext) => void) | undefined;
+    const browser: PlacementContext = {
+      ...CONTEXT,
+      target: { bundleId: 'com.example.Browser', windowId: '0000000000000099' },
+      application: { bundleId: 'com.example.Browser', name: 'Browser' },
+      placements: [],
+    };
+    mockCommands();
+    const base = mockInvoke.getMockImplementation();
+    let contextPulls = 0;
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd !== 'get_placement_context') return base?.(cmd, args) ?? Promise.resolve(null);
+      contextPulls += 1;
+      if (contextPulls === 1) return Promise.resolve(CONTEXT);
+      if (contextPulls === 2)
+        return new Promise<PlacementContext>((resolve) => {
+          resolveStale = resolve;
+        });
+      return Promise.resolve(browser);
+    });
+    renderView(<WindowView />);
+    expect(await screen.findByText('Editor')).toBeInTheDocument();
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(contextPulls).toBe(2));
+
+    fireEvent.click(screen.getByText('Replace position'));
+    await waitFor(() => expect(contextPulls).toBe(3));
+    expect(await screen.findByText('Browser')).toBeInTheDocument();
+
+    // The pre-mutation pull answers late with the old world: ignored. Settle
+    // its continuation inside `act` so the assertion runs after it would have
+    // applied, not before.
+    await act(async () => {
+      resolveStale?.(CONTEXT);
+    });
+    expect(screen.queryByText('Editor')).not.toBeInTheDocument();
+    expect(screen.getByText('Browser')).toBeInTheDocument();
+  });
+
+  it('discards a pre-mutation pull that fails late without disturbing the fresh context', async () => {
+    let rejectStale: ((error: unknown) => void) | undefined;
+    const browser: PlacementContext = {
+      ...CONTEXT,
+      target: { bundleId: 'com.example.Browser', windowId: '0000000000000099' },
+      application: { bundleId: 'com.example.Browser', name: 'Browser' },
+      placements: [],
+    };
+    mockCommands();
+    const base = mockInvoke.getMockImplementation();
+    let contextPulls = 0;
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd !== 'get_placement_context') return base?.(cmd, args) ?? Promise.resolve(null);
+      contextPulls += 1;
+      if (contextPulls === 1) return Promise.resolve(CONTEXT);
+      if (contextPulls === 2)
+        return new Promise<PlacementContext>((_resolve, reject) => {
+          rejectStale = reject;
+        });
+      return Promise.resolve(browser);
+    });
+    renderView(<WindowView />);
+    expect(await screen.findByText('Editor')).toBeInTheDocument();
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(contextPulls).toBe(2));
+    fireEvent.click(screen.getByText('Replace position'));
+    expect(await screen.findByText('Browser')).toBeInTheDocument();
+
+    // The stale pull fails late: neither the context nor an error may change.
+    await act(async () => {
+      rejectStale?.(new Error('stale failure'));
+    });
+    expect(screen.getByText('Browser')).toBeInTheDocument();
+    expect(screen.queryByText('stale failure')).not.toBeInTheDocument();
+  });
+
+  it('discards a history status that started before an undo and lands after it', async () => {
+    // Initial history: undo available. A focus refresh's history pull hangs;
+    // the user undoes (history becomes empty, per the post-mutation pull); the
+    // hanging pre-undo pull then answers "undo available" — and must lose.
+    let resolveStale: ((status: WindowHistoryStatus) => void) | undefined;
+    mockCommands({ undo_window: 'applied' });
+    const base = mockInvoke.getMockImplementation();
+    let historyPulls = 0;
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd !== 'get_window_history_status') return base?.(cmd, args) ?? Promise.resolve(null);
+      historyPulls += 1;
+      if (historyPulls === 1) return Promise.resolve(HISTORY);
+      if (historyPulls === 2)
+        return new Promise<WindowHistoryStatus>((resolve) => {
+          resolveStale = resolve;
+        });
+      return Promise.resolve({ canUndo: false, canRedo: true });
+    });
+    renderView(<WindowView />);
+    const undo = await screen.findByRole('button', { name: 'Undo' });
+    await waitFor(() => expect(undo).not.toBeDisabled());
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(historyPulls).toBe(2));
+
+    fireEvent.click(undo);
+    await waitFor(() => expect(historyPulls).toBe(3));
+    await waitFor(() => expect(undo).toBeDisabled());
+
+    await act(async () => {
+      resolveStale?.(HISTORY);
+    });
+    expect(undo).toBeDisabled();
+  });
+
   it('makes remembered-position replacement recoverable from the toast', async () => {
     renderView(<WindowView />);
     fireEvent.click(await screen.findByText('Replace position'));
