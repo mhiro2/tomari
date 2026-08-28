@@ -154,6 +154,25 @@ describe('ShortcutRecorder', () => {
     await waitFor(() => expect(suspendCalls()).toEqual([true, false]));
   });
 
+  it('ends recording and releases the suspension when validation itself fails', async () => {
+    mockCommands({ validate_accelerator: new Error('ipc down') });
+    const onCapture = vi.fn();
+    render(<ShortcutRecorder onCapture={onCapture} ariaLabel="Record shortcut" />);
+
+    const button = screen.getByRole('button', { name: 'Record shortcut' });
+    fireEvent.click(button);
+    await screen.findByText('Type shortcut…');
+
+    fireEvent.keyDown(button, { code: 'KeyL', metaKey: true, shiftKey: true });
+    // The rejection is surfaced, the recording UI ends, and — the part that
+    // matters for every other shortcut — the lease is handed back rather than
+    // held until the next blur.
+    await screen.findByText('ipc down');
+    expect(screen.queryByText('Type shortcut…')).not.toBeInTheDocument();
+    await waitFor(() => expect(suspendCalls()).toEqual([true, false]));
+    expect(onCapture).not.toHaveBeenCalled();
+  });
+
   it('does not start recording when suspension fails', async () => {
     mockCommands({ set_hotkeys_suspended: new Error('ipc down') });
     render(<ShortcutRecorder onCapture={() => {}} ariaLabel="Record shortcut" />);

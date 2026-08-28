@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import * as api from '../lib/api';
+import { formatCmdError } from '../lib/errors';
 import { acceleratorChips } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { captureAccelerator, heldModifierGlyphs } from '../lib/recorder';
@@ -114,7 +115,19 @@ export function ShortcutRecorder({
     }
 
     // The backend owns the canonical form, so normalize through it.
-    const check = await api.validateAccelerator(result.accelerator);
+    let check: Awaited<ReturnType<typeof api.validateAccelerator>>;
+    try {
+      check = await api.validateAccelerator(result.accelerator);
+    } catch (e) {
+      // The IPC itself failed (not the chord). Recording cannot complete, so
+      // end it — which also hands the global-shortcut suspension back; left
+      // held, every shortcut would stay dead until a blur — and say why.
+      // `stop()` clears the error, so the message is set after it.
+      if (!recordingRef.current) return;
+      stop();
+      setError(formatCmdError(e, t));
+      return;
+    }
     // A blur (e.g. focus moved to another recorder) may have stopped this
     // recording while awaiting — the capture is then stale.
     if (!recordingRef.current) return;
