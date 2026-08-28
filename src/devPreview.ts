@@ -222,6 +222,11 @@ export async function installDevPreview() {
         return { enabled: true, collapsed: true };
       case 'list_modifier_rules':
         return modifierRules;
+      case 'save_modifier_rule':
+      case 'delete_modifier_rule':
+        return { applyWarnings: [] };
+      case 'dismiss_keep_awake_recovery':
+        return keepAwake;
       case 'list_hotkeys':
         return hotkeys;
       case 'get_placement_context':

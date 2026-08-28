@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SettingsProvider } from '../lib/settings';
+import { SettingsProvider, useSettings } from '../lib/settings';
 import type { AppSettings, Hotkey, ModifierRule } from '../lib/types';
 import { KeyboardView } from './KeyboardView';
 
@@ -74,9 +74,10 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
       case 'list_hotkeys':
         return Promise.resolve([HOTKEY]);
       case 'save_modifier_rule':
+      case 'delete_modifier_rule':
+        return Promise.resolve({ applyWarnings: [] });
       case 'save_hotkey':
       case 'delete_hotkey':
-      case 'delete_modifier_rule':
         return Promise.resolve(undefined);
       case 'get_settings':
         return Promise.resolve(SETTINGS);
@@ -86,6 +87,12 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(null);
     }
   });
+}
+
+// Reads the shared apply-warning state the rule mutations report into.
+function ApplyWarningsProbe() {
+  const { applyWarnings } = useSettings();
+  return <span data-testid="apply-warnings">{applyWarnings.join(',')}</span>;
 }
 
 describe('KeyboardView', () => {
@@ -157,6 +164,7 @@ describe('KeyboardView', () => {
   it('does not double-save or revert to a stale value when the toggle is clicked while a save is in flight', async () => {
     // Hold `save_modifier_rule` open so the row stays in its "saving" state.
     let resolveSave: (() => void) | undefined;
+    const outcome = { applyWarnings: [] };
     mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
       switch (cmd) {
         case 'list_modifier_rules':
@@ -167,8 +175,8 @@ describe('KeyboardView', () => {
           return Promise.resolve(SETTINGS);
         case 'save_modifier_rule':
           expect((args as { rule: ModifierRule }).rule.enabled).toBe(true);
-          return new Promise<void>((resolve) => {
-            resolveSave = resolve;
+          return new Promise<{ applyWarnings: string[] }>((resolve) => {
+            resolveSave = () => resolve(outcome);
           });
         default:
           return Promise.resolve(null);
@@ -195,6 +203,44 @@ describe('KeyboardView', () => {
     resolveSave?.();
     await waitFor(() => expect(toggle).not.toBeDisabled());
     expect(toggle).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('reports a rule save whose Caps Lock remap did not follow into the shared apply warnings', async () => {
+    let capsOk = false;
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'list_modifier_rules':
+          return Promise.resolve([RULE]);
+        case 'list_hotkeys':
+          return Promise.resolve([]);
+        case 'get_settings':
+          return Promise.resolve(SETTINGS);
+        case 'save_modifier_rule':
+          return Promise.resolve({ applyWarnings: capsOk ? [] : ['capsLockRemap'] });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+
+    renderView(
+      <>
+        <KeyboardView />
+        <ApplyWarningsProbe />
+      </>,
+    );
+
+    const toggle = await screen.findByLabelText('Enable Caps Lock');
+    fireEvent.click(toggle);
+    // The rule saved (no error) but the mismatch is reported, not swallowed.
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('capsLockRemap'),
+    );
+
+    // A later save that applies cleanly clears it.
+    capsOk = true;
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId('apply-warnings')).toHaveTextContent(''));
   });
 
   it('does not fire a second save_modifier_rule call from rapid repeated clicks', async () => {

@@ -73,6 +73,20 @@ function StatusConsumer() {
   );
 }
 
+// Reports a clean rule-mutation outcome that speaks only for `capsLockRemap`.
+function Reporter() {
+  const { reportApplyOutcome } = useSettings();
+  return (
+    <button
+      type="button"
+      data-testid="report-clean"
+      onClick={() => reportApplyOutcome({ applyWarnings: [] }, ['capsLockRemap'])}
+    >
+      report
+    </button>
+  );
+}
+
 describe('SettingsProvider', () => {
   beforeEach(() => {
     // Default: no-op listener, matching real usage where events rarely fire.
@@ -415,6 +429,37 @@ describe('SettingsProvider', () => {
       expect(screen.getByTestId('apply-warnings')).toHaveTextContent('capsLockRemap,menuBar'),
     );
     expect(screen.getByTestId('apply-warnings')).not.toHaveTextContent('launchAtLogin');
+  });
+
+  it('merges a reported outcome into the shared warnings, replacing only the probed codes', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'save_settings')
+        return Promise.resolve({ applyWarnings: ['menuBar', 'capsLockRemap'] });
+      return Promise.resolve(null);
+    });
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+        <Reporter />
+      </SettingsProvider>,
+    );
+    const btn = await screen.findByTestId('toggle');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('menuBar,capsLockRemap'),
+    );
+
+    // A rule save that applied cleanly speaks only for `capsLockRemap`: that
+    // code clears, `menuBar` — outside what it probed — keeps its verdict.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('report-clean'));
+    });
+    expect(screen.getByTestId('apply-warnings')).toHaveTextContent('menuBar');
+    expect(screen.getByTestId('apply-warnings')).not.toHaveTextContent('capsLockRemap');
   });
 
   it('keeps the last applyWarnings when a later save fails', async () => {

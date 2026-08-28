@@ -87,9 +87,13 @@ function clearSaving(
   });
 }
 
+// The apply-warning codes a modifier-rule save or delete reports on (see
+// `RuleMutationOutcome`); the shared warning state replaces exactly these.
+const RULE_MUTATION_PROBES = ['capsLockRemap'] as const;
+
 export function KeyboardView() {
   const t = useT();
-  const { settings, update } = useSettings();
+  const { settings, update, reportApplyOutcome } = useSettings();
   const [rules, setRules] = useState<ModifierRule[]>([]);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
   const [rulesLoaded, setRulesLoaded] = useState(false);
@@ -152,9 +156,14 @@ export function KeyboardView() {
     // reloaded the engine — a save failure must surface rather than leave the
     // row showing a state the runtime never adopted.
     try {
-      await api.saveModifierRule(next);
+      const outcome = await api.saveModifierRule(next);
       setRules((rs) => rs.map((r) => (r.id === id ? next : r)));
       setModifierError(null);
+      // The rule is stored and live; whether the Caps Lock HID remap followed
+      // is what the outcome reports. It goes into the shared warning state
+      // (shown by the app-level banner) so it outlives this page and clears
+      // on the next clean apply, from whichever save that comes.
+      reportApplyOutcome(outcome, RULE_MUTATION_PROBES);
     } catch (e) {
       setModifierError(formatCmdError(e, t));
     } finally {

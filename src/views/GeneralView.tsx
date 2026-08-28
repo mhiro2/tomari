@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { Banner, FeaturePageHeader, SettingsList, SettingsRow, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
+import { applyWarningText } from '../lib/applyWarnings';
 import { cmdErrorMessage } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
@@ -232,28 +233,6 @@ export function GeneralView({
 
 // Map a save_settings apply-warning code to its localized message, falling back
 // to a generic line for any code this build doesn't recognize.
-function applyWarningText(code: string, t: Translator): string {
-  switch (code) {
-    case 'launchAtLogin':
-      return t('settings.applyWarning.launchAtLogin');
-    case 'menuBar':
-      return t('settings.applyWarning.menuBar');
-    case 'keyboardTap':
-      return t('settings.applyWarning.keyboardTap');
-    case 'globalShortcuts':
-      return t('settings.applyWarning.globalShortcuts');
-    case 'dragToSnapTap':
-      return t('settings.applyWarning.dragToSnapTap');
-    case 'dragToMoveTap':
-      return t('settings.applyWarning.dragToMoveTap');
-    case 'capsLockRemap':
-      return t('settings.applyWarning.capsLockRemap');
-    case 'commandImeRules':
-      return t('settings.applyWarning.commandImeRules');
-    default:
-      return t('settings.applyWarning.generic');
-  }
-}
 
 function updateDesc(state: UpdateState, t: Translator): string | null {
   switch (state.phase) {

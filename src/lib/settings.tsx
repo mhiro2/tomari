@@ -40,6 +40,13 @@ type SettingsContextValue = {
   // `SaveSettingsOutcome`). Empty after a clean save.
   applyWarnings: string[];
   update: (patch: Partial<AppSettings>) => void;
+  // Fold the outcome of a mutation made outside `update` — a modifier-rule
+  // save, say — into `applyWarnings`. `probed` lists the codes that mutation
+  // is able to report on; those are replaced by what it reported, every other
+  // code keeps the verdict it already had. One shared state, so a warning
+  // survives leaving the page and clears on the next clean apply wherever that
+  // happens.
+  reportApplyOutcome: (outcome: { applyWarnings: string[] }, probed: readonly string[]) => void;
 };
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -218,9 +225,30 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [applySettings, flush],
   );
 
+  const reportApplyOutcome = useCallback(
+    (outcome: { applyWarnings: string[] }, probed: readonly string[]) => {
+      // Fresher than any live read still in flight.
+      warningsGeneration.current += 1;
+      const replaced = new Set(probed);
+      setApplyWarnings((prev) => [
+        ...prev.filter((code) => !replaced.has(code)),
+        ...outcome.applyWarnings,
+      ]);
+    },
+    [],
+  );
+
   const value = useMemo(
-    () => ({ settings, loadError, retryLoad, saveError, applyWarnings, update }),
-    [settings, loadError, retryLoad, saveError, applyWarnings, update],
+    () => ({
+      settings,
+      loadError,
+      retryLoad,
+      saveError,
+      applyWarnings,
+      update,
+      reportApplyOutcome,
+    }),
+    [settings, loadError, retryLoad, saveError, applyWarnings, update, reportApplyOutcome],
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

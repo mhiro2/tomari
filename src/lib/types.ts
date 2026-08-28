@@ -278,6 +278,15 @@ export interface SaveSettingsOutcome {
   applyWarnings: string[];
 }
 
+// Outcome of `save_modifier_rule` / `delete_modifier_rule`. The rule is stored
+// and live whenever this comes back at all; `applyWarnings` names an
+// out-of-band side effect that did not follow (`capsLockRemap`: the Caps Lock
+// HID remap could not be brought into step), so the panel shows the mismatch
+// instead of a clean success.
+export interface RuleMutationOutcome {
+  applyWarnings: string[];
+}
+
 // Outcome of `get_apply_warnings`: the codes the live state warrants right now,
 // plus the codes it has no read-only probe for (`unprobed`) — for those the
 // last save's verdict stands.

@@ -16,6 +16,7 @@ import type {
   MenuBarMoveResult,
   MenuBarStatus,
   ModifierRule,
+  RuleMutationOutcome,
   SaveSettingsOutcome,
   SetupStatus,
   UpdateInfo,
@@ -47,10 +48,10 @@ export const deleteHotkey = (id: string): Promise<void> => invoke('delete_hotkey
 
 export const listModifierRules = (): Promise<ModifierRule[]> => invoke('list_modifier_rules');
 
-export const saveModifierRule = (rule: ModifierRule): Promise<void> =>
+export const saveModifierRule = (rule: ModifierRule): Promise<RuleMutationOutcome> =>
   invoke('save_modifier_rule', { rule });
 
-export const deleteModifierRule = (id: string): Promise<void> =>
+export const deleteModifierRule = (id: string): Promise<RuleMutationOutcome> =>
   invoke('delete_modifier_rule', { id });
 
 export const getPlacementContext = (): Promise<PlacementContext> => invoke('get_placement_context');

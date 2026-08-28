@@ -648,8 +648,34 @@ pub async fn list_modifier_rules(app: AppHandle) -> CmdResult<Vec<ModifierRule>>
 // `hidutil` via `reconcile_caps_mapping`) up to twice on the rollback path,
 // synchronously. Moving it off the main thread keeps a slow `hidutil` from
 // freezing the UI, same rationale as `save_settings` above.
+/// Outcome of a modifier-rule save or delete. The rule itself is stored and
+/// live in the engine whenever this is returned at all; `apply_warnings` names
+/// the out-of-band side effect that did not follow — today only
+/// `capsLockRemap`, the Caps Lock HID remap `hidutil` could not bring into
+/// step — so the panel can show the mismatch instead of a clean success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleMutationOutcome {
+    apply_warnings: Vec<&'static str>,
+}
+
+impl RuleMutationOutcome {
+    fn from_caps_ok(caps_ok: bool) -> Self {
+        Self {
+            apply_warnings: if caps_ok {
+                Vec::new()
+            } else {
+                vec!["capsLockRemap"]
+            },
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) -> CmdResult<()> {
+pub async fn save_modifier_rule(
+    state: State<'_, AppState>,
+    rule: ModifierRule,
+) -> CmdResult<RuleMutationOutcome> {
     let _config = state.lock_config_mutation();
     // Don't trust the frontend: reject empty / overlong / reserved ids and
     // labels, contradictory hyper+remap rules, unsendable tap keystrokes, and
@@ -667,13 +693,14 @@ pub async fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) 
     match reload_engine_rules(&state) {
         // The engine reloaded but `hidutil` left the Caps Lock remap out of
         // step — not a reason to roll back the save (the rule *is* live in the
-        // engine), just a live mismatch to log. `save_settings` surfaces the
-        // equivalent case via `apply_warnings`; this command's return type has
-        // no room for one, so a log is the closest equivalent here.
-        Ok(false) => {
-            tracing::warn!("caps-lock HID remap did not match the reloaded rules after save")
+        // engine), but a live mismatch the panel must show rather than a clean
+        // success: the DB and the engine say one thing, the OS mapping another.
+        Ok(caps_ok) => {
+            if !caps_ok {
+                tracing::warn!("caps-lock HID remap did not match the reloaded rules after save");
+            }
+            Ok(RuleMutationOutcome::from_caps_ok(caps_ok))
         }
-        Ok(true) => {}
         Err(error) => {
             let restored = match &previous {
                 Some(prev) => state.db.upsert_modifier_rule(prev),
@@ -686,16 +713,18 @@ pub async fn save_modifier_rule(state: State<'_, AppState>, rule: ModifierRule) 
             if let Err(rollback) = reload_engine_rules(&state) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
-            return Err(error);
+            Err(error)
         }
     }
-    Ok(())
 }
 
 // `async fn`: same rationale as `save_modifier_rule` — a failed reload can
 // shell out to `hidutil` synchronously up to twice on the rollback path.
 #[tauri::command]
-pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn delete_modifier_rule(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<RuleMutationOutcome> {
     let _config = state.lock_config_mutation();
     // Snapshot the row so a failed live reload can restore it — as with save, the
     // DB must not diverge from the live engine on a reload error.
@@ -707,12 +736,14 @@ pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> Cmd
     state.db.delete_modifier_rule(&id)?;
     match reload_engine_rules(&state) {
         // Same as `save_modifier_rule`: the engine reloaded but the Caps Lock
-        // remap did not follow; log it rather than roll back a delete that did
-        // take effect in the engine.
-        Ok(false) => {
-            tracing::warn!("caps-lock HID remap did not match the reloaded rules after delete")
+        // remap did not follow; report it rather than roll back a delete that
+        // did take effect in the engine.
+        Ok(caps_ok) => {
+            if !caps_ok {
+                tracing::warn!("caps-lock HID remap did not match the reloaded rules after delete");
+            }
+            Ok(RuleMutationOutcome::from_caps_ok(caps_ok))
         }
-        Ok(true) => {}
         Err(error) => {
             if let Some(prev) = &previous
                 && let Err(rollback) = state.db.upsert_modifier_rule(prev)
@@ -723,10 +754,9 @@ pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> Cmd
             if let Err(rollback) = reload_engine_rules(&state) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
-            return Err(error);
+            Err(error)
         }
     }
-    Ok(())
 }
 
 /// Reload the engine's rule set from the database, returning whether the Caps
@@ -734,7 +764,8 @@ pub async fn delete_modifier_rule(state: State<'_, AppState>, id: String) -> Cmd
 /// failing outright; a `hidutil` failure while reconciling the remap is instead
 /// reported as `Ok(false)`, since the engine itself did reload successfully —
 /// only the out-of-band remap is left out of step. `save_modifier_rule` /
-/// `delete_modifier_rule` log a `false`; `save_settings` ignores it outright,
+/// `delete_modifier_rule` return a `false` as a `capsLockRemap` apply warning;
+/// `save_settings` ignores it outright,
 /// because its `capsLockRemap` warning comes from one authoritative live
 /// check after all of the save's side effects, not from intermediate results.
 /// Whether the live engine's rule set is in step with `want` for the built-in
