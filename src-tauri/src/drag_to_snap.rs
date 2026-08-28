@@ -13,10 +13,12 @@
 //! way: the system still waits for the callback to return before the event
 //! travels on, which is why a slow one gets the tap disabled by timeout. So this
 //! tap follows the same rule as the active [`drag_to_move`](crate::drag_to_move)
-//! one — the callback calls into no other process and takes no lock. It reads
-//! the event's location and flags, checks one atomic ([`ENABLED`], mirrored out
-//! of the settings for exactly this reason), posts a [`Command`] down a channel,
-//! and returns.
+//! one — the callback calls into no other process and waits on nothing
+//! unbounded. It reads the event's location and flags, checks one atomic
+//! ([`ENABLED`], mirrored out of the settings for exactly this reason), posts a
+//! [`Command`] into a bounded, coalescing queue ([`crate::mailbox`]: lifecycle
+//! commands go lock-free, a cursor sample that finds the slot contended is
+//! dropped rather than waited for), and returns.
 //!
 //! Everything else happens on the single [worker thread](worker_loop) started
 //! with the tap: the hit-test that finds the window under the press, the frame
@@ -39,7 +41,6 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,7 @@ use tomari_core::{Rect, WindowPreset};
 use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, screen_at_cursor};
 
 use crate::locks::MutexExt;
+use crate::mailbox::{self, Coalesce, Receiver, Sender};
 use crate::overlay;
 use crate::state::AppState;
 use crate::tap::{self, RunningTap, TapHealth, TapHealthCell};
@@ -204,6 +206,23 @@ enum Command {
     /// The press is abandoned: the tap was disabled mid-drag (events were
     /// missed, so the release may never arrive) or is being torn down.
     Cancel { generation: u64 },
+}
+
+impl Coalesce for Command {
+    /// A newer cursor position for the same press replaces the pending one:
+    /// only the latest matters, and it must never pile up behind a stalled
+    /// worker. Press, release and cancel are lifecycle: delivered always,
+    /// on the lock-free path (see [`crate::mailbox`]).
+    fn supersedes(&self, earlier: &Self) -> bool {
+        matches!(
+            (self, earlier),
+            (Command::Drag { generation: g, .. }, Command::Drag { generation: h, .. }) if g == h
+        )
+    }
+
+    fn sheddable(&self) -> bool {
+        matches!(self, Command::Drag { .. })
+    }
 }
 
 /// What the worker knows about the newest press, independent of whether a
@@ -639,14 +658,14 @@ fn step(app: &AppHandle, intent: &mut Option<Intent>, session: &mut Option<Sessi
 /// window takes several round trips, and a drag that ended while one was in
 /// flight must not then get a preview from the cursor position it had
 /// beforehand.
-fn worker_loop(app: &AppHandle, rx: &Receiver<Command>) {
+fn worker_loop(app: &AppHandle, rx: &mut Receiver<Command>) {
     let mut intent: Option<Intent> = None;
     let mut session: Option<Session> = None;
 
-    while let Ok(first) = rx.recv() {
+    while let Some(first) = rx.recv() {
         absorb(&mut intent, first);
         loop {
-            while let Ok(next) = rx.try_recv() {
+            while let Some(next) = rx.try_recv() {
                 absorb(&mut intent, next);
             }
             if step(app, &mut intent, &mut session) == Step::Idle {
@@ -660,7 +679,9 @@ fn worker_loop(app: &AppHandle, rx: &Receiver<Command>) {
 
 /// State the tap keeps across events. Every field is either an atomic or only
 /// touched through `&mut self` in [`Drop`], because the callback is `Fn`; none
-/// of it needs a lock, and none of its methods can block.
+/// of it needs a lock of its own, and none of its methods blocks: a cursor
+/// sample that finds the queue's slot contended is dropped, and lifecycle
+/// commands take a lock-free path (see [`crate::mailbox`]).
 struct SnapTapState {
     /// Commands to the worker. `None` when its thread could not be started, in
     /// which case the tap simply observes nothing.
@@ -673,11 +694,13 @@ struct SnapTapState {
 
 impl SnapTapState {
     fn new(app: AppHandle) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Command>();
+        let (tx, rx) = mailbox::channel::<Command>("drag-to-snap");
         match std::thread::Builder::new()
             .name("tomari-dragsnap-apply".into())
-            .spawn(move || worker_loop(&app, &rx))
-        {
+            .spawn(move || {
+                let mut rx = rx;
+                worker_loop(&app, &mut rx)
+            }) {
             Ok(worker) => Self {
                 tx: Some(tx),
                 worker: Some(worker),
@@ -694,7 +717,8 @@ impl SnapTapState {
         }
     }
 
-    /// Post a command. Non-blocking.
+    /// Post a command. Non-blocking; folded into the bounded queue (see
+    /// [`crate::mailbox`]).
     fn send(&self, command: Command) {
         if let Some(tx) = self.tx.as_ref() {
             let _ = tx.send(command);

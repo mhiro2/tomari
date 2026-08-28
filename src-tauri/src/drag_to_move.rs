@@ -16,9 +16,11 @@
 //!
 //! An active tap's callback holds up *all* input while it runs, Tomari's own or
 //! not. So this one calls into no other process, starts no thread, joins none
-//! and takes no lock: it reads the event's own modifier flags and two atomics
-//! ([`ENABLED`], [`ACCESSIBILITY`] — both mirrored for exactly this reason),
-//! posts a [`Command`] down a channel, and returns.
+//! and waits on nothing unbounded: it reads the event's own modifier flags and
+//! two atomics ([`ENABLED`], [`ACCESSIBILITY`] — both mirrored for exactly this
+//! reason), posts a [`Command`] into a bounded, coalescing queue
+//! ([`crate::mailbox`]: lifecycle commands go lock-free, a cursor sample that
+//! finds the slot contended is dropped rather than waited for), and returns.
 //!
 //! Everything that messages another process happens on the single
 //! [applier thread](applier_loop) started with the tap — the hit-test that
@@ -48,7 +50,6 @@
 //! tracking loop to hand it to.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -60,6 +61,7 @@ use tomari_window::{
 };
 
 use crate::locks::MutexExt;
+use crate::mailbox::{self, Coalesce, Receiver, Sender};
 use crate::state::AppState;
 use crate::tap::{self, RunningTap, TapHealth, TapHealthCell};
 
@@ -211,6 +213,23 @@ enum Command {
     },
     /// The gesture is over — released, interrupted, or torn down.
     End { generation: u64 },
+}
+
+impl Coalesce for Command {
+    /// A newer cursor position for the same gesture replaces the pending one:
+    /// only the latest matters, and it must never pile up behind a stalled
+    /// applier. Begin and End are lifecycle: delivered always, on the
+    /// lock-free path (see [`crate::mailbox`]).
+    fn supersedes(&self, earlier: &Self) -> bool {
+        matches!(
+            (self, earlier),
+            (Command::Move { generation: g, .. }, Command::Move { generation: h, .. }) if g == h
+        )
+    }
+
+    fn sheddable(&self) -> bool {
+        matches!(self, Command::Move { .. })
+    }
 }
 
 /// What the applier knows about the newest gesture: what the callback has told
@@ -401,14 +420,14 @@ fn step(intent: &mut Option<Intent>, driving: &mut Option<Driving>) -> Step {
 /// beforehand. That is also what makes the generation check worth having — a
 /// gesture that began and ended entirely while an earlier call was running is
 /// folded into the intent and discarded without a call of its own.
-fn applier_loop(rx: &Receiver<Command>) {
+fn applier_loop(rx: &mut Receiver<Command>) {
     let mut intent: Option<Intent> = None;
     let mut driving: Option<Driving> = None;
 
-    while let Ok(first) = rx.recv() {
+    while let Some(first) = rx.recv() {
         absorb(&mut intent, first);
         loop {
-            while let Ok(next) = rx.try_recv() {
+            while let Some(next) = rx.try_recv() {
                 absorb(&mut intent, next);
             }
             if step(&mut intent, &mut driving) == Step::Idle {
@@ -420,7 +439,9 @@ fn applier_loop(rx: &Receiver<Command>) {
 
 /// State the tap keeps across events. Every field is either an atomic or only
 /// touched through `&mut self` in [`Drop`], because the callback is `Fn`; none
-/// of it needs a lock, and none of its methods can block.
+/// of it needs a lock of its own, and none of its methods blocks: a cursor
+/// sample that finds the queue's slot contended is dropped, and lifecycle
+/// commands take a lock-free path (see [`crate::mailbox`]).
 struct DragToMoveState {
     /// Commands to the applier. `None` when its thread could not be started, in
     /// which case no press is claimed — nothing could act on it.
@@ -439,11 +460,13 @@ struct DragToMoveState {
 
 impl Default for DragToMoveState {
     fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Command>();
+        let (tx, rx) = mailbox::channel::<Command>("drag-to-move");
         match std::thread::Builder::new()
             .name("tomari-dragmove-apply".into())
-            .spawn(move || applier_loop(&rx))
-        {
+            .spawn(move || {
+                let mut rx = rx;
+                applier_loop(&mut rx)
+            }) {
             Ok(applier) => Self::new(Some(tx), Some(applier)),
             Err(e) => {
                 tracing::warn!(error = %e, "could not start the drag-to-move applier thread");
@@ -463,9 +486,10 @@ impl DragToMoveState {
         }
     }
 
-    /// Post a command. Non-blocking; returns whether the applier received it.
+    /// Post a command. Non-blocking, folded into the bounded queue (see
+    /// [`crate::mailbox`]); returns whether the applier is there to receive it.
     fn send(&self, command: Command) -> bool {
-        self.tx.as_ref().is_some_and(|tx| tx.send(command).is_ok())
+        self.tx.as_ref().is_some_and(|tx| tx.send(command))
     }
 
     /// Start a gesture, claiming the press only if the applier actually took it.
@@ -681,12 +705,12 @@ mod tests {
     /// A state wired to a plain channel with no applier thread, so the commands
     /// the callback posts can be read back exactly.
     fn wired() -> (DragToMoveState, Receiver<Command>) {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mailbox::channel("test");
         (DragToMoveState::new(Some(tx), None), rx)
     }
 
-    fn drain(rx: &Receiver<Command>) -> Vec<Command> {
-        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    fn drain(rx: &mut Receiver<Command>) -> Vec<Command> {
+        std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
     #[test]
@@ -705,13 +729,13 @@ mod tests {
 
     #[test]
     fn a_gesture_posts_begin_move_and_end_under_one_generation() {
-        let (state, rx) = wired();
+        let (state, mut rx) = wired();
         assert!(state.begin(Gesture::Move, PRESS));
         state.moved((110.0, 200.0));
         state.release();
         state.stop_gesture();
         assert_eq!(
-            drain(&rx),
+            drain(&mut rx),
             vec![
                 Command::Begin {
                     generation: 1,
@@ -729,11 +753,11 @@ mod tests {
 
     #[test]
     fn each_gesture_gets_its_own_generation() {
-        let (state, rx) = wired();
+        let (state, mut rx) = wired();
         state.begin(Gesture::Move, PRESS);
         state.stop_gesture();
         state.begin(Gesture::Resize, PRESS);
-        let generations: Vec<_> = drain(&rx)
+        let generations: Vec<_> = drain(&mut rx)
             .into_iter()
             .map(|c| match c {
                 Command::Begin { generation, .. }

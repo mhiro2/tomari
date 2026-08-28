@@ -21,6 +21,7 @@ mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
 mod locks;
+mod mailbox;
 mod menubar;
 #[cfg(target_os = "macos")]
 mod overlay;

@@ -335,9 +335,18 @@ the first drag that actually moves its frame the drag arms.
 Listen-only means the tap cannot *modify* events, not that it stays out of the
 way: the system still holds the event until the callback returns, which is why a
 slow one gets the tap disabled by timeout. So this callback obeys the same rule
-as the active drag-to-move one — no call into another process, no lock. It reads
-the event's location and flags, checks the `ENABLED` atomic mirrored out of the
-settings by `restart_result`, posts a command down a channel and returns.
+as the active drag-to-move one — no call into another process, no unbounded
+wait. It reads the event's location and flags, checks the `ENABLED` atomic
+mirrored out of the settings by `restart_result`, posts a command into a
+bounded, coalescing queue (`src-tauri/src/mailbox.rs`: the newest cursor
+position replaces the pending one for the same gesture and a cap refuses
+samples of further gestures beyond that; lifecycle commands — press, release,
+cancel — travel a lock-free channel and are never shed, and each pending sample
+is announced there by a tick so it is handed out after its own press and before
+its release; a cursor sample that finds the slot's
+lock contended is dropped rather than waited for, so the callback never blocks
+on the worker; anything shed is counted and logged from the worker) and
+returns.
 Everything with an Accessibility round-trip in it — the hit-test, the frame
 reads that separate a window drag from a text selection, the snap on release —
 runs on a single worker thread (`tomari-dragsnap-apply`) started with the tap.
@@ -423,11 +432,12 @@ preview after the teardown's `hide`, nor can a stale `hide` clear a newer one.
 modifier-gated. Unlike drag-to-snap it does not watch the OS move a window — it
 _drives_ the window itself, so it is an **active** tap (`CGEventTapOptions::Default`),
 whose callback holds up **all** input while it runs, Tomari's own or not. So the
-callback calls into no other process, starts no thread, joins none and takes no
-lock: it reads the held modifiers (`gesture_for_flags`: `⌃⌥` → move, `⌃⌥⌘` →
+callback calls into no other process, starts no thread, joins none and waits on
+nothing unbounded: it reads the held modifiers (`gesture_for_flags`: `⌃⌥` → move, `⌃⌥⌘` →
 resize, Shift up) plus two atomics — `ENABLED`, mirrored out of the settings by
 `restart_result`, and `ACCESSIBILITY`, mirrored from the permission poller —
-then posts a `Command` down a channel and returns.
+then posts a `Command` into the same kind of bounded, coalescing queue and
+returns.
 
 Everything that messages the target app happens on the single applier thread
 started with the tap — the hit-test that finds the window, the frame read that
