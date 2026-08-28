@@ -90,6 +90,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use crate::locks::MutexExt;
 
@@ -103,20 +104,44 @@ const F18_USAGE: u64 = 0x7_0000_006D;
 /// treats this keycode as the Caps Lock modifier.
 pub const F18_KEYCODE: i64 = 79;
 
-fn set_mapping(json: &str) -> Result<(), String> {
-    let output = Command::new("/usr/bin/hidutil")
-        .args(["property", "--set", json])
-        .output()
-        .map_err(|e| format!("failed to run hidutil: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "hidutil exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+/// How long one `hidutil` call may take before it is killed. It normally
+/// returns in milliseconds; a wedged one would otherwise hold a settings save,
+/// the wake reset or quit indefinitely.
+const HIDUTIL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Run `hidutil` with `args` under [`HIDUTIL_DEADLINE`], returning its stdout
+/// on a clean exit. A timeout, non-zero exit or failure to start is an `Err`
+/// like any other, so every caller's fail-closed handling covers it.
+fn hidutil(args: &[&str]) -> Result<Vec<u8>, String> {
+    let outcome = crate::childproc::output_with_deadline(
+        Command::new("/usr/bin/hidutil").args(args),
+        HIDUTIL_DEADLINE,
+    )
+    .map_err(|e| format!("failed to run hidutil: {e}"))?;
+    match outcome {
+        crate::childproc::Outcome::Exited {
+            status,
+            stdout,
+            stderr,
+        } => {
+            if status.success() {
+                Ok(stdout)
+            } else {
+                Err(format!(
+                    "hidutil exited with {status}: {}",
+                    String::from_utf8_lossy(&stderr).trim()
+                ))
+            }
+        }
+        crate::childproc::Outcome::TimedOut => Err(format!(
+            "hidutil did not finish within {}s and was killed",
+            HIDUTIL_DEADLINE.as_secs()
+        )),
     }
+}
+
+fn set_mapping(json: &str) -> Result<(), String> {
+    hidutil(&["property", "--set", json]).map(|_| ())
 }
 
 /// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs. `Err`
@@ -125,18 +150,8 @@ fn set_mapping(json: &str) -> Result<(), String> {
 /// every write replaces the whole property from what was read here. An
 /// approximate read would silently drop the entries it failed to understand.
 fn read_entries() -> Result<Vec<(u64, u64)>, String> {
-    let output = Command::new("/usr/bin/hidutil")
-        .args(["property", "--get", "UserKeyMapping"])
-        .output()
-        .map_err(|e| format!("failed to run hidutil: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "hidutil exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    parse_entries(&String::from_utf8_lossy(&output.stdout))
+    let stdout = hidutil(&["property", "--get", "UserKeyMapping"])?;
+    parse_entries(&String::from_utf8_lossy(&stdout))
 }
 
 /// The `UserKeyMapping` entries in `hidutil property --get` output.

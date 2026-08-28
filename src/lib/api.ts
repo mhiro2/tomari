@@ -10,6 +10,7 @@ import type {
   DisplayDirection,
   Hotkey,
   KeepAwakeOptions,
+  LiveApplyWarnings,
   KeepAwakeStatus,
   MenuBarInventory,
   MenuBarItemZone,
@@ -29,6 +30,10 @@ import type {
 } from './types';
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
+// The `applyWarnings` the live state warrants right now, independent of any
+// save — read when the panel opens so a mismatch left over from an earlier
+// session (a Caps Lock restore that failed on quit, say) is shown at once.
+export const getApplyWarnings = (): Promise<LiveApplyWarnings> => invoke('get_apply_warnings');
 
 // Resolves once the settings are persisted; `applyWarnings` lists any side
 // effect that saved but could not be applied to the system.

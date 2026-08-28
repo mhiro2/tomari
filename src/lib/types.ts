@@ -268,3 +268,11 @@ export interface UpdateInfo {
 export interface SaveSettingsOutcome {
   applyWarnings: string[];
 }
+
+// Outcome of `get_apply_warnings`: the codes the live state warrants right now,
+// plus the codes it has no read-only probe for (`unprobed`) — for those the
+// last save's verdict stands.
+export interface LiveApplyWarnings {
+  warnings: string[];
+  unprobed: string[];
+}

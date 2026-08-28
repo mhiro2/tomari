@@ -304,6 +304,23 @@ pub fn reconcile_caps_mapping(state: &AppState) -> bool {
     reconciled
 }
 
+/// Whether the Caps Lock HID remap currently matches what the settings and
+/// rules ask for, *without* touching it — the read-only counterpart of
+/// [`reconcile_caps_mapping`] for a health check that must not shell out.
+/// Same lock order as everywhere else: `EVENT_TAP`, then the engine.
+pub fn caps_mapping_in_step(state: &AppState) -> bool {
+    // Held through the status read, like `reconcile_caps_mapping` holds it
+    // through the write, so a restart landing in between cannot pair a stale
+    // "tap running" with the mapping state it just changed.
+    let tap_guard = EVENT_TAP.lock_safe();
+    let manage = tap_guard.is_some()
+        && state.keyboard_enabled()
+        && state.engine.lock_safe().has_caps_lock_rule();
+    let in_step = crate::capsmap::matches(manage);
+    drop(tap_guard);
+    in_step
+}
+
 /// Run a Caps Lock HID reconcile that [`reconcile_caps_mapping`] put off for a
 /// hold, once the hold is over. Called from the tap callback, so the reconcile
 /// itself — a `hidutil` round-trip — is moved to its own thread: a child

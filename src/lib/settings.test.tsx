@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { errorText } from './errors';
 import { SettingsProvider, useSettings } from './settings';
-import type { AppSettings, SaveSettingsOutcome } from './types';
+import type { LiveApplyWarnings, AppSettings, SaveSettingsOutcome } from './types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
@@ -238,6 +238,183 @@ describe('SettingsProvider', () => {
     // The second edit (back to false) must win, and its own save must run.
     await waitFor(() => expect(saveCallCount).toBe(2));
     expect(btn).toHaveTextContent('false');
+  });
+
+  it('seeds applyWarnings from the live state on load, before any save', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_apply_warnings')
+        return Promise.resolve({ warnings: ['capsLockRemap'], unprobed: ['menuBar'] });
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    // A mismatch left over from an earlier session (a Caps Lock restore that
+    // failed on quit) is shown as soon as the panel loads.
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('capsLockRemap'),
+    );
+    expect(saveCalls()).toHaveLength(0);
+  });
+
+  it('re-reads the live applyWarnings each time the panel is shown', async () => {
+    mockInvoke.mockReset();
+    let liveWarnings: string[] = [];
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_apply_warnings')
+        return Promise.resolve({ warnings: liveWarnings, unprobed: ['menuBar'] });
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await screen.findByTestId('toggle');
+    await waitFor(() => expect(handlers.has('tomari:panel-shown')).toBe(true));
+    expect(screen.getByTestId('apply-warnings')).toHaveTextContent('');
+
+    // The panel was hidden, not destroyed; a mismatch arose meanwhile.
+    liveWarnings = ['capsLockRemap'];
+    await act(async () => {
+      handlers.get('tomari:panel-shown')?.();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('capsLockRemap'),
+    );
+  });
+
+  it('does not let a slow live-warnings read overwrite a save outcome', async () => {
+    mockInvoke.mockReset();
+    let resolveLive: ((w: LiveApplyWarnings) => void) | null = null;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_apply_warnings')
+        return new Promise<LiveApplyWarnings>((resolve) => {
+          resolveLive = resolve;
+        });
+      if (cmd === 'save_settings') return Promise.resolve({ applyWarnings: ['launchAtLogin'] });
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    const btn = await screen.findByTestId('toggle');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('launchAtLogin'),
+    );
+
+    // The live read that started at load resolves only now, with the stale
+    // pre-save list: the fresher save outcome must stand.
+    await act(async () => {
+      resolveLive?.({ warnings: ['capsLockRemap'], unprobed: ['menuBar'] });
+    });
+    expect(screen.getByTestId('apply-warnings')).toHaveTextContent('launchAtLogin');
+    expect(screen.getByTestId('apply-warnings')).not.toHaveTextContent('capsLockRemap');
+  });
+
+  it('lets only the newest of overlapping live-warning reads apply', async () => {
+    mockInvoke.mockReset();
+    const pending: Array<(w: LiveApplyWarnings) => void> = [];
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_apply_warnings')
+        return new Promise<LiveApplyWarnings>((resolve) => {
+          pending.push(resolve);
+        });
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await screen.findByTestId('toggle');
+    await waitFor(() => expect(pending).toHaveLength(1));
+    // The panel is shown again before the load-time read has answered.
+    await act(async () => {
+      handlers.get('tomari:panel-shown')?.();
+    });
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    // The newer read answers first, then the older one arrives late with a
+    // stale list: the newer result must stand.
+    await act(async () => {
+      pending[1]?.({ warnings: ['keyboardTap'], unprobed: [] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('keyboardTap'),
+    );
+    await act(async () => {
+      pending[0]?.({ warnings: ['capsLockRemap'], unprobed: [] });
+    });
+    expect(screen.getByTestId('apply-warnings')).toHaveTextContent('keyboardTap');
+    expect(screen.getByTestId('apply-warnings')).not.toHaveTextContent('capsLockRemap');
+  });
+
+  it('keeps an unprobed warning from the last save when the panel is shown again', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_apply_warnings')
+        return Promise.resolve({ warnings: ['capsLockRemap'], unprobed: ['menuBar'] });
+      if (cmd === 'save_settings')
+        return Promise.resolve({ applyWarnings: ['menuBar', 'launchAtLogin'] });
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    const btn = await screen.findByTestId('toggle');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('menuBar,launchAtLogin'),
+    );
+
+    await act(async () => {
+      handlers.get('tomari:panel-shown')?.();
+    });
+    // `menuBar` has no live probe, so the save's verdict stands; the probed
+    // codes are replaced by what the live state says now.
+    await waitFor(() =>
+      expect(screen.getByTestId('apply-warnings')).toHaveTextContent('capsLockRemap,menuBar'),
+    );
+    expect(screen.getByTestId('apply-warnings')).not.toHaveTextContent('launchAtLogin');
   });
 
   it('keeps the last applyWarnings when a later save fails', async () => {

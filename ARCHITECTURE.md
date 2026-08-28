@@ -135,6 +135,11 @@ the OS `UserKeyMapping` facility (`hidutil`, Apple TN2450). The remap happens
 before the lock is interpreted, so Caps never locks; F18 emits real key-down/up
 that the tap drives as the Caps Lock modifier. `eventtap::restart` reconciles the
 remap with whether an enabled rule manages Caps Lock, and quit takes it down.
+Every `hidutil` call runs under a deadline (`src-tauri/src/childproc.rs`) so a
+wedged one cannot hold a save, the wake reset or quit; a restore that fails on
+quit leaves the claim record for the next launch to retry, and the settings
+panel reads the live `apply_warnings` (`get_apply_warnings`) when it opens so
+that mismatch is shown without waiting for a save.
 Because setting the property rewrites the whole list, both directions read the
 current `UserKeyMapping` first and add/remove only Tomari's Caps Lock → F18
 entry, leaving any mappings the user set themselves intact. That read is what

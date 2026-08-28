@@ -144,21 +144,25 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
 }
 
 describe('WindowView', () => {
-  let panelShown: (() => void) | undefined;
+  // Every `tomari:panel-shown` listener under the view — the view's own and
+  // the settings provider's — fires together, as the real event would.
+  let panelShownHandlers: Array<() => void> = [];
+  const panelShown = () => panelShownHandlers.forEach((fire) => fire());
 
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
-    panelShown = undefined;
+    panelShownHandlers = [];
     mockListen.mockReset();
     mockListen.mockImplementation((event, handler) => {
       if (event === 'tomari:panel-shown') {
-        panelShown = () =>
+        panelShownHandlers.push(() =>
           (handler as (value: { event: string; id: number; payload: unknown }) => void)({
             event,
             id: 0,
             payload: null,
-          });
+          }),
+        );
       }
       return Promise.resolve(() => {});
     });
@@ -194,7 +198,7 @@ describe('WindowView', () => {
       placements: [],
     };
     mockCommands({ get_placement_context: browser });
-    panelShown?.();
+    panelShown();
 
     expect(await screen.findByText('Browser')).toBeInTheDocument();
     expect(screen.queryByText('Editor')).not.toBeInTheDocument();
@@ -209,7 +213,7 @@ describe('WindowView', () => {
     renderView(<WindowView />);
 
     window.dispatchEvent(new Event('focus'));
-    panelShown?.();
+    panelShown();
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_placement_context')).toHaveLength(
       1,
     );

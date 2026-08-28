@@ -255,6 +255,82 @@ pub async fn save_settings(
     Ok(SaveSettingsOutcome { apply_warnings })
 }
 
+/// The `apply_warnings` the live state warrants right now, with no save
+/// involved: launch-at-login and the ⌘ IME rules against the saved settings,
+/// the global-shortcut registration, each enabled tap's liveness, and whether
+/// the Caps Lock HID remap matches the rules. The settings panel reads this
+/// when it opens (and each time it is shown again), so a mismatch that
+/// outlived the last save — a restore that failed on quit and left its claim
+/// record for this launch to retry, a `hidutil` that timed out during the wake
+/// reset, a shortcut that failed to register at startup — is shown rather than
+/// waiting for the next save to happen to surface it. Read-only: nothing is
+/// restarted, written or reconciled here, which is also why `menuBar` is not
+/// covered — the tray's visibility has no read-only probe, only the write in
+/// `save_settings` reports it. Codes this cannot probe are listed in
+/// `unprobed`, so the panel keeps whatever the last save said about them
+/// instead of taking their absence here for "healed".
+// `async fn`: the Caps Lock check waits on the tap lock, which a save or the
+// wake reset can hold across `hidutil` calls (each bounded, but seconds
+// long); off the main thread that wait does not freeze the panel that is
+// opening.
+#[tauri::command]
+pub async fn get_apply_warnings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<LiveApplyWarnings> {
+    use tauri_plugin_autostart::ManagerExt;
+    let settings = state.settings.lock_safe().clone();
+    let mut warnings: Vec<&'static str> = Vec::new();
+    if !app
+        .autolaunch()
+        .is_enabled()
+        .is_ok_and(|current| current == settings.launch_at_login)
+    {
+        warnings.push("launchAtLogin");
+    }
+    if state.shortcut_registration_incomplete() {
+        warnings.push("globalShortcuts");
+    }
+    if !command_ime_rules_live(&state, settings.command_ime_switch_enabled) {
+        warnings.push("commandImeRules");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let live = |should_run: bool, running: bool| TapCheck {
+            should_run,
+            restarted_ok: None,
+            running,
+        };
+        warnings.extend(compose_apply_warnings(&ApplyWarningInputs {
+            keyboard: live(settings.keyboard_enabled, crate::eventtap::is_running()),
+            drag_to_snap: live(
+                settings.window_management_enabled && settings.drag_to_snap_enabled,
+                crate::drag_to_snap::is_running(),
+            ),
+            drag_to_move: live(
+                settings.window_management_enabled && settings.drag_to_move_enabled,
+                crate::drag_to_move::is_running(),
+            ),
+            caps_remap_ok: crate::eventtap::caps_mapping_in_step(&state),
+        }));
+    }
+    // Infallible in practice; `Result` because an async command with borrowed
+    // inputs must return one.
+    Ok(LiveApplyWarnings {
+        warnings,
+        unprobed: vec!["menuBar"],
+    })
+}
+
+/// Outcome of [`get_apply_warnings`]: the codes the live state warrants, plus
+/// the codes it has no read-only probe for and therefore says nothing about.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveApplyWarnings {
+    warnings: Vec<&'static str>,
+    unprobed: Vec<&'static str>,
+}
+
 /// Live-state inputs for one restartable tap's `apply_warnings` check (see
 /// [`compose_apply_warnings`]).
 struct TapCheck {

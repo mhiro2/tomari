@@ -56,6 +56,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [applyWarnings, setApplyWarnings] = useState<string[]>([]);
+  // Bumped whenever a live-state read starts and whenever a save's outcome
+  // sets `applyWarnings`, so only the newest read may apply its result: an
+  // older one resolving later cannot overwrite a fresher read or the
+  // post-save list with what it saw before.
+  const warningsGeneration = useRef(0);
   // Latest settings, so an in-flight save reads the current state even before
   // React commits.
   const settingsRef = useRef<AppSettings | null>(null);
@@ -71,6 +76,40 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // own dependency.
   const flushRef = useRef<() => Promise<void>>(null);
 
+  // Read the warnings the live state warrants right now. Best effort: a
+  // failure leaves the current list alone, and the next save's outcome
+  // replaces it either way. A result is dropped when a save landed or a newer
+  // read started meanwhile (either is fresher) or the caller has unmounted.
+  const refreshApplyWarnings = useCallback(async (isCancelled: () => boolean) => {
+    warningsGeneration.current += 1;
+    const generation = warningsGeneration.current;
+    try {
+      const live = await api.getApplyWarnings();
+      if (isCancelled() || warningsGeneration.current !== generation) return;
+      if (!live || !Array.isArray(live.warnings)) return;
+      // Codes the live read has no probe for keep the last save's verdict —
+      // their absence from `warnings` means "not checked", not "healed".
+      const unprobed = new Set(live.unprobed ?? []);
+      setApplyWarnings((prev) => [...live.warnings, ...prev.filter((code) => unprobed.has(code))]);
+    } catch {
+      // ignore — surfaced again by the next save
+    }
+  }, []);
+
+  // The window is hidden rather than destroyed when the panel closes, so a
+  // mismatch that arose while it was hidden (a `hidutil` timeout during the
+  // wake reset, say) has to be re-read each time it is shown again.
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen('tomari:panel-shown', () => {
+      void refreshApplyWarnings(() => cancelled);
+    });
+    return () => {
+      cancelled = true;
+      void unlisten.then((fn) => fn());
+    };
+  }, [refreshApplyWarnings]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -81,6 +120,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         settingsRef.current = s;
         setSettings(s);
         setLoadError(null);
+        // Seed the warnings from the live state so one that outlived the last
+        // save (a restore that failed on quit, retried at this launch) shows
+        // without waiting for a save.
+        void refreshApplyWarnings(() => cancelled);
       } catch (e) {
         if (cancelled || settled.current) return;
         setLoadError(e);
@@ -89,7 +132,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [loadAttempt]);
+  }, [loadAttempt, refreshApplyWarnings]);
 
   const retryLoad = useCallback(() => {
     setLoadError(null);
@@ -136,6 +179,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         const outcome = await api.saveSettings(current);
         setSaveError(null);
         // The settings persisted; surface any side effect that didn't apply.
+        warningsGeneration.current += 1;
         setApplyWarnings(outcome.applyWarnings);
       }
     } catch (e) {

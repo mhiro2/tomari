@@ -3,6 +3,7 @@
 
 mod actions;
 mod capsmap;
+mod childproc;
 mod commands;
 #[cfg(target_os = "macos")]
 mod displays;
@@ -135,6 +136,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_settings,
+            commands::get_apply_warnings,
             commands::list_hotkeys,
             commands::save_hotkey,
             commands::delete_hotkey,
@@ -404,7 +406,17 @@ fn main() {
                 // admin-auth dialog for the lid-close veto — means Caps Lock is
                 // never left remapped for however long that dialog is up (or
                 // declined).
-                let _ = capsmap::reconcile(false);
+                // The outcome is logged, not dropped: a failed restore leaves
+                // the claim record on disk, so the next launch's reconcile
+                // retries it and the settings panel shows the mismatch until it
+                // heals (`get_apply_warnings`).
+                let outcome = capsmap::reconcile(false);
+                if !outcome.reconciled {
+                    tracing::warn!(
+                        proxy_active = outcome.proxy_active,
+                        "caps-lock HID remap could not be restored on quit; will retry at next launch"
+                    );
+                }
                 // Drop the divider before the slow part below: it is the one
                 // piece of teardown the user can see, and `cleanup_blocking`
                 // can sit behind an admin-auth dialog for a while.
