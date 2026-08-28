@@ -15,10 +15,7 @@ use objc2_app_kit::{
     NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
 };
 use objc2_foundation::NSNotification;
-use tauri::{AppHandle, Manager};
-
-use crate::locks::MutexExt;
-use crate::state::AppState;
+use tauri::AppHandle;
 
 /// Observe wake / session-active notifications for the app's lifetime.
 pub fn install(app: &AppHandle) {
@@ -45,9 +42,10 @@ pub fn install(app: &AppHandle) {
 /// carries a "key is held" belief across a sleep or session switch.
 fn reset(app: &AppHandle) {
     tracing::info!("woke from sleep or session became active — resetting input state");
-    if let Some(state) = app.try_state::<AppState>() {
-        state.engine.lock_safe().reset();
-    }
+    // The engine's hold state is reset inside `eventtap::restart`, *after* it
+    // has released whatever the old tap still owed downstream for held remapped
+    // keys; resetting here first would make that release find nothing to do.
+    //
     // Restarting a tap joins its previous thread and (for the keyboard tap)
     // can shell out to `hidutil` while reconciling the Caps Lock remap; none
     // of that touches AppKit UI, so it needs no main-thread hop — only run

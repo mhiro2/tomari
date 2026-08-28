@@ -58,7 +58,22 @@ pub struct ModifierEngine {
     /// rule. A solo tap must begin from a clean slate: if another modifier is
     /// already down when a press starts, the press is part of a chord (e.g.
     /// holding Shift then tapping ⌘ must not fire ⌘'s tap).
-    held: Vec<(ModifierKey, KeySide)>,
+    held: Vec<Held>,
+}
+
+/// A managed modifier that is physically down, with the remap role it took
+/// when it went down. The role is fixed at the press: the down event was
+/// rewritten into `remap` (if any) and the app has been holding *that* modifier
+/// since, so the release has to undo the same thing whatever the rules say by
+/// then — a rule edited or removed mid-hold must not turn a Command release
+/// into a Control one and leave Command stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    key: ModifierKey,
+    side: KeySide,
+    /// The modifier this key's down was rewritten into, when a non-hyper rule
+    /// remapped it to a *different* modifier.
+    remap: Option<ModifierKey>,
 }
 
 /// How long a modifier must be held before its release no longer counts as a
@@ -117,9 +132,24 @@ impl ModifierEngine {
         fallback
     }
 
-    /// The modifier this key should be remapped to, if a rule says so.
+    /// The modifier this key's `flagsChanged` should be rewritten into. While
+    /// the key is held this is the role recorded at its press (see [`Held`]),
+    /// so the release matches the down even if the rules changed in between;
+    /// otherwise — i.e. for the press itself — it is what the current rule says.
     pub fn remap_for(&self, key: ModifierKey, side: KeySide) -> Option<ModifierKey> {
-        self.find_rule(key, side).and_then(|r| r.remap_to)
+        match self.held.iter().find(|h| (h.key, h.side) == (key, side)) {
+            Some(held) => held.remap,
+            None => self.rule_remap(key, side),
+        }
+    }
+
+    /// What a press of `key`/`side` is remapped to under the current rules: the
+    /// rule's target when it is a non-hyper rule to a different modifier.
+    fn rule_remap(&self, key: ModifierKey, side: KeySide) -> Option<ModifierKey> {
+        self.find_rule(key, side)
+            .filter(|r| !r.hyper)
+            .and_then(|r| r.remap_to)
+            .filter(|&target| target != key)
     }
 
     /// Whether the live rule set currently contains a rule with this id. Lets a
@@ -156,29 +186,40 @@ impl ModifierEngine {
     /// takes precedence over any `remap_to`.
     pub fn held_remap_stamp(&self) -> (Vec<ModifierKey>, Vec<ModifierKey>) {
         // Modifiers a held key contributes in its native role (held, not hyper,
-        // and not remapped to a *different* modifier).
+        // and not remapped to a *different* modifier). The role is the one
+        // recorded at the press, not re-derived from the rules now.
         let mut native: Vec<ModifierKey> = Vec::new();
         let mut sources: Vec<ModifierKey> = Vec::new();
         let mut targets: Vec<ModifierKey> = Vec::new();
-        for &(key, side) in &self.held {
-            match self.find_rule(key, side) {
-                Some(rule) if !rule.hyper && rule.remap_to.is_some_and(|target| target != key) => {
-                    let target = rule.remap_to.expect("checked above");
-                    if !sources.contains(&key) {
-                        sources.push(key);
+        for held in &self.held {
+            match held.remap {
+                Some(target) => {
+                    if !sources.contains(&held.key) {
+                        sources.push(held.key);
                     }
                     if !targets.contains(&target) {
                         targets.push(target);
                     }
                 }
                 // No rule, hyper, or remap-to-self: the key keeps its own role.
-                _ if !native.contains(&key) => native.push(key),
-                _ => {}
+                None if !native.contains(&held.key) => native.push(held.key),
+                None => {}
             }
         }
         // Keep a source flag that another held key still provides natively.
         sources.retain(|source| !native.contains(source));
         (sources, targets)
+    }
+
+    /// The target modifiers currently standing in for held remapped keys — the
+    /// modifiers the tap has already pressed downstream on their behalf and
+    /// that it therefore still owes a release for. Recorded at each press, so a
+    /// rule edited or removed mid-hold changes nothing here. Used when the tap
+    /// is torn down mid-hold (a restart, the master switch, quit): the physical
+    /// release that follows will not be rewritten any more, so these are
+    /// released explicitly instead of being left pressed in the app.
+    pub fn held_remap_targets(&self) -> Vec<ModifierKey> {
+        self.held_remap_stamp().1
     }
 
     /// Whether holding/chording this key should act as the hyper combo (⌃⌥⇧⌘).
@@ -191,9 +232,7 @@ impl ModifierEngine {
     /// of two simultaneously-held hyper keys does not drop hyper while the other
     /// is still down (tracking a single `bool` off each key's own up/down would).
     pub fn is_any_hyper_held(&self) -> bool {
-        self.held
-            .iter()
-            .any(|&(key, side)| self.is_hyper(key, side))
+        self.held.iter().any(|h| self.is_hyper(h.key, h.side))
     }
 
     /// Feed one event in; returns an action to perform, if a tap completed.
@@ -202,9 +241,13 @@ impl ModifierEngine {
             KeyEvent::ModifierDown { key, side, at_ms } => {
                 // Was any *other* modifier already down when this one pressed?
                 // If so, a tap that completes now is part of a chord.
-                let others_held = self.held.iter().any(|&held| held != (key, side));
-                if !self.held.contains(&(key, side)) {
-                    self.held.push((key, side));
+                let others_held = self.held.iter().any(|h| (h.key, h.side) != (key, side));
+                if !self.held.iter().any(|h| (h.key, h.side) == (key, side)) {
+                    self.held.push(Held {
+                        key,
+                        side,
+                        remap: self.rule_remap(key, side),
+                    });
                 }
                 match self.press.as_mut() {
                     // A second key while one is held → the first becomes a chord.
@@ -229,7 +272,7 @@ impl ModifierEngine {
                 None
             }
             KeyEvent::ModifierUp { key, side, at_ms } => {
-                self.held.retain(|&held| held != (key, side));
+                self.held.retain(|h| (h.key, h.side) != (key, side));
                 let p = self.press?;
                 // Match on (key, side), not just key: with a complete event
                 // stream the pending press and its release always share both,
@@ -552,6 +595,67 @@ mod tests {
         disabled.enabled = false;
         e = engine(vec![disabled]);
         assert!(!e.has_caps_lock_rule());
+    }
+
+    #[test]
+    fn held_remap_targets_are_owed_until_the_physical_release() {
+        // Control→Command held: Command is what the app was told is down, so it
+        // is what a teardown mid-hold has to release. Once Control is released
+        // through the engine, nothing is owed.
+        let mut r = rule(ModifierKey::Control, KeySide::Either, AppAction::NoOp);
+        r.remap_to = Some(ModifierKey::Command);
+        let mut e = engine(vec![r]);
+        assert!(e.held_remap_targets().is_empty());
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        assert_eq!(e.held_remap_targets(), vec![ModifierKey::Command]);
+        // A reset — what a restart does — forgets the hold, so the targets have
+        // to be read *before* it.
+        let mut forgotten = e.clone();
+        forgotten.reset();
+        assert!(forgotten.held_remap_targets().is_empty());
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 500,
+        });
+        assert!(e.held_remap_targets().is_empty());
+    }
+
+    #[test]
+    fn a_held_remap_keeps_the_role_it_was_pressed_with() {
+        // Control→Command is held when the rule is removed. The app is holding
+        // Command; the release must still be rewritten into Command, and the
+        // stamp and the owed release must still say Command — not Control, and
+        // not nothing.
+        let mut r = rule(ModifierKey::Control, KeySide::Either, AppAction::NoOp);
+        r.remap_to = Some(ModifierKey::Command);
+        let mut e = engine(vec![r]);
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        e.set_rules(vec![]);
+        assert_eq!(
+            e.remap_for(ModifierKey::Control, KeySide::Left),
+            Some(ModifierKey::Command)
+        );
+        assert_eq!(e.held_remap_targets(), vec![ModifierKey::Command]);
+        assert_eq!(
+            e.held_remap_stamp(),
+            (vec![ModifierKey::Control], vec![ModifierKey::Command])
+        );
+        // A fresh press under the new (empty) rules has no remap.
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 500,
+        });
+        assert_eq!(e.remap_for(ModifierKey::Control, KeySide::Left), None);
     }
 
     #[test]

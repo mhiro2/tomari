@@ -400,7 +400,11 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
         return Err(CmdError::other(message));
     }
     // `restart` does not guarantee an `ExitRequested` event, so release sleep
-    // prevention (including the lid-close override) here before relaunching.
+    // prevention (including the lid-close override) here before relaunching,
+    // and stop the keyboard tap so a remapped modifier it holds downstream is
+    // released rather than left pressed across the relaunch.
+    #[cfg(target_os = "macos")]
+    crate::eventtap::teardown(&app);
     crate::keepawake::cleanup_blocking(&app);
     app.restart();
 }

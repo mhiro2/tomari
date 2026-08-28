@@ -3,13 +3,31 @@
 //! Accessibility permission (the same one window management uses).
 
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapProxy, EventField,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapProxy, CGEventType, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use tomari_core::ImeMode;
+use tomari_core::{ImeMode, ModifierKey};
 use tomari_keyboard::accelerator;
 
 use crate::eventtap::SYNTHETIC_MARKER;
+use crate::keycodes;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    /// The current modifier flags for an event source state, as the system
+    /// sees them. The crate exposes no safe reader for either of these.
+    fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    /// Whether the key with this virtual keycode is currently down in an event
+    /// source state.
+    fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
+}
+
+/// `kCGEventSourceStateCombinedSessionState`: the session's modifier flags as
+/// apps see them — including what event taps have rewritten.
+const COMBINED_SESSION_STATE: i32 = 0;
+/// `kCGEventSourceStateHIDSystemState`: key state as the hardware reports it,
+/// before any tap has rewritten anything.
+const HID_SYSTEM_STATE: i32 = 1;
 
 /// Where a synthesized keystroke enters the event stream.
 #[derive(Clone, Copy)]
@@ -49,6 +67,59 @@ fn post(keycode: u16, flags: CGEventFlags, sink: Sink) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What [`release_modifier`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// A `flagsChanged` clearing the modifier was posted.
+    Posted,
+    /// The modifier's own key is physically down, so it was left held: a
+    /// release now would report a key the user is holding as up.
+    PhysicallyHeld,
+}
+
+/// Release `target` downstream: post a `flagsChanged` for its representative
+/// keycode with the flag cleared, as the OS would on its physical key-up.
+///
+/// This balances a press the event tap made on the target's behalf — a
+/// remapped modifier's down rewritten into `target` — when the tap is torn down
+/// before the physical release arrives (see `eventtap::release_held_remaps`).
+///
+/// Modifier flags are not reference-counted between the remap and the real key,
+/// so if `target`'s own key is physically down (Control→Command held together
+/// with the real Command), nothing is posted: the real key's release will clear
+/// the flag when it comes. "Physically" is the HID system state — the combined
+/// session state also reflects the tap's own rewrite, and would report the very
+/// target being released as down. The flags posted are the session's current
+/// combined state — device left/right bits kept — minus `target`'s generic and
+/// device bits, so every other modifier really held stays reported as held.
+/// Posted at the HID level and marked synthetic, so whatever tap Tomari starts
+/// next ignores it.
+pub fn release_modifier(target: ModifierKey) -> Result<Release, String> {
+    // SAFETY: plain queries of the hardware key and session modifier state; no
+    // pointers cross the boundary.
+    let physically_down = keycodes::keycodes_for(target).iter().any(|&keycode| {
+        u16::try_from(keycode)
+            .is_ok_and(|kc| unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, kc) })
+    });
+    if physically_down {
+        return Ok(Release::PhysicallyHeld);
+    }
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|()| "failed to create CGEventSource".to_string())?;
+    let keycode = u16::try_from(keycodes::primary_keycode(target))
+        .map_err(|_| "modifier keycode out of range".to_string())?;
+    let event = CGEvent::new_keyboard_event(source, keycode, false)
+        .map_err(|()| "failed to create flagsChanged event".to_string())?;
+    event.set_type(CGEventType::FlagsChanged);
+    // SAFETY: as above.
+    let current = unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) };
+    let cleared = keycodes::flag_for(target).bits() | keycodes::device_flags_for(target);
+    event.set_flags(CGEventFlags::from_bits_retain(current & !cleared));
+    event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, SYNTHETIC_MARKER);
+    event.post(CGEventTapLocation::HID);
+    Ok(Release::Posted)
 }
 
 /// Switch the input method by posting the JIS 英数 (0x66) / かな (0x68) keys.

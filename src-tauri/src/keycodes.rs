@@ -46,6 +46,29 @@ pub fn device_flag_for_keycode(keycode: i64) -> Option<u64> {
     })
 }
 
+/// Every `flagsChanged` keycode a modifier can arrive on (left and right where
+/// it has two), so a modifier's physical state can be checked on both.
+pub fn keycodes_for(modifier: ModifierKey) -> &'static [i64] {
+    match modifier {
+        ModifierKey::Command => &[55, 54],
+        ModifierKey::Shift => &[56, 60],
+        ModifierKey::Control => &[59, 62],
+        ModifierKey::Option => &[58, 61],
+        ModifierKey::CapsLock => &[57],
+        ModifierKey::Function => &[63],
+    }
+}
+
+/// The device-specific left/right bits (see [`device_flag_for_keycode`]) a
+/// modifier can contribute, OR-ed, so a synthesized release can clear them
+/// along with the generic flag.
+pub fn device_flags_for(modifier: ModifierKey) -> u64 {
+    keycodes_for(modifier)
+        .iter()
+        .filter_map(|&keycode| device_flag_for_keycode(keycode))
+        .fold(0, |acc, bit| acc | bit)
+}
+
 /// The CGEvent flag bit a modifier contributes to an event's flags.
 pub fn flag_for(modifier: ModifierKey) -> CGEventFlags {
     match modifier {

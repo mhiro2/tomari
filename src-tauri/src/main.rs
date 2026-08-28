@@ -394,6 +394,12 @@ fn main() {
                 // means Caps Lock is never left remapped for however long that
                 // dialog is up (or declined).
                 let _ = capsmap::reconcile(false);
+                // Stop the keyboard tap now, releasing any remapped modifier it
+                // still holds downstream — left running into the slow cleanup
+                // below it would keep stamping stale targets, and dying with
+                // the process it would leave the app holding them.
+                #[cfg(target_os = "macos")]
+                eventtap::teardown(app);
                 // Drop the divider before the slow part below: it is the one
                 // piece of teardown the user can see, and `cleanup_blocking`
                 // can sit behind an admin-auth dialog for a while.

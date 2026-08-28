@@ -210,7 +210,23 @@ rather than closing it.
   rather than discarded. Hotkeys, the tray and URLs post at the HID level
   (`Sink::Hid`) as they did.
 - (Re)starting the tap is centralized in `eventtap::restart`, called when the
-  feature is toggled or the permission is granted. The scaffolding underneath
+  feature is toggled or the permission is granted. Every teardown — restart,
+  master switch off, wake, the system disabling the tap, and `teardown` on quit
+  and before the updater's relaunch — first runs `release_held_remaps`: a
+  remapped modifier's down was rewritten into its target (Control→Command sent
+  the app a Command down), and once the tap is gone the physical release arrives
+  as a plain Control up, leaving the app holding Command until it is pressed for
+  real. The engine records each held key's remap role *at the press*
+  (`ModifierEngine::remap_for` answers from that record while the key is held),
+  so a rule edited or removed mid-hold changes neither the rewrite of the
+  release nor what is owed. For each owed target (`held_remap_targets`) a
+  `flagsChanged` clearing it is synthesized — current combined flags, device
+  bits kept, minus the target's generic and device bits, marked synthetic —
+  before the engine's hold state is reset; a target whose own key is physically
+  down (per the HID system state, which unlike the combined session state does
+  not reflect the tap's own rewrite) is left for its real release. A duplicate release, if the new tap
+  rewrites the physical up as well, is inert. Without the Accessibility grant
+  nothing can be posted; the hold is forgotten and the imbalance logged. The scaffolding underneath
   all three CGEventTaps (this one, drag-to-snap, drag-to-move) — spawn a
   dedicated thread, create the tap, attach its run-loop source, and hand the
   running `CFRunLoop` back so `Drop` can stop and join it, plus re-arming after

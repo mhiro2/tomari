@@ -114,9 +114,12 @@ pub fn restart_result(app: &AppHandle) -> bool {
     // The torn-down tap loses the release of any key held across the restart,
     // so drop the engine's transient "key is held" state. Otherwise a held
     // modifier would linger in `held` and the next solo tap would be misread as
-    // a chord.
-    state.engine.lock_safe().reset();
-    set_accessibility_granted(state.windows.permission_granted());
+    // a chord. Any target modifier the old tap had pressed downstream for a
+    // held remapped key is released first — the physical release that follows
+    // will no longer be rewritten by it.
+    let accessibility = state.windows.permission_granted();
+    set_accessibility_granted(accessibility);
+    release_held_remaps(&state, accessibility);
 
     // Reconcile the Caps Lock HID remap toward `manage`. `capsmap` publishes the
     // *actual* resulting state (not the request) to its proxy flag, so a failed
@@ -146,6 +149,78 @@ pub fn restart_result(app: &AppHandle) -> bool {
             // No tap to handle F18 — keep Caps Lock native.
             reconcile_caps(false);
             false
+        }
+    }
+}
+
+/// Stop the tap for good — quit, and the updater's relaunch, which does not
+/// guarantee an `ExitRequested` — releasing whatever it still owes downstream.
+/// A tap left running into a long teardown would keep stamping stale targets
+/// onto the keystrokes typed meanwhile; a tap that simply dies with the process
+/// leaves the app holding them.
+pub fn teardown(app: &AppHandle) {
+    let mut guard = EVENT_TAP.lock_safe();
+    *guard = None;
+    if let Some(state) = app.try_state::<AppState>() {
+        release_held_remaps(&state, state.windows.permission_granted());
+    }
+}
+
+/// Balance what the tap has pressed downstream on behalf of remapped keys that
+/// are still physically held, then forget the hold.
+///
+/// A remapped modifier's down is rewritten into its target (Control→Command
+/// sends the app a Command down). If the tap is torn down before the physical
+/// release — a settings save restarting it, the master switch, wake, quit, or
+/// the system disabling the tap — the release arrives untouched as a Control up
+/// (or not at all), and the app is left believing Command is still down:
+/// keystrokes act as Command chords until Command is pressed and released for
+/// real. So for every target still owed a release — recorded at each press, so
+/// a rule changed mid-hold does not alter it — a `flagsChanged` clearing it is
+/// synthesized here, before the engine forgets which keys were held. If the new
+/// tap then rewrites the physical release into the same target, the app sees a
+/// second release of a key already up, which is inert. A target whose own key
+/// is physically down is left alone (its real release will clear it).
+///
+/// Needs the Accessibility grant like any synthesized event; `accessibility` is
+/// passed in rather than queried so the tap callback can use its mirror instead
+/// of calling TCC. Without the grant the hold is still forgotten and the
+/// imbalance logged — the remap cannot be undone from here.
+fn release_held_remaps(state: &AppState, accessibility: bool) {
+    let targets = {
+        let mut engine = state.engine.lock_safe();
+        let targets = engine.held_remap_targets();
+        engine.reset();
+        targets
+    };
+    if targets.is_empty() {
+        return;
+    }
+    if !accessibility {
+        tracing::warn!(
+            ?targets,
+            "cannot release remapped modifiers held across a tap teardown: Accessibility \
+             permission not granted"
+        );
+        return;
+    }
+    for target in targets {
+        match crate::keysend::release_modifier(target) {
+            Ok(crate::keysend::Release::Posted) => {
+                tracing::info!(
+                    ?target,
+                    "released a remapped modifier held across a tap teardown"
+                )
+            }
+            Ok(crate::keysend::Release::PhysicallyHeld) => {
+                tracing::info!(
+                    ?target,
+                    "remapped modifier's own key is physically held; leaving it"
+                )
+            }
+            Err(e) => {
+                tracing::warn!(?target, error = %e, "could not release a remapped modifier held across a tap teardown")
+            }
         }
     }
 }
@@ -241,7 +316,10 @@ fn handle_event(
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
         if let Some(app_state) = app.try_state::<AppState>() {
-            app_state.engine.lock_safe().reset();
+            // The outage may have swallowed the physical release of a remapped
+            // key too: release its target as a restart would. The grant comes
+            // from the mirror — no TCC call from the callback.
+            release_held_remaps(&app_state, ACCESSIBILITY.load(Ordering::SeqCst));
         }
         {
             let mut ts = state.lock_safe();
@@ -343,9 +421,14 @@ fn drive_modifier(
     let ModifierEvent { key, side, is_down } = *ev;
 
     // Feed the engine and read back this key's held role plus the post-event
-    // held set (so the stamp tracking reflects this very up/down).
+    // held set (so the stamp tracking reflects this very up/down). The remap
+    // role is read *before* the event is processed: for a release the engine
+    // still holds the role recorded at the press, which is what the app has
+    // been holding and therefore what the release must be rewritten into —
+    // even if the rules changed in between. Processing the release forgets it.
     let (tap_action, remap, hyper, any_hyper_held, held_remap_stamp) = {
         let mut engine = app_state.engine.lock_safe();
+        let remap = engine.remap_for(key, side);
         let action = engine.process(if is_down {
             KeyEvent::ModifierDown {
                 key,
@@ -361,7 +444,7 @@ fn drive_modifier(
         });
         (
             action,
-            engine.remap_for(key, side),
+            remap,
             engine.is_hyper(key, side),
             engine.is_any_hyper_held(),
             engine.held_remap_stamp(),
