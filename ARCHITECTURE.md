@@ -148,13 +148,25 @@ own. Ownership is therefore explicit, in a `capsmap.claim` record in the data
 directory. Nothing commits the record and the OS property together, so the
 record separates intending to take the slot from having taken it: absent (Tomari
 holds nothing — a live Caps Lock → F18 is the user's and is left alone),
-`pending [usage]` (write-ahead, OS write unconfirmed — a live Caps Lock → F18 is
-unattributable, so this state only ever gives the claim up), or `held [usage]`
+`pending [usage] plan src:dst ...` (write-ahead: the OS write is unconfirmed,
+and the record names the whole list it set out to write), or `held [usage]`
 (confirmed, and the optional usage is what was displaced for the release to
-restore). Every transition fails closed: a record that cannot be written, or on
-the way back cannot be read, aborts it rather than risk the user's mapping.
-Taking over always rewrites the record, so a stale one left by a crash is
-replaced rather than deleted; every release is gated on our entry still being
+restore). A `pending` claim over a live Caps Lock → F18 is resolved by that
+plan: a live list equal to it means the write landed and only the confirm was
+lost, so the next reconcile confirms the claim — or, in the release direction,
+hands the source back with the displaced mapping restored — exactly as if the
+confirm had succeeded. A write-ahead whose commit fails is retracted on the spot
+when nothing of ours can have landed — the write was never handed to `hidutil`,
+or it was and our entry is not live right afterwards — since a plan left behind
+could otherwise match an identical list the user sets later. A live
+Caps Lock → F18 in any other list is unattributable, and then nothing moves: the list, the record and the
+`capsLockRemap` warning all stay until the user resolves it (the tap keeps
+treating F18 as Caps Lock meanwhile, since that is what is live). The claim is
+never quietly dropped over a live remap, which would leave Caps Lock stuck on F18
+with the warning gone. Every transition fails closed: a record that cannot be
+written, or on the way back cannot be read, aborts it rather than risk the user's
+mapping. Taking over always rewrites the record, so a stale one left by a crash
+is replaced rather than deleted; every release is gated on our entry still being
 live, so a change made outside Tomari in the meantime wins and the claim is
 dropped unused. `reconcile` runs the release direction whenever Caps Lock should
 not be managed, which is what stops a stale claim outliving the mapping it

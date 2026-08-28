@@ -37,8 +37,10 @@
 //! * **No record** ([`Claim::Unowned`]) — Tomari holds nothing. A live
 //!   Caps Lock → F18 is the user's and is left strictly alone.
 //! * **Pending** — the write-ahead step ran but the OS write is unconfirmed, so
-//!   a live Caps Lock → F18 *might* be ours and might be the user's. Nothing is
-//!   ever deleted or restored from this state; it is given up instead.
+//!   a live Caps Lock → F18 *might* be ours and might be the user's. The record
+//!   carries the exact list we set out to write: a live list that matches it is
+//!   attributed to us and the claim is confirmed (or released) from there; one
+//!   that does not is left strictly alone, claim and warning included.
 //! * **Held** — the OS write is confirmed. A live Caps Lock → F18 is ours, and
 //!   the record carries whatever destination it displaced for [`clear_with`] to
 //!   restore.
@@ -59,10 +61,18 @@
 //! than resolved — such a reconcile returns
 //! [`reconciled: false`](ReconcileOutcome::reconciled), which surfaces as the
 //! `capsLockRemap` warning. What happens next depends on which step failed: an
-//! unwritten claim or an unapplied mapping is simply retried, but a *confirm*
-//! that failed over a live remap leaves the unattributable `Pending` state,
-//! which the next reconcile gives up rather than retries — the mapping stays,
-//! and Tomari stops claiming it.
+//! unwritten claim or an unapplied mapping is simply retried — a write-ahead
+//! whose write is known not to have landed (our entry is not live right after
+//! the failure) is retracted at once, so it cannot later match a list the user
+//! sets themselves. A *confirm* that
+//! failed over a live remap leaves `Pending`, and the next reconcile repairs it
+//! by evidence: the write-ahead record names the whole list we were about to
+//! write, so a live list equal to it is ours — the claim is confirmed, or the
+//! source handed back, exactly as if the confirm had landed. A live
+//! Caps Lock → F18 in any *other* list is unattributable; it, the record and the
+//! warning all stay put until the user resolves it. What is never done is to
+//! quietly drop the claim over a live remap, which would leave Caps Lock stuck
+//! on F18 with nothing left to say so.
 //!
 //! Races *inside* Tomari are closed by serializing the whole reconcile (live
 //! read, record, OS write, proxy flag) on [`RECONCILE`] — every path that
@@ -270,52 +280,112 @@ fn parse_usage(s: &str) -> Option<u64> {
 /// `UserKeyMapping` carries no provenance, so this — not the live list — is what
 /// distinguishes our remap from an identical one the user set themselves. The
 /// payload is the destination displaced to take the source, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Claim {
     /// Tomari does not hold the source. A live Caps Lock → F18 is the user's own
     /// and must be left alone.
     Unowned,
     /// Write-ahead: recorded before the OS write, and left behind if that write
-    /// (or its confirmation) never completed. A live Caps Lock → F18 is then
-    /// *unattributable* — possibly ours, possibly one the user made afterwards
-    /// — so this state never deletes or restores anything.
-    Pending(Option<u64>),
+    /// (or its confirmation) never completed. Whether a live Caps Lock → F18 is
+    /// ours is decided against the list this names — see [`WriteAhead`].
+    Pending(WriteAhead),
     /// The OS write is confirmed: a live Caps Lock → F18 is ours to take back.
     Held(Option<u64>),
 }
 
+/// What a take-over recorded before writing: the destination it was about to
+/// displace, and the *whole list* it was about to write.
+///
+/// The list is the evidence a later reconcile attributes by. `UserKeyMapping`
+/// has no provenance, but `hidutil --set` replaces the list wholesale, so a live
+/// list identical to the one we planned is ours in every case but one — the
+/// user independently setting exactly the same complete list while our confirm
+/// was failing — and that coincidence is accepted. Anything else with a live
+/// Caps Lock → F18 stays unattributable and untouched.
+///
+/// `planned` is `None` only for a record written before the plan was recorded;
+/// such a claim can never be attributed and is reported until resolved by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteAhead {
+    displaced: Option<u64>,
+    planned: Option<Vec<(u64, u64)>>,
+}
+
+impl WriteAhead {
+    /// Whether `live` is the list this write-ahead set out to write, as a set
+    /// — `hidutil` is not guaranteed to print entries back in the order set.
+    fn matches(&self, live: &[(u64, u64)]) -> bool {
+        self.planned.as_ref().is_some_and(|planned| {
+            let mut planned = planned.clone();
+            let mut live = live.to_vec();
+            planned.sort_unstable();
+            live.sort_unstable();
+            planned == live
+        })
+    }
+}
+
 const PENDING_MARKER: &str = "pending";
 const HELD_MARKER: &str = "held";
+const PLAN_MARKER: &str = "plan";
 
-fn serialize_claim(claim: Claim) -> Option<String> {
-    let (marker, displaced) = match claim {
+fn serialize_claim(claim: &Claim) -> Option<String> {
+    let (marker, displaced, planned) = match claim {
         Claim::Unowned => return None,
-        Claim::Pending(displaced) => (PENDING_MARKER, displaced),
-        Claim::Held(displaced) => (HELD_MARKER, displaced),
+        Claim::Pending(ahead) => (PENDING_MARKER, ahead.displaced, ahead.planned.as_deref()),
+        Claim::Held(displaced) => (HELD_MARKER, *displaced, None),
     };
-    Some(match displaced {
-        Some(dst) => format!("{marker} {dst}"),
-        None => marker.to_string(),
-    })
+    let mut text = marker.to_string();
+    if let Some(dst) = displaced {
+        text.push_str(&format!(" {dst}"));
+    }
+    if let Some(planned) = planned {
+        text.push(' ');
+        text.push_str(PLAN_MARKER);
+        for (src, dst) in planned {
+            text.push_str(&format!(" {src}:{dst}"));
+        }
+    }
+    Some(text)
 }
 
 /// Parse a record's contents into a claim. `Err` for anything unrecognized — a
 /// torn or corrupt record must never read as a weaker claim than it was, which
 /// could delete a mapping we owed the user back.
+///
+/// Shape: `held [displaced]` or `pending [displaced] [plan src:dst ...]`. The
+/// `plan` section is what a write-ahead is attributed by later; a `pending`
+/// record without one is accepted (it predates the section) but never
+/// attributable.
 fn parse_claim(text: &str) -> Result<Claim, String> {
     let unrecognized = || "unrecognized caps-lock claim record".to_string();
-    let mut fields = text.split_whitespace();
+    let mut fields = text.split_whitespace().peekable();
     let marker = fields.next().ok_or_else(unrecognized)?;
-    let displaced = match fields.next() {
-        Some(value) => Some(parse_usage(value).ok_or_else(unrecognized)?),
-        None => None,
+    let displaced = match fields.peek() {
+        Some(&value) if value != PLAN_MARKER => {
+            fields.next();
+            Some(parse_usage(value).ok_or_else(unrecognized)?)
+        }
+        _ => None,
     };
-    if fields.next().is_some() {
-        return Err(unrecognized());
-    }
-    match marker {
-        PENDING_MARKER => Ok(Claim::Pending(displaced)),
-        HELD_MARKER => Ok(Claim::Held(displaced)),
+    let planned = match fields.next() {
+        None => None,
+        Some(PLAN_MARKER) => {
+            let mut planned = Vec::new();
+            for pair in fields.by_ref() {
+                let (src, dst) = pair.split_once(':').ok_or_else(unrecognized)?;
+                planned.push((
+                    parse_usage(src).ok_or_else(unrecognized)?,
+                    parse_usage(dst).ok_or_else(unrecognized)?,
+                ));
+            }
+            Some(planned)
+        }
+        Some(_) => return Err(unrecognized()),
+    };
+    match (marker, planned) {
+        (PENDING_MARKER, planned) => Ok(Claim::Pending(WriteAhead { displaced, planned })),
+        (HELD_MARKER, None) => Ok(Claim::Held(displaced)),
         _ => Err(unrecognized()),
     }
 }
@@ -347,7 +417,7 @@ fn read_claim() -> Result<Claim, String> {
 /// Record `claim`, replacing whatever was there. Written via a temporary file
 /// and an atomic rename, so a crash mid-write cannot leave a torn record.
 fn write_claim(claim: Claim) -> Result<(), String> {
-    let Some(body) = serialize_claim(claim) else {
+    let Some(body) = serialize_claim(&claim) else {
         return clear_claim();
     };
     let path = claim_path()?;
@@ -403,11 +473,15 @@ enum ApplyPlan {
     /// events it needs, so nothing is written: an entry we did not create must
     /// not become ours to remove later.
     AlreadyInEffect,
-    /// Caps Lock → F18 is live but our claim never got past write-ahead, so
-    /// there is no telling whether we set it. Give the claim up: the entry
-    /// stays, and a later release will treat it as the user's rather than risk
-    /// deleting a mapping of theirs.
-    Disown,
+    /// Caps Lock → F18 is live and the list is exactly the one our unconfirmed
+    /// write-ahead set out to write: the write landed and only the confirm was
+    /// lost. Finish it — record the claim as held, displacement and all.
+    Confirm { displaced: Option<u64> },
+    /// Caps Lock → F18 is live under an unconfirmed claim, in a list that is
+    /// *not* the one we planned. Whether we set it is unknowable, so nothing is
+    /// written and nothing is dropped: the claim stays as the record that this
+    /// is unresolved, and the reconcile reports it.
+    Unattributable,
     /// Record the write-ahead claim, write `entries`, then confirm the claim.
     Take {
         entries: Vec<(u64, u64)>,
@@ -424,7 +498,10 @@ fn plan_apply(mut entries: Vec<(u64, u64)>, claim: Claim) -> ApplyPlan {
     if entries.contains(&(CAPS_USAGE, F18_USAGE)) {
         return match claim {
             Claim::Unowned | Claim::Held(_) => ApplyPlan::AlreadyInEffect,
-            Claim::Pending(_) => ApplyPlan::Disown,
+            Claim::Pending(ahead) if ahead.matches(&entries) => ApplyPlan::Confirm {
+                displaced: ahead.displaced,
+            },
+            Claim::Pending(_) => ApplyPlan::Unattributable,
         };
     }
     let displaced = caps_source(&entries);
@@ -439,25 +516,40 @@ enum ClearPlan {
     /// We never held the Caps Lock source: leave the list — and any
     /// Caps Lock → F18 of the user's own — completely alone.
     Unclaimed,
-    /// We hold a claim we cannot act on — our entry is no longer live (something
-    /// outside Tomari moved the source, and that newer intent wins), or the
-    /// claim never got past write-ahead. Drop it without touching the list.
+    /// We hold a claim we cannot act on: our entry is not live — something
+    /// outside Tomari moved the source and that newer intent wins, or our write
+    /// never landed. Drop it without touching the list.
     DropClaim,
+    /// Caps Lock → F18 is live under an unconfirmed claim, in a list that is
+    /// not the one we planned. Not ours to take back, not ours to disown — see
+    /// [`ApplyPlan::Unattributable`].
+    Unattributable,
     /// Write `entries`: ours removed, and the displaced mapping restored when
     /// the claim named one. Then drop the claim.
     Release { entries: Vec<(u64, u64)> },
 }
 
-/// Plan giving the Caps Lock source back. Only a *confirmed* claim over a still
-/// live Caps Lock → F18 authorizes a write; every weaker state just lets go.
+/// Plan giving the Caps Lock source back. A write is authorized by a *confirmed*
+/// claim over a still live Caps Lock → F18 — or by a write-ahead whose planned
+/// list is exactly what is live, which is the same thing minus the lost confirm.
+/// Every weaker state lets go, except the one that cannot tell whose the live
+/// remap is.
 fn plan_clear(mut entries: Vec<(u64, u64)>, claim: Claim) -> ClearPlan {
+    let live = entries.contains(&(CAPS_USAGE, F18_USAGE));
     let displaced = match claim {
         Claim::Unowned => return ClearPlan::Unclaimed,
-        // Unattributable, so not ours to take back — see [`Claim::Pending`].
-        Claim::Pending(_) => return ClearPlan::DropClaim,
+        Claim::Pending(ahead) => {
+            if !live {
+                return ClearPlan::DropClaim;
+            }
+            if !ahead.matches(&entries) {
+                return ClearPlan::Unattributable;
+            }
+            ahead.displaced
+        }
         Claim::Held(displaced) => displaced,
     };
-    if !entries.contains(&(CAPS_USAGE, F18_USAGE)) {
+    if !live {
         return ClearPlan::DropClaim;
     }
     entries.retain(|&pair| pair != (CAPS_USAGE, F18_USAGE));
@@ -490,15 +582,41 @@ fn commit_entries(
     sys: &impl CapsMapSys,
     expected: &[(u64, u64)],
     entries: &[(u64, u64)],
-) -> Result<(), String> {
-    if sys.read_entries()? != expected {
-        return Err("hidutil key mappings changed while Tomari was updating them".into());
+) -> Result<(), CommitError> {
+    let live = sys.read_entries().map_err(CommitError::NotAttempted)?;
+    if live != expected {
+        return Err(CommitError::NotAttempted(
+            "hidutil key mappings changed while Tomari was updating them".into(),
+        ));
     }
-    sys.set_entries(entries)?;
-    if caps_source(&sys.read_entries()?) != caps_source(entries) {
-        return Err("the Caps Lock key mapping did not take the value Tomari wrote".into());
+    sys.set_entries(entries).map_err(CommitError::Uncertain)?;
+    let after = sys.read_entries().map_err(CommitError::Uncertain)?;
+    if caps_source(&after) != caps_source(entries) {
+        return Err(CommitError::Uncertain(
+            "the Caps Lock key mapping did not take the value Tomari wrote".into(),
+        ));
     }
     Ok(())
+}
+
+/// How a [`commit_entries`] failed — split by whether the write was ever handed
+/// to the OS, because a write-ahead left behind has to be treated differently in
+/// each case (see [`retract_write_ahead`]).
+#[derive(Debug, PartialEq, Eq)]
+enum CommitError {
+    /// Failed before `hidutil --set` ran: the list is exactly as it was.
+    NotAttempted(String),
+    /// `hidutil --set` ran, or may have; whether it took effect is not known
+    /// from the error alone.
+    Uncertain(String),
+}
+
+impl CommitError {
+    fn into_message(self) -> String {
+        match self {
+            Self::NotAttempted(m) | Self::Uncertain(m) => m,
+        }
+    }
 }
 
 /// The destination on the Caps Lock source, if any. Both plans leave at most one
@@ -514,13 +632,14 @@ fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
     let live = sys.read_entries()?;
     match plan_apply(live.clone(), sys.read_claim()?) {
         ApplyPlan::AlreadyInEffect => Ok(()),
-        ApplyPlan::Disown => {
-            tracing::warn!(
-                "an unconfirmed caps-lock claim is being given up; the live Caps Lock → F18 \
-                 mapping will be left in place rather than removed later"
+        ApplyPlan::Confirm { displaced } => {
+            tracing::info!(
+                "the live key mappings are exactly what an unconfirmed caps-lock claim set out \
+                 to write; confirming it"
             );
-            sys.clear_claim()
+            sys.write_claim(Claim::Held(displaced))
         }
+        ApplyPlan::Unattributable => Err(UNATTRIBUTABLE.into()),
         // Write-ahead, then confirm: what we are about to overwrite has to be
         // recorded before it is gone, or nothing could ever put it back, and the
         // record must not read as *held* until the OS write has actually landed.
@@ -528,12 +647,55 @@ fn apply_with(sys: &impl CapsMapSys) -> Result<(), String> {
         // the user's mapping — `reconcile` then reports it inactive, which
         // surfaces as the `capsLockRemap` warning.
         ApplyPlan::Take { entries, displaced } => {
-            sys.write_claim(Claim::Pending(displaced))?;
-            commit_entries(sys, &live, &entries)?;
+            sys.write_claim(Claim::Pending(WriteAhead {
+                displaced,
+                planned: Some(entries.clone()),
+            }))?;
+            if let Err(e) = commit_entries(sys, &live, &entries) {
+                retract_write_ahead(sys, &e);
+                return Err(e.into_message());
+            }
             sys.write_claim(Claim::Held(displaced))
         }
     }
 }
+
+/// After a failed commit, drop the write-ahead whenever it is certain nothing of
+/// ours reached the OS. A write-ahead kept past that would still name a plan,
+/// and a list the user later sets that happens to equal it (a lone
+/// Caps Lock → F18, say) would read as ours to take back.
+///
+/// * The write was never attempted: retract unconditionally. Whatever is live —
+///   even our exact plan, set by someone else in the race the pre-check caught —
+///   is not ours.
+/// * The write was attempted: retract only if our entry is not live *right
+///   now*, in the same reconcile, before anyone else could have put it there.
+///   When it is live the write plausibly landed, so the write-ahead stays for the
+///   next reconcile to attribute; when the list cannot be read at all, it stays
+///   too — not knowing is not the same as nothing having landed.
+///
+/// Best effort: the commit has already failed, so a retraction that fails as
+/// well is logged and the write-ahead simply remains.
+fn retract_write_ahead(sys: &impl CapsMapSys, failure: &CommitError) {
+    let nothing_landed = match failure {
+        CommitError::NotAttempted(_) => true,
+        CommitError::Uncertain(_) => match sys.read_entries() {
+            Ok(now) => !now.contains(&(CAPS_USAGE, F18_USAGE)),
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot tell whether the caps-lock write landed; keeping the write-ahead");
+                false
+            }
+        },
+    };
+    if nothing_landed && let Err(e) = sys.clear_claim() {
+        tracing::warn!(error = %e, "could not retract a caps-lock write-ahead whose write did not land");
+    }
+}
+
+/// Why a reconcile over a live Caps Lock → F18 under an unconfirmed claim does
+/// nothing: it cannot be told apart from one the user set.
+const UNATTRIBUTABLE: &str = "a Caps Lock → F18 key mapping is live under an unconfirmed \
+     claim, in a list Tomari did not write; leaving it and the claim in place";
 
 fn clear_with(sys: &impl CapsMapSys) -> Result<(), String> {
     let live = sys.read_entries()?;
@@ -542,11 +704,12 @@ fn clear_with(sys: &impl CapsMapSys) -> Result<(), String> {
     match plan_clear(live.clone(), sys.read_claim()?) {
         ClearPlan::Unclaimed => Ok(()),
         ClearPlan::DropClaim => sys.clear_claim(),
+        ClearPlan::Unattributable => Err(UNATTRIBUTABLE.into()),
         // The list first, the claim second: releasing the claim while our entry
         // is still live would orphan it — no later clear would recognize it as
         // ours. The reverse order merely leaves a claim the next clear drops.
         ClearPlan::Release { entries } => {
-            commit_entries(sys, &live, &entries)?;
+            commit_entries(sys, &live, &entries).map_err(CommitError::into_message)?;
             sys.clear_claim()
         }
     }
@@ -685,6 +848,9 @@ mod tests {
         set_lands_as: RefCell<Option<Vec<(u64, u64)>>>,
         /// How many times the entry list was written.
         writes: RefCell<usize>,
+        /// Reads still allowed before the list becomes unreadable — a `hidutil`
+        /// that stops answering part-way through a reconcile.
+        fail_reads_after: RefCell<Option<usize>>,
     }
 
     impl FakeSys {
@@ -700,6 +866,7 @@ mod tests {
                 steal_after_read: RefCell::new(None),
                 set_lands_as: RefCell::new(None),
                 writes: RefCell::new(0),
+                fail_reads_after: RefCell::new(None),
             }
         }
 
@@ -720,7 +887,16 @@ mod tests {
         }
 
         fn claim(&self) -> Claim {
-            *self.claim.borrow()
+            self.claim.borrow().clone()
+        }
+
+        /// A write-ahead that recorded `planned` as the list it was about to
+        /// write, having displaced `displaced`.
+        fn pending(displaced: Option<u64>, planned: &[(u64, u64)]) -> Claim {
+            Claim::Pending(WriteAhead {
+                displaced,
+                planned: Some(planned.to_vec()),
+            })
         }
 
         fn writes(&self) -> usize {
@@ -730,6 +906,12 @@ mod tests {
 
     impl CapsMapSys for FakeSys {
         fn read_entries(&self) -> Result<Vec<(u64, u64)>, String> {
+            if let Some(left) = self.fail_reads_after.borrow_mut().as_mut() {
+                if *left == 0 {
+                    return Err("hidutil stopped answering".into());
+                }
+                *left -= 1;
+            }
             let live = self.entries.borrow().clone();
             if let Some(stolen) = self.steal_after_read.borrow_mut().take() {
                 *self.entries.borrow_mut() = Ok(stolen);
@@ -918,17 +1100,36 @@ mod tests {
 
     #[test]
     fn claim_records_round_trip() {
-        assert_eq!(serialize_claim(Claim::Unowned), None);
+        assert_eq!(serialize_claim(&Claim::Unowned), None);
         for claim in [
-            Claim::Pending(None),
-            Claim::Pending(Some(USER_CAPS_DST)),
+            FakeSys::pending(None, &[]),
+            FakeSys::pending(None, &[(CAPS_USAGE, F18_USAGE)]),
+            FakeSys::pending(
+                Some(USER_CAPS_DST),
+                &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+            ),
             Claim::Held(None),
             Claim::Held(Some(USER_CAPS_DST)),
         ] {
-            let text = serialize_claim(claim).expect("an owning claim has a record");
-            assert_eq!(parse_claim(&text), Ok(claim));
+            let text = serialize_claim(&claim).expect("an owning claim has a record");
+            assert_eq!(parse_claim(&text), Ok(claim.clone()));
             // Trailing whitespace from an editor or a partial flush is fine.
             assert_eq!(parse_claim(&format!("{text}\n")), Ok(claim));
+        }
+    }
+
+    #[test]
+    fn a_pending_record_without_a_plan_still_parses_but_never_attributes() {
+        // Records from before the plan was written down: still a claim, never
+        // evidence that any live list is ours.
+        for text in ["pending", &format!("pending {USER_CAPS_DST}")] {
+            let claim = parse_claim(text).unwrap();
+            let Claim::Pending(ahead) = &claim else {
+                panic!("{text:?} must parse as pending, got {claim:?}");
+            };
+            assert_eq!(ahead.planned, None);
+            assert!(!ahead.matches(&[(CAPS_USAGE, F18_USAGE)]));
+            assert!(!ahead.matches(&[]));
         }
     }
 
@@ -937,9 +1138,35 @@ mod tests {
         // Never a *weaker* claim than what was recorded: reading `held 41` as
         // "held nothing" would delete a mapping we owed the user back, and
         // reading it as unowned would strand our own remap.
-        for text in ["", "  ", "owned", "held 0xzz", "held 1 2", "41"] {
+        for text in [
+            "",
+            "  ",
+            "owned",
+            "held 0xzz",
+            "held 1 2",
+            "41",
+            "held plan 1:2",
+            "pending plan 1",
+            "pending plan 1:x",
+            "pending 41 41",
+        ] {
             assert!(parse_claim(text).is_err(), "{text:?} must not parse");
         }
+    }
+
+    #[test]
+    fn a_write_ahead_matches_its_planned_list_in_any_order() {
+        let ahead = WriteAhead {
+            displaced: None,
+            planned: Some(vec![(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)]),
+        };
+        assert!(ahead.matches(&[(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)]));
+        assert!(!ahead.matches(&[(CAPS_USAGE, F18_USAGE)]));
+        assert!(!ahead.matches(&[
+            (CAPS_USAGE, F18_USAGE),
+            (OTHER_SRC, OTHER_DST),
+            (OTHER_DST, OTHER_SRC)
+        ]));
     }
 
     #[test]
@@ -988,24 +1215,96 @@ mod tests {
     fn apply_confirms_the_claim_only_after_the_os_write_lands() {
         // The record must not read as *held* while the write it describes has
         // not happened: a crash in between would leave a live Caps → Escape
-        // looking like a mapping of ours to take back.
+        // looking like a mapping of ours to take back. And once the write is
+        // known to have failed — our entry is not live — the write-ahead is
+        // retracted, so nothing is claimed over a list we never changed.
         let sys = FakeSys {
             can_set: false,
             ..FakeSys::new(&[(CAPS_USAGE, USER_CAPS_DST)])
         };
         assert!(apply_with(&sys).is_err());
-        assert_eq!(sys.claim(), Claim::Pending(Some(USER_CAPS_DST)));
+        assert_eq!(sys.claim(), Claim::Unowned);
+        assert_eq!(sys.entries(), vec![(CAPS_USAGE, USER_CAPS_DST)]);
     }
 
     #[test]
-    fn apply_gives_up_an_unconfirmed_claim_over_a_live_remap() {
-        // Codex's scenario: our OS write failed, the user then mapped Caps → F18
-        // themselves. Which of us set the live entry is unknowable, so the claim
-        // is dropped — and the entry left strictly alone.
-        let sys =
-            FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(Claim::Pending(Some(USER_CAPS_DST)));
-        apply_with(&sys).unwrap();
+    fn a_failed_write_does_not_claim_an_identical_list_the_user_sets_later() {
+        // Codex's scenario: `hidutil --set` failed, then the user set exactly the
+        // list we had planned (a lone Caps → F18). Had the write-ahead survived
+        // the failure, its plan would now match and the entry would be "ours" to
+        // remove on off. It did not survive, so the entry is the user's.
+        let sys = FakeSys {
+            can_set: false,
+            ..FakeSys::new(&[])
+        };
+        assert!(apply_with(&sys).is_err());
+        let sys = FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(sys.claim());
+        clear_with(&sys).unwrap();
+        assert_eq!(sys.entries(), vec![(CAPS_USAGE, F18_USAGE)]);
+        assert_eq!(sys.writes(), 0);
+    }
+
+    #[test]
+    fn a_write_never_attempted_is_retracted_even_if_our_plan_is_now_live() {
+        // The pre-check caught someone else's write landing between our read and
+        // ours — and what they wrote happens to be exactly our plan. We never
+        // ran `hidutil --set`, so it is theirs: the write-ahead must go, or the
+        // next reconcile would confirm their mapping as ours.
+        let sys = FakeSys::new(&[]);
+        *sys.steal_after_read.borrow_mut() = Some(vec![(CAPS_USAGE, F18_USAGE)]);
+        assert!(apply_with(&sys).is_err());
+        assert_eq!(sys.writes(), 0);
         assert_eq!(sys.claim(), Claim::Unowned);
+        assert_eq!(sys.entries(), vec![(CAPS_USAGE, F18_USAGE)]);
+    }
+
+    #[test]
+    fn a_write_ahead_is_kept_when_the_write_may_have_landed() {
+        // The post-write read failed: our entry may well be live. Retracting
+        // now would orphan it, so the write-ahead stays for the next reconcile.
+        let sys = FakeSys::new(&[]);
+        *sys.fail_reads_after.borrow_mut() = Some(2);
+        assert!(apply_with(&sys).is_err());
+        assert!(sys.entries().contains(&(CAPS_USAGE, F18_USAGE)));
+        assert!(matches!(sys.claim(), Claim::Pending(_)));
+    }
+
+    #[test]
+    fn apply_confirms_an_unconfirmed_claim_whose_planned_list_is_live() {
+        // The OS write landed and only the confirm was lost: the live list is
+        // exactly what the write-ahead set out to write, so it is ours, and the
+        // claim is completed — displacement included — without another write.
+        let sys = FakeSys::new(&[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)]).claiming(
+            FakeSys::pending(
+                Some(USER_CAPS_DST),
+                &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+            ),
+        );
+        apply_with(&sys).unwrap();
+        assert_eq!(sys.claim(), Claim::Held(Some(USER_CAPS_DST)));
+        assert_eq!(sys.writes(), 0);
+    }
+
+    #[test]
+    fn apply_keeps_an_unconfirmed_claim_it_cannot_attribute() {
+        // Codex's scenario: our OS write failed, the user then mapped Caps → F18
+        // themselves — so the live list is not the one we planned. Which of us
+        // set the live entry is unknowable. The entry is left strictly alone,
+        // and so is the claim: dropping it would turn this into "the user's
+        // mapping" with the warning gone, and a later quit would leave Caps Lock
+        // stuck on F18 with nothing to say why.
+        let sys = FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(FakeSys::pending(
+            Some(USER_CAPS_DST),
+            &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+        ));
+        assert!(apply_with(&sys).is_err());
+        assert_eq!(
+            sys.claim(),
+            FakeSys::pending(
+                Some(USER_CAPS_DST),
+                &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)]
+            )
+        );
         assert_eq!(sys.writes(), 0);
         assert_eq!(sys.entries(), vec![(CAPS_USAGE, F18_USAGE)]);
     }
@@ -1024,14 +1323,109 @@ mod tests {
     }
 
     #[test]
-    fn clear_gives_up_an_unconfirmed_claim_without_touching_the_list() {
-        // Same unattributable state reached from the release direction.
-        let sys =
-            FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(Claim::Pending(Some(USER_CAPS_DST)));
+    fn clear_restores_through_an_unconfirmed_claim_whose_planned_list_is_live() {
+        // Off (or quit) straight from the lost-confirm state: the live list is
+        // the one we wrote, so the remap is ours to take back, and the mapping
+        // it displaced comes back with it.
+        let sys = FakeSys::new(&[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)]).claiming(
+            FakeSys::pending(
+                Some(USER_CAPS_DST),
+                &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+            ),
+        );
+        clear_with(&sys).unwrap();
+        assert_eq!(sys.claim(), Claim::Unowned);
+        assert_eq!(
+            sys.entries(),
+            vec![(OTHER_SRC, OTHER_DST), (CAPS_USAGE, USER_CAPS_DST)]
+        );
+    }
+
+    #[test]
+    fn clear_keeps_an_unconfirmed_claim_it_cannot_attribute() {
+        // Same unattributable state reached from the release direction: the
+        // list is untouched, and the claim stays so the state keeps being
+        // reported rather than silently becoming "the user's own".
+        let sys = FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(FakeSys::pending(
+            Some(USER_CAPS_DST),
+            &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+        ));
+        assert!(clear_with(&sys).is_err());
+        assert!(matches!(sys.claim(), Claim::Pending(_)));
+        assert_eq!(sys.writes(), 0);
+        assert_eq!(sys.entries(), vec![(CAPS_USAGE, F18_USAGE)]);
+    }
+
+    #[test]
+    fn clear_drops_an_unconfirmed_claim_when_our_entry_is_not_live() {
+        // The write never landed (or was undone since): nothing to restore, and
+        // the write-ahead has nothing left to say.
+        let sys = FakeSys::new(&[(CAPS_USAGE, USER_CAPS_DST)]).claiming(FakeSys::pending(
+            Some(USER_CAPS_DST),
+            &[(CAPS_USAGE, F18_USAGE)],
+        ));
         clear_with(&sys).unwrap();
         assert_eq!(sys.claim(), Claim::Unowned);
         assert_eq!(sys.writes(), 0);
-        assert_eq!(sys.entries(), vec![(CAPS_USAGE, F18_USAGE)]);
+    }
+
+    #[test]
+    fn a_lost_confirm_is_repaired_on_the_next_reconcile_and_released_on_off() {
+        // The whole sequence: the OS write lands but the confirm fails; the
+        // reconcile reports degraded and the remap stays live for the tap. The
+        // next reconcile (a relaunch, say) finds the planned list live, confirms
+        // the claim, and reports clean. Turning management off then hands the
+        // source back — displaced mapping restored — as if nothing had failed.
+        let sys = FakeSys::new(&[(CAPS_USAGE, USER_CAPS_DST), (OTHER_SRC, OTHER_DST)]);
+        *sys.claim_writes_left.borrow_mut() = Some(1);
+        assert_eq!(
+            reconcile_with(&sys, true),
+            ReconcileOutcome {
+                proxy_active: true,
+                reconciled: false,
+            }
+        );
+        assert!(matches!(sys.claim(), Claim::Pending(_)));
+
+        *sys.claim_writes_left.borrow_mut() = None;
+        assert_eq!(
+            reconcile_with(&sys, true),
+            ReconcileOutcome {
+                proxy_active: true,
+                reconciled: true,
+            }
+        );
+        assert_eq!(sys.claim(), Claim::Held(Some(USER_CAPS_DST)));
+
+        assert_eq!(
+            reconcile_with(&sys, false),
+            ReconcileOutcome {
+                proxy_active: false,
+                reconciled: true,
+            }
+        );
+        assert_eq!(sys.claim(), Claim::Unowned);
+        assert_eq!(
+            sys.entries(),
+            vec![(OTHER_SRC, OTHER_DST), (CAPS_USAGE, USER_CAPS_DST)]
+        );
+    }
+
+    #[test]
+    fn an_unattributable_remap_keeps_reporting_degraded_but_keeps_the_tap_in_step() {
+        // The unresolved state must neither vanish from the UI nor leave the
+        // tap treating F18 as a real key while Caps Lock is live on it.
+        let sys = FakeSys::new(&[(CAPS_USAGE, F18_USAGE)]).claiming(FakeSys::pending(
+            None,
+            &[(OTHER_SRC, OTHER_DST), (CAPS_USAGE, F18_USAGE)],
+        ));
+        for should_manage in [true, false, true] {
+            let outcome = reconcile_with(&sys, should_manage);
+            assert!(!outcome.reconciled);
+            assert!(outcome.proxy_active);
+        }
+        assert!(matches!(sys.claim(), Claim::Pending(_)));
+        assert_eq!(sys.writes(), 0);
     }
 
     #[test]
@@ -1191,6 +1585,7 @@ mod tests {
         assert!(apply_with(&sys).is_err());
         assert_eq!(sys.writes(), 0);
         assert_eq!(sys.entries(), vec![(CAPS_USAGE, USER_CAPS_DST)]);
+        assert_eq!(sys.claim(), Claim::Unowned);
     }
 
     #[test]
@@ -1200,7 +1595,8 @@ mod tests {
         let sys = FakeSys::new(&[]);
         *sys.set_lands_as.borrow_mut() = Some(vec![(OTHER_SRC, OTHER_DST)]);
         assert!(apply_with(&sys).is_err());
-        assert_eq!(sys.claim(), Claim::Pending(None));
+        // Our entry is not live, so nothing is claimed either.
+        assert_eq!(sys.claim(), Claim::Unowned);
     }
 
     #[test]
@@ -1298,7 +1694,10 @@ mod tests {
             }
         );
         assert!(sys.entries().contains(&(CAPS_USAGE, F18_USAGE)));
-        assert_eq!(sys.claim(), Claim::Pending(None));
+        assert_eq!(
+            sys.claim(),
+            FakeSys::pending(None, &[(CAPS_USAGE, F18_USAGE)])
+        );
     }
 
     #[test]
