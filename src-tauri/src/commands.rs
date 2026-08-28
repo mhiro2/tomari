@@ -1022,6 +1022,13 @@ pub fn retry_keep_awake_transition(app: AppHandle) -> crate::keepawake::KeepAwak
     crate::keepawake::retry(&app)
 }
 
+/// Leave a lid-close override found at launch in place (see
+/// `KeepAwakeNotice::LeftoverOverride`) and forget the marker that pointed at it.
+#[tauri::command]
+pub fn dismiss_keep_awake_recovery(app: AppHandle) -> crate::keepawake::KeepAwakeStatus {
+    crate::keepawake::dismiss_leftover(&app)
+}
+
 /// Whether menu bar tidying is on and, if so, whether it is collapsed right
 /// now — for the panel to render on open.
 #[tauri::command]

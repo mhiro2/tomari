@@ -50,6 +50,7 @@ export async function installDevPreview() {
     batteryPercent: 86,
     kernelSleepDisabled: false,
     ownsLidClose: false,
+    leftoverUndecided: false,
     longRunningProcesses: [
       { pid: 4218, name: 'codex', elapsedSecs: 1_942 },
       { pid: 4330, name: 'cargo', elapsedSecs: 694 },

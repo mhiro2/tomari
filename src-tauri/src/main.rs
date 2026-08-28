@@ -168,6 +168,7 @@ fn main() {
             commands::configure_keep_awake,
             commands::cancel_keep_awake_transition,
             commands::retry_keep_awake_transition,
+            commands::dismiss_keep_awake_recovery,
             commands::get_menu_bar,
             commands::list_menu_bar_items,
             commands::move_menu_bar_item,
@@ -243,9 +244,14 @@ fn main() {
             #[cfg(target_os = "macos")]
             wake::install(&handle);
 
-            // Keep-awake never persists as "on", so clear any lid-close sleep
-            // override a previous run left behind after an unclean exit.
+            // Keep-awake never persists as "on". A lid-close sleep override a
+            // previous run left behind after an unclean exit is not cleared
+            // here on the marker's evidence alone — it is surfaced for the
+            // user to decide (see `keepawake::reconcile_on_launch`).
             keepawake::reconcile_on_launch(&handle);
+            // The tray was built before the reconcile ran; rebuild it so a
+            // leftover override's undecided state disables the item at once.
+            tray::refresh(&handle);
             keepawake::start_monitor(&handle);
 
             // Put the menu bar divider back if tidying is switched on. Always

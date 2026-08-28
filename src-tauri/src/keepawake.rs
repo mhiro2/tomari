@@ -114,6 +114,13 @@ pub struct KeepAwake {
     notice: Option<KeepAwakeNotice>,
     /// Target of the last failed transition, used by the explicit retry action.
     retry_target: Option<bool>,
+    /// A launch found the previous run's failsafe marker with the lid-close
+    /// override still set (or unreadable) and the user has not yet said whether
+    /// it is Tomari's to clear. While set, the override is not cleared by exit,
+    /// and the ordinary on/off paths (panel, tray, hotkey) are refused: any of
+    /// them would end in a clear justified by the marker alone. Cleared by the
+    /// two decisions — Retry (clear it) or dismiss (leave it, drop the marker).
+    leftover_undecided: bool,
     /// Whether a safety guard has already driven an automatic turn-off for this
     /// session, so each session gets one automatic attempt: the clear needs an
     /// administrator prompt that can be declined, and re-deciding every tick
@@ -150,6 +157,7 @@ impl Default for KeepAwake {
             options: KeepAwakeOptions::default(),
             notice: None,
             retry_target: None,
+            leftover_undecided: false,
             auto_off_attempted: false,
             power_source: PowerSource::Unknown,
             battery_percent: None,
@@ -220,6 +228,13 @@ pub enum KeepAwakeNotice {
     /// and clearing it again could not be confirmed either: the Mac may be unable
     /// to sleep although keep-awake shows off. Retry clears it.
     LidCloseUnconfirmed,
+    /// At launch, the previous run's failsafe marker was found with the
+    /// lid-close override still set. The marker says a previous run *may* have
+    /// left it; the kernel flag records no provenance, so it may equally be the
+    /// user's or another tool's since. Nothing is cleared on that evidence
+    /// alone: the user decides — Retry clears it, dismissing keeps it and
+    /// forgets the marker.
+    LeftoverOverride,
 }
 
 /// Who set the live `disablesleep` override, as far as Tomari can tell. The
@@ -286,6 +301,9 @@ pub struct KeepAwakeStatus {
     pub battery_percent: Option<u8>,
     pub kernel_sleep_disabled: Option<bool>,
     pub owns_lid_close: bool,
+    /// See `KeepAwake::leftover_undecided`: a decision about a leftover override
+    /// is pending, and only the two recovery actions are accepted.
+    pub leftover_undecided: bool,
     pub long_running_processes: Vec<LongRunningProcess>,
     /// See [`KeepAwake::revision`]. Ordering stamp, not a value to render.
     pub revision: u64,
@@ -313,6 +331,7 @@ fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
         battery_percent: k.battery_percent,
         kernel_sleep_disabled: k.kernel_sleep_disabled,
         owns_lid_close: k.ownership.may_own(),
+        leftover_undecided: k.leftover_undecided,
         long_running_processes: k.long_running_processes.clone(),
         revision: k.revision,
     }
@@ -324,6 +343,16 @@ pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) ->
     {
         let mut k = state.keep_awake.lock_safe();
         if k.phase.is_pending() {
+            return status_from(&k);
+        }
+        // A leftover override awaits the user's decision: an ordinary on or off
+        // from here — the panel's Start, the tray item, a hotkey — would end in
+        // a clear justified by nothing but the old marker. Only the two
+        // recovery actions move the state on.
+        if k.leftover_undecided {
+            tracing::debug!(
+                "keep-awake toggle refused: a leftover lid-close override is undecided"
+            );
             return status_from(&k);
         }
         if let Some(options) = options {
@@ -421,6 +450,9 @@ fn recover_lid_close(app: &AppHandle) -> KeepAwakeStatus {
         k.phase = KeepAwakePhase::Disabling;
         k.notice = None;
         k.retry_target = None;
+        // The user chose to clear it: from here the override is ours to
+        // finish clearing, on off and at exit included.
+        k.leftover_undecided = false;
         k.generation
     };
     #[cfg(target_os = "macos")]
@@ -820,8 +852,10 @@ enum ReconcileAction {
     /// Marker but the override is already gone (e.g. a reboot cleared it);
     /// just drop the stale marker.
     RemoveMarker,
-    /// Marker and the override is still set after an unclean exit; clear it.
-    ClearOverride,
+    /// Marker and the override is still set after an unclean exit. The marker
+    /// alone cannot say whose the override is now, so it is not cleared on that
+    /// evidence: the user is asked (see [`KeepAwakeNotice::LeftoverOverride`]).
+    AskUser,
 }
 
 fn reconcile_decision(marker_present: bool, sleep_disabled: Option<bool>) -> ReconcileAction {
@@ -829,7 +863,7 @@ fn reconcile_decision(marker_present: bool, sleep_disabled: Option<bool>) -> Rec
         (false, _) => ReconcileAction::Nothing,
         (true, None) => ReconcileAction::Keep,
         (true, Some(false)) => ReconcileAction::RemoveMarker,
-        (true, Some(true)) => ReconcileAction::ClearOverride,
+        (true, Some(true)) => ReconcileAction::AskUser,
     }
 }
 
@@ -1124,53 +1158,89 @@ fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, ownership: Ownership) -> Owne
     }
 }
 
-/// Clear a lid-close override left behind by a previous run that exited without
-/// cleaning up (a crash or a forced kill). Keep-awake never persists as "on",
-/// so at launch the intended state is always off: any override we still own
-/// must go. This is the one place an auth prompt can appear at launch, and only
-/// after an unclean exit with the override still set (a reboot clears it).
+/// Reconcile a lid-close override left behind by a previous run that exited
+/// without cleaning up (a crash or a forced kill). Keep-awake never persists as
+/// "on", so at launch the intended state is always off — but a leftover marker
+/// is not proof that the override still set is ours: the kernel flag records no
+/// provenance, and the user or another tool may have set it since. So nothing
+/// is cleared here on the marker's evidence alone (no auth prompt appears at
+/// launch); the override is carried into the runtime state as *possibly* ours
+/// and surfaced for the user to decide — Retry clears it, dismissing keeps it
+/// and drops the marker. A marker whose override is already gone (a reboot
+/// cleared it) is simply dropped.
 pub fn reconcile_on_launch(app: &AppHandle) {
     #[cfg(not(target_os = "macos"))]
     let _ = app;
     #[cfg(target_os = "macos")]
     {
-        let unresolved = match reconcile_decision(marker_exists(), read_sleep_disabled()) {
-            ReconcileAction::Nothing => false,
+        let notice = match reconcile_decision(marker_exists(), read_sleep_disabled()) {
+            ReconcileAction::Nothing => None,
             ReconcileAction::Keep => {
                 tracing::warn!(
                     "could not read sleep state at launch; keeping the keep-awake marker"
                 );
-                true
+                Some(KeepAwakeNotice::LidCloseUnconfirmed)
             }
             ReconcileAction::RemoveMarker => {
                 remove_marker();
-                false
+                None
             }
-            ReconcileAction::ClearOverride => {
-                tracing::warn!("clearing a leftover lid-close sleep override from a previous run");
-                // Goes through the same verified clear as exit-time cleanup rather
-                // than trusting `osascript`'s exit status. This is the last chance
-                // to recover a leaked override, so a setter that reports success
-                // without changing `SleepDisabled` must not take the marker with
-                // it — that would strand the Mac awake with no record left to
-                // recover from.
-                cleanup_lid_close_with(&RealSys::LAUNCHING, Ownership::Confirmed).may_own()
+            ReconcileAction::AskUser => {
+                tracing::warn!(
+                    "a previous run left its keep-awake marker with the lid-close sleep override                      still set; leaving it for the user to decide"
+                );
+                Some(KeepAwakeNotice::LeftoverOverride)
             }
         };
         // A marker that survives launch is an override we may still be holding.
         // Carry that into the runtime state — as *possibly* ours, since the
         // previous run's confirmation is gone with it — so a later engage does
-        // not mistake the set flag for someone else's, off and exit clear it,
-        // and the UI offers the retry instead of showing a clean off.
-        if unresolved {
+        // not mistake the set flag for someone else's, and the UI offers the
+        // decision instead of showing a clean off.
+        if let Some(notice) = notice {
             let state = app.state::<AppState>();
             let mut k = state.keep_awake.lock_safe();
             k.ownership = Ownership::PossiblyOwned;
             k.phase = KeepAwakePhase::Failed;
-            k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+            k.notice = Some(notice);
             k.retry_target = Some(false);
+            k.leftover_undecided = true;
         }
     }
+}
+
+/// The user chose to leave a leftover lid-close override in place (see
+/// [`KeepAwakeNotice::LeftoverOverride`]): it is not ours to clear any more.
+/// Drops the marker so the next launch does not ask again — verified gone
+/// before the state is committed, since a marker left behind would make exit
+/// clear the override after all — and returns keep-awake to a clean off. A
+/// no-op unless that decision is pending.
+pub fn dismiss_leftover(app: &AppHandle) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    {
+        let mut k = state.keep_awake.lock_safe();
+        if !k.leftover_undecided {
+            return status_from(&k);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            remove_marker();
+            if marker_exists() {
+                tracing::warn!(
+                    "could not drop the keep-awake marker; the leftover lid-close override stays                      undecided"
+                );
+                return status_from(&k);
+            }
+        }
+        k.ownership = Ownership::Unowned;
+        k.phase = KeepAwakePhase::Off;
+        k.notice = None;
+        k.retry_target = None;
+        k.leftover_undecided = false;
+    }
+    tracing::info!("leftover lid-close sleep override left in place at the user's request");
+    notify(app);
+    status(state.inner())
 }
 
 /// Release everything before the process exits. Runs synchronously from the
@@ -1230,7 +1300,20 @@ pub fn cleanup_blocking(app: &AppHandle) {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
-        let ownership = state.keep_awake.lock_safe().ownership;
+        let (ownership, undecided) = {
+            let k = state.keep_awake.lock_safe();
+            (k.ownership, k.leftover_undecided)
+        };
+        if undecided {
+            // The override found at launch was never attributed to us and the
+            // user has not decided; clearing it on exit would act on the very
+            // evidence launch declined to act on. Keep the marker so the next
+            // launch asks again.
+            tracing::info!(
+                "leaving an unattributed lid-close sleep override in place at exit; the next launch                  will ask again"
+            );
+            return;
+        }
         let remaining = cleanup_lid_close_with(&RealSys::EXITING, ownership);
         if remaining != ownership {
             state.keep_awake.lock_safe().ownership = remaining;
@@ -1398,13 +1481,11 @@ impl RealSys {
     const INTERACTIVE: Self = Self {
         auth_deadline: None,
     };
-    /// Bounded, for quit / logout / the updater's relaunch.
+    /// Bounded, for quit / logout / the updater's relaunch. (The launch
+    /// reconcile shows no dialog at all: it clears nothing on the marker's
+    /// evidence alone and leaves the decision to the user.)
     const EXITING: Self = Self {
         auth_deadline: Some(EXIT_AUTH_DEADLINE),
-    };
-    /// Bounded more generously, for the launch reconcile in `setup`.
-    const LAUNCHING: Self = Self {
-        auth_deadline: Some(LAUNCH_AUTH_DEADLINE),
     };
 }
 
@@ -1419,13 +1500,6 @@ const EXIT_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1
 /// the clear.
 #[cfg(target_os = "macos")]
 const EXIT_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// How long the launch reconcile waits on its administrator dialog. It runs in
-/// `setup`, so an unattended login-item launch — or the updater's relaunch —
-/// must not sit behind a dialog forever; past this the override is carried into
-/// the runtime state as unresolved and the UI offers the retry.
-#[cfg(target_os = "macos")]
-const LAUNCH_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long a `pmset -g` / `pmset -g batt` / `ps` read may take. None of them
 /// needs user input, so a read that takes longer is a stuck process, not a slow
@@ -2005,11 +2079,13 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_leftover_override_is_cleared() {
-        // Unclean exit: our marker and the override both remain.
+    fn reconcile_leftover_override_asks_the_user_instead_of_clearing() {
+        // Unclean exit: our marker and the override both remain. The marker
+        // says we *may* have set it; the flag cannot say whether it is still
+        // ours, so it is not cleared on that evidence — the user decides.
         assert_eq!(
             reconcile_decision(true, Some(true)),
-            ReconcileAction::ClearOverride
+            ReconcileAction::AskUser
         );
     }
 

@@ -216,9 +216,15 @@ closed. The System state section separately reports the real kernel
 either value from the switch.
 
 The state lasts **only for the current session**: Tomari always starts with
-Prevent Sleep off. Even if the app crashes while it is on, a consistency check at
-launch and cleanup at exit reliably clear `disablesleep`, so you are never left
-in a "won't sleep" state.
+Prevent Sleep off, and cleanup at exit clears `disablesleep`. If the app crashed
+while it was on, the next launch finds the failsafe record it left and shows a
+notice in the Session view — but it does not clear the setting on its own,
+because by then the setting could just as well have been turned on by you or by
+another app. You choose: **Turn sleep back on** clears it (an administrator
+prompt appears), **Leave it as it is** keeps it and forgets the record. Until
+you choose, Prevent Sleep cannot be started from the panel, the tray or a
+hotkey, and quitting leaves the setting untouched so the question is asked
+again next time.
 
 Running with the lid closed increases battery drain and heat, so keeping the
 machine plugged in is recommended.

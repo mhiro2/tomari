@@ -124,6 +124,10 @@ export const cancelKeepAwakeTransition = (): Promise<KeepAwakeStatus> =>
 
 export const retryKeepAwakeTransition = (): Promise<KeepAwakeStatus> =>
   invoke('retry_keep_awake_transition');
+// Leave a lid-close override found at launch in place and forget the marker
+// that pointed at it (the `leftoverOverride` notice).
+export const dismissKeepAwakeRecovery = (): Promise<KeepAwakeStatus> =>
+  invoke('dismiss_keep_awake_recovery');
 
 // Whether menu bar tidying is on and, if so, whether it is collapsed.
 export const getMenuBar = (): Promise<MenuBarStatus> => invoke('get_menu_bar');

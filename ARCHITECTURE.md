@@ -756,9 +756,10 @@ and retry intact — never as a spurious "on", and cancelling it returns to that
 same unresolved state rather than reversing into an enable. A possibly-owned override is never
 mistaken for a foreign one afterwards: reading it set leaves it possibly ours
 (consistent with our enable, not proof of it), and off and exit clear it. A
-marker that survives `reconcile_on_launch` (unreadable state, or a clear that
-could not be confirmed) is carried into the runtime state the same way, so the
-new run offers the retry rather than showing a clean off. Turning off is deferred to the
+marker that survives `reconcile_on_launch` (unreadable state, or an override
+still set that the marker alone cannot attribute) is carried into the runtime
+state the same way, so the new run offers the decision rather than showing a
+clean off. Turning off is deferred to the
 worker: clearing the override needs an admin dialog that can be declined, and
 sleep is still prevented until it succeeds, so a declined clear keeps keep-awake
 on. The exported state machine distinguishes `off`, `enabling`, `on`,
@@ -810,8 +811,8 @@ neither of which can edit the deadline — never dead-end on a stale one. The
 frontend derives its countdown from the backend deadline and mirrors the options
 the backend reports back, so it never enforces or resurrects a deadline itself.
 
-Both recovery paths — `reconcile_on_launch` and exit-time `cleanup_blocking` —
-clear through the same verified `cleanup_lid_close_with`, so a setter reporting
+Every clear — the user-confirmed recovery and exit-time `cleanup_blocking` —
+goes through the same verified `cleanup_lid_close_with`, so a setter reporting
 success without moving the kernel flag never takes the marker with it. Shutdown
 also terminates an administrator prompt a worker left on screen before waiting
 on `LID_OP_LOCK`, so a quit or an updater restart cannot block on a dialog for
@@ -822,23 +823,35 @@ next), giving up after `EXIT_LOCK_DEADLINE` (10 s) and leaving the override to
 the marker rather than clearing it unserialized. The clear's own administrator
 dialog is given `EXIT_AUTH_DEADLINE` (10 s), after which the `osascript` is
 killed and reaped and the clear counted as not applied; an interactive worker
-that notices shutdown has begun switches to the same bound. every child that only
+that notices shutdown has begun switches to the same bound. Every child that only
 reads — `pmset -g`, `pmset -g batt`, the `ps` scan — runs under `READ_DEADLINE`
 (5 s), since none needs user input, so one hung child can neither stall exit nor
 stop the safety monitor for good. The kernel
 flag is read as always, so an override still set keeps its marker and ownership
-and the next launch recovers it; the process is never held hostage to a dialog
-nobody is there to answer. The launch reconcile — it runs in `setup`, possibly
-unattended — has `LAUNCH_AUTH_DEADLINE` (30 s) and hands an unanswered dialog to
-the unresolved state and its retry. Only the interactive toggles wait on the
-user, who has Cancel.
+and the next launch surfaces it; the process is never held hostage to a dialog
+nobody is there to answer. The launch reconcile runs in `setup`, possibly
+unattended, and therefore shows no dialog at all. Only the interactive toggles
+and the user-confirmed recovery wait on the user, who has Cancel.
 
 Because `disablesleep` survives a crash, a marker file under the data directory
-records that _we_ engaged it. `reconcile_on_launch` (from `setup`) clears a
-leftover override — only one we set, never a user's own `disablesleep` — and
+records that _we_ engaged it. But the marker is write-ahead evidence that we
+_may_ have left the override, not proof that the one set now is still ours: the
+kernel flag records no provenance, and the user or another tool may have set it
+since the crash. So `reconcile_on_launch` (from `setup`) clears nothing on the
+marker alone. A marker whose override is already gone (a reboot cleared it) is
+dropped; a marker with the override still set is surfaced as the
+`leftoverOverride` notice, and the user decides — "turn sleep back on" runs the
+verified clear (with its admin prompt), "leave it as it is" drops the marker and
+returns keep-awake to a clean off (verified gone before the state commits).
+Until that decision (`leftover_undecided`), exit leaves the override alone and
+keeps the marker so the next launch asks again, and the ordinary on/off paths —
+panel, tray item, hotkey — are refused, since any of them would end in a clear
+justified by the marker alone. An unreadable sleep state at launch with a marker
+present is handled the same way under the `lidCloseUnconfirmed` notice.
 `cleanup_blocking` (from `RunEvent::ExitRequested`, covering tray Quit, updater
-relaunch and logout alike) releases everything before the process exits. The
-pure `reconcile_decision` is unit-tested; the IOKit / `pmset` layer stays thin.
+relaunch and logout alike) otherwise releases everything before the process
+exits. The pure `reconcile_decision` is unit-tested; the IOKit / `pmset` layer
+stays thin.
 
 ## 9. Menu bar tidying (`src-tauri/src/menubar/`)
 

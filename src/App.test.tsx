@@ -72,6 +72,7 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
           batteryPercent: 80,
           kernelSleepDisabled: false,
           ownsLidClose: false,
+          leftoverUndecided: false,
           longRunningProcesses: [],
           revision: 1,
         });

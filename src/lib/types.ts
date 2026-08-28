@@ -142,7 +142,10 @@ export type KeepAwakeNotice =
   | 'lowBattery'
   | 'timerElapsed'
   | 'authorizationDeclined'
-  | 'lidCloseUnconfirmed';
+  | 'lidCloseUnconfirmed'
+  // A previous run's marker was found at launch with the lid-close override
+  // still set; whose it is now cannot be told, so the user decides.
+  | 'leftoverOverride';
 
 export interface KeepAwakeOptions {
   durationSecs: number | null;
@@ -170,6 +173,9 @@ export interface KeepAwakeStatus {
   batteryPercent: number | null;
   kernelSleepDisabled: boolean | null;
   ownsLidClose: boolean;
+  // A decision about a leftover lid-close override found at launch is pending:
+  // only the two recovery actions are accepted until it is taken.
+  leftoverUndecided: boolean;
   longRunningProcesses: LongRunningProcess[];
   // Monotonic ordering stamp, assigned by the backend as it emits. Several
   // backend threads emit, so events can arrive out of order; the panel drops any

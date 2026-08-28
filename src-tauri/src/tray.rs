@@ -134,10 +134,14 @@ fn build_menu(
         .build(app)?;
 
     // A checkmark reflects the live keep-awake state; clicking toggles it.
+    // Disabled while a transition is pending, and while a leftover lid-close
+    // override awaits the user's decision in the panel (the backend refuses a
+    // toggle then anyway; an item that does nothing is worse than a disabled
+    // one).
     let keep_awake_status = crate::keepawake::status(state.inner());
     let keep_awake = CheckMenuItemBuilder::with_id("keep-awake", text.keep_awake)
         .checked(keep_awake_status.active)
-        .enabled(!keep_awake_status.phase.is_pending())
+        .enabled(!keep_awake_status.phase.is_pending() && !keep_awake_status.leftover_undecided)
         .build(app)?;
 
     // Only offered while menu bar tidying is on: with the feature off there is

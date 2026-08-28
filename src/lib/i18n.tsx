@@ -363,6 +363,10 @@ const en = {
     'The administrator change was declined or could not be confirmed.',
   'settings.noticeLidCloseUnconfirmed':
     'Keep Awake is off, but the lid-close sleep setting could not be confirmed and may still be active. Retry to restore it.',
+  'settings.noticeLeftoverOverride':
+    'Sleep with the lid closed is currently disabled on this Mac. A previous Tomari session may have left it that way, but it could also have been set by you or another app since. Choose whether to turn sleep back on or leave it as it is.',
+  'settings.leftoverClear': 'Turn sleep back on',
+  'settings.leftoverKeep': 'Leave it as it is',
 
   'settings.externalControl': 'Links from other apps',
   'settings.externalControlHint':
@@ -764,6 +768,10 @@ const ja: Record<MessageKey, string> = {
     '管理者による変更が拒否されたか、結果を確認できませんでした。',
   'settings.noticeLidCloseUnconfirmed':
     'スリープ防止はオフですが、ふたを閉じたときのスリープ設定を確認できず、まだ有効なままかもしれません。再試行すると元に戻します。',
+  'settings.noticeLeftoverOverride':
+    'この Mac では現在、ふたを閉じてもスリープしない設定になっています。前回の Tomari が残した可能性がありますが、その後にあなたや別のアプリが設定した可能性もあります。スリープを元に戻すか、このままにするかを選んでください。',
+  'settings.leftoverClear': 'スリープを元に戻す',
+  'settings.leftoverKeep': 'このままにする',
 
   'settings.externalControl': 'ほかのアプリとの連携',
   'settings.externalControlHint':

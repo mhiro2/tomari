@@ -27,6 +27,7 @@ const OFF: KeepAwakeStatus = {
   batteryPercent: 82,
   kernelSleepDisabled: false,
   ownsLidClose: false,
+  leftoverUndecided: false,
   longRunningProcesses: [],
   revision: 1,
 };
@@ -46,6 +47,7 @@ const ON: KeepAwakeStatus = {
   phase: 'on',
   kernelSleepDisabled: true,
   ownsLidClose: true,
+  leftoverUndecided: false,
   revision: 3,
 };
 
@@ -306,6 +308,40 @@ describe('SessionView', () => {
         mockInvoke.mock.calls.filter(([cmd]) => cmd === 'retry_keep_awake_transition'),
       ).toHaveLength(1),
     );
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(0);
+  });
+
+  it('lets the user decide about a leftover lid-close override found at launch', async () => {
+    const LEFTOVER: KeepAwakeStatus = {
+      ...OFF,
+      phase: 'failed',
+      notice: 'leftoverOverride',
+      leftoverUndecided: true,
+      revision: 2,
+    };
+    mockCommands({
+      get_keep_awake: LEFTOVER,
+      retry_keep_awake_transition: OFF,
+      dismiss_keep_awake_recovery: OFF,
+    });
+
+    render(<SessionView />);
+
+    // Nothing was cleared on the marker's evidence alone: both halves of the
+    // decision are offered, and Start stays locked until one is taken.
+    const main = await screen.findByRole('button', { name: MAIN_ACTION });
+    expect(main).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Turn sleep back on' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Leave it as it is' }));
+
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.filter(([cmd]) => cmd === 'dismiss_keep_awake_recovery'),
+      ).toHaveLength(1),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === 'retry_keep_awake_transition'),
+    ).toHaveLength(0);
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(0);
   });
 
