@@ -172,16 +172,29 @@ fn apply(
     Ok(after)
 }
 
-/// Snap a window the user dragged to a screen edge to `frame`, recording its
-/// mouse-down frame as the undo target. Reading "before" at release would only
-/// capture the temporary edge position the OS dragged it through. Best-effort:
-/// it runs inside the listen-only gesture tap, where there is no caller to
-/// surface an error to, so failures return `false`.
-pub fn apply_dragged<H>(state: &AppState, window: &H, before: Rect, frame: Rect) -> bool
+/// Snap a window the user dragged to a screen edge to the frame `decide`
+/// chooses, recording its mouse-down frame as the undo target. Reading "before"
+/// at release would only capture the temporary edge position the OS dragged it
+/// through. Best-effort: it runs inside the listen-only gesture tap, where there
+/// is no caller to surface an error to, so failures return `false`.
+///
+/// `decide` runs *under* the window-mutation lock, immediately before the
+/// write: the drop's target depends on the display geometry current at that
+/// instant, and a decision taken before waiting for the lock could be overtaken
+/// by a display change while waiting. `None` declines the snap.
+pub fn apply_dragged<H>(
+    state: &AppState,
+    window: &H,
+    before: Rect,
+    decide: impl FnOnce() -> Option<Rect>,
+) -> bool
 where
     H: WindowHandle + Clone + 'static,
 {
     let _op = state.lock_window_mutation();
+    let Some(frame) = decide() else {
+        return false;
+    };
     if window.set_frame(frame).is_err() {
         return false;
     }
@@ -1179,9 +1192,21 @@ mod tests {
         let snapped = compute_frame(WindowPreset::LeftHalf, area());
         let handle = SharedHandle(Arc::new(Mutex::new(released_at_edge)));
 
-        assert!(apply_dragged(&state, &handle, start, snapped));
+        assert!(apply_dragged(&state, &handle, start, || Some(snapped)));
         assert_eq!(undo(&state).unwrap(), HistoryActionResult::Applied);
         assert_eq!(handle.frame().unwrap(), start);
+    }
+
+    #[test]
+    fn a_declined_drop_decision_moves_nothing_and_records_nothing() {
+        let state = default_state();
+        let start = Rect::new(240.0, 180.0, 700.0, 500.0);
+        let released_at_edge = Rect::new(0.0, 25.0, 700.0, 500.0);
+        let handle = SharedHandle(Arc::new(Mutex::new(released_at_edge)));
+
+        assert!(!apply_dragged(&state, &handle, start, || None));
+        assert_eq!(handle.frame().unwrap(), released_at_edge);
+        assert_eq!(state.window_history_status(), (false, false));
     }
 
     /// A handle whose window always fails with a configurable error, to drive

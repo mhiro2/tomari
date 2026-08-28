@@ -332,9 +332,18 @@ struct Session {
     /// would ask again immediately, forever.
     final_check: bool,
     armed: bool,
-    /// Every display's `(full_frame, work_area)` (CG), snapshotted once on arm
-    /// so edge detection on later moves stays a pure computation.
+    /// Every display's `(full_frame, work_area)` (CG), snapshotted on arm so
+    /// edge detection on later moves stays a pure computation — and re-read
+    /// whenever the cache's generation has moved on (a display unplugged,
+    /// rearranged or resized, the Dock changing the work area), so a preview
+    /// or a drop is never laid out against geometry that no longer exists.
     screens: Vec<(Rect, Rect)>,
+    /// The cache generation `screens` was read at (see
+    /// `AppState::screen_geometry_snapshot`).
+    screens_generation: u64,
+    /// The newest cursor position the preview was computed from, so the drop
+    /// can be re-targeted against fresh geometry if the displays changed.
+    cursor: (f64, f64),
     /// The preset the newest cursor position selects together with the work area
     /// to lay it out in. Stored as one value (not just the preset) so that
     /// dragging between displays whose edges map to the *same* preset — e.g. the
@@ -518,6 +527,8 @@ fn resolve(app: &AppHandle, generation: u64, press: (f64, f64)) -> Option<Sessio
         final_check: false,
         armed: false,
         screens: Vec::new(),
+        screens_generation: 0,
+        cursor: press,
         active: None,
     })
 }
@@ -529,6 +540,60 @@ fn forget(app: &AppHandle, session: &mut Option<Session>) {
     {
         overlay::hide(app);
     }
+}
+
+/// Whether the display geometry has been refreshed since `live` last read it.
+fn screens_stale(app: &AppHandle, live: &Session) -> bool {
+    app.try_state::<AppState>()
+        .is_some_and(|s| s.screen_geometry_generation() != live.screens_generation)
+}
+
+/// Re-read the cached display geometry (and its generation) into `live`.
+fn refresh_screens(app: &AppHandle, live: &mut Session) {
+    if let Some(state) = app.try_state::<AppState>() {
+        let (generation, screens) = state.screen_geometry_snapshot();
+        live.screens = screens;
+        live.screens_generation = generation;
+    }
+}
+
+/// What a release does, decided against the display geometry current at that
+/// moment rather than the one the preview was drawn against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DropDecision {
+    /// Snap to this zone — the previewed one when the displays are unchanged,
+    /// the re-targeted one when they moved but the cursor still selects a zone.
+    Apply((WindowPreset, Rect)),
+    /// The cursor selects no zone on the current displays (the previewed one
+    /// is gone); leave the window where the OS dropped it.
+    Abort,
+}
+
+/// Decide the drop for `cursor` on the current `screens`, given what was
+/// `previewed`. Pure; the preview only breaks ties in the log, never the
+/// decision — geometry the user cannot see any more must not place a window.
+fn drop_target(
+    screens: &[(Rect, Rect)],
+    cursor: (f64, f64),
+    previewed: (WindowPreset, Rect),
+) -> DropDecision {
+    match target_for(screens, cursor) {
+        Some(target) => {
+            if target != previewed {
+                tracing::debug!("drag-to-snap re-targeted the drop after a display change");
+            }
+            DropDecision::Apply(target)
+        }
+        None => DropDecision::Abort,
+    }
+}
+
+/// The snap zone `cursor` selects on `screens`: the preset its edge band maps
+/// to, with the work area to lay it out in. Pure.
+fn target_for(screens: &[(Rect, Rect)], cursor: (f64, f64)) -> Option<(WindowPreset, Rect)> {
+    let (x, y) = cursor;
+    screen_at_cursor(screens, x, y)
+        .and_then(|(full, visible)| edge_snap_preset((x, y), full).map(|preset| (preset, visible)))
 }
 
 /// Carry out at most *one* step towards the current intent.
@@ -579,10 +644,7 @@ fn step(app: &AppHandle, intent: &mut Option<Intent>, session: &mut Option<Sessi
                         // Read the geometry cached on the main thread (kept
                         // current by the display-change observer in `displays`);
                         // never block on the window server for it.
-                        live.screens = app
-                            .try_state::<AppState>()
-                            .map(|s| s.screen_geometry())
-                            .unwrap_or_default();
+                        refresh_screens(app, live);
                     }
                     // Not moving: dragging something that is not the window
                     // (text selection, a control). Leave it alone and look
@@ -607,10 +669,13 @@ fn step(app: &AppHandle, intent: &mut Option<Intent>, session: &mut Option<Sessi
             };
             // Consumed: the same position must not be re-targeted twice.
             current.cursor_fresh = false;
-            let (x, y) = current.cursor;
-            let target = screen_at_cursor(&live.screens, x, y).and_then(|(full, visible)| {
-                edge_snap_preset((x, y), full).map(|preset| (preset, visible))
-            });
+            live.cursor = current.cursor;
+            // Displays may have changed since the snapshot on arm; a preview
+            // against a display that is gone would promise a drop nowhere.
+            if screens_stale(app, live) {
+                refresh_screens(app, live);
+            }
+            let target = target_for(&live.screens, live.cursor);
             // Compare the whole target, not just the preset: moving between
             // displays whose edges share a preset must still re-target.
             if target != live.active {
@@ -624,21 +689,46 @@ fn step(app: &AppHandle, intent: &mut Option<Intent>, session: &mut Option<Sessi
         }
         Next::Apply => {
             *intent = None;
-            let Some(live) = session.take() else {
+            let Some(mut live) = session.take() else {
                 return Step::Idle;
             };
             overlay::hide(app);
-            let Some((preset, visible)) = live.active else {
+            let Some(active) = live.active else {
                 return Step::Progressed;
             };
             let Some(app_state) = app.try_state::<AppState>() else {
                 return Step::Progressed;
             };
+            // Decide the drop from geometry read *now* — under the window
+            // lock, right before the write — not from the preview: a display
+            // change since the preview (unplugged, rearranged, resized, Dock
+            // moved), or while waiting for the lock, can leave the previewed
+            // work area pointing off-screen. Re-target from the last cursor
+            // position against the fresh snapshot; if it selects no zone any
+            // more, decline the snap — a window moved to nowhere is worse than
+            // a drag that did nothing. A change landing during the AX write
+            // itself cannot be caught from here; that window is the write's own
+            // duration.
+            let window = live.window.clone();
+            let start_frame = live.start_frame;
             let changed = crate::window_ops::apply_dragged(
                 app_state.inner(),
-                &live.window,
-                live.start_frame,
-                compute_frame(preset, visible),
+                &window,
+                start_frame,
+                || {
+                    refresh_screens(app, &mut live);
+                    match drop_target(&live.screens, live.cursor, active) {
+                        DropDecision::Apply((preset, visible)) => {
+                            Some(compute_frame(preset, visible))
+                        }
+                        DropDecision::Abort => {
+                            tracing::debug!(
+                                "drag-to-snap aborted: the displays changed and the drop selects no zone"
+                            );
+                            None
+                        }
+                    }
+                },
             );
             if changed {
                 // The tray/menu APIs are main-thread-only, and this runs on the
@@ -866,6 +956,63 @@ fn handle_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two side-by-side displays, each with a menu-bar-sized work-area inset.
+    fn two_displays() -> Vec<(Rect, Rect)> {
+        vec![
+            (
+                Rect::new(0.0, 0.0, 1000.0, 800.0),
+                Rect::new(0.0, 25.0, 1000.0, 775.0),
+            ),
+            (
+                Rect::new(1000.0, 0.0, 1000.0, 800.0),
+                Rect::new(1000.0, 25.0, 1000.0, 775.0),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_drop_on_unchanged_displays_applies_the_previewed_zone() {
+        let screens = two_displays();
+        // Cursor at the very top edge of the second display.
+        let cursor = (1500.0, 0.0);
+        let previewed = target_for(&screens, cursor).expect("the top edge selects a zone");
+        assert_eq!(
+            drop_target(&screens, cursor, previewed),
+            DropDecision::Apply(previewed)
+        );
+    }
+
+    #[test]
+    fn a_drop_after_the_previewed_display_vanished_is_aborted() {
+        let screens = two_displays();
+        let cursor = (1500.0, 0.0);
+        let previewed = target_for(&screens, cursor).expect("the top edge selects a zone");
+        // The second display was unplugged before the release.
+        let remaining = vec![screens[0]];
+        assert_eq!(
+            drop_target(&remaining, cursor, previewed),
+            DropDecision::Abort
+        );
+    }
+
+    #[test]
+    fn a_drop_after_the_work_area_changed_is_re_targeted_to_the_fresh_geometry() {
+        let screens = two_displays();
+        let cursor = (1500.0, 0.0);
+        let previewed = target_for(&screens, cursor).expect("the top edge selects a zone");
+        // The Dock moved: the second display's work area shrank.
+        let mut changed = screens.clone();
+        changed[1].1 = Rect::new(1000.0, 25.0, 1000.0, 700.0);
+        match drop_target(&changed, cursor, previewed) {
+            DropDecision::Apply((preset, visible)) => {
+                assert_eq!(preset, previewed.0);
+                assert_eq!(visible, changed[1].1, "laid out in the current work area");
+                assert_ne!(visible, previewed.1);
+            }
+            DropDecision::Abort => panic!("the zone still exists; the drop must apply"),
+        }
+    }
 
     const PRESS: (f64, f64) = (100.0, 200.0);
     /// Past `CURSOR_MOVE_EPSILON` from [`PRESS`].

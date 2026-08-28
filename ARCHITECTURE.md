@@ -380,7 +380,16 @@ each display's full frame and work area, which only the main thread can read
 (primed at startup and refreshed whenever the displays change, via the
 `NSApplicationDidChangeScreenParametersNotification` observer in `displays.rs`)
 and the worker reads the cache on arm, never blocking on a main-thread
-round-trip.
+round-trip. The cache carries a generation that advances on every refresh: a
+preview re-reads the geometry when the generation has moved on, and the drop is
+always decided against a snapshot taken under the window-mutation lock, right
+before the write (so a change that lands while waiting for that lock is seen
+too) — re-targeted
+from the last cursor position when the displays changed, aborted when that
+position selects no zone any more — so a display unplugged, rearranged or
+resized mid-drag (or a Dock that moved) never places the window against
+geometry that is gone. Only a change landing during the AX write itself is
+beyond that check.
 Before the Accessibility hit-test, a front-to-back Window Server snapshot lists
 the processes owning a surface at the pointer, and each is AX hit-tested in that
 order until one yields a window (`pointer_window_owners` → `window_at_point`);

@@ -73,6 +73,14 @@ pub struct PlacementEdit {
     pub after: Option<WindowPlacement>,
 }
 
+/// The display-geometry cache and the generation it was published under (see
+/// `AppState::screen_geometry_snapshot`).
+#[derive(Default)]
+struct ScreenGeometry {
+    generation: u64,
+    screens: Vec<(Rect, Rect)>,
+}
+
 pub struct AppState {
     /// Persistent SQLite store.
     pub db: Database,
@@ -100,10 +108,14 @@ pub struct AppState {
     /// The most recent remembered position, for Primary/Secondary cycling.
     last_placement: Mutex<Option<LastPlacement>>,
     /// Cached display geometry — each display's `(full_frame, work_area)` in CG
-    /// coordinates — for drag-to-snap. Refreshed from the main thread (the only
-    /// place AppKit's per-display frames are readable) so the drag-to-snap tap
-    /// thread can resolve snap zones without a blocking main-thread round-trip.
-    screen_geometry: Mutex<Vec<(Rect, Rect)>>,
+    /// coordinates — for drag-to-snap, with the generation it was published
+    /// under. Refreshed from the main thread (the only place AppKit's
+    /// per-display frames are readable) so the drag-to-snap tap thread can
+    /// resolve snap zones without a blocking main-thread round-trip. The
+    /// generation advances on every refresh, so a gesture that snapshotted the
+    /// geometry when it armed can tell, right before it applies, that a display
+    /// was unplugged, rearranged or resized in the meantime.
+    screen_geometry: Mutex<ScreenGeometry>,
     /// Serializes whole-config mutations. A save or delete writes to the
     /// database and then rebuilds the live engines/shortcuts to match; two of
     /// them running at once would leave the in-memory state out of sync with
@@ -161,7 +173,7 @@ impl AppState {
             placement_edit_history: Mutex::new(Vec::new()),
             last_snap: Mutex::new(None),
             last_placement: Mutex::new(None),
-            screen_geometry: Mutex::new(Vec::new()),
+            screen_geometry: Mutex::new(ScreenGeometry::default()),
             config_mutation: Mutex::new(()),
             window_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
@@ -215,13 +227,25 @@ impl AppState {
 
     /// The cached display geometry for drag-to-snap (`(full_frame, work_area)`
     /// per display, CG coordinates). Empty until first refreshed.
-    pub fn screen_geometry(&self) -> Vec<(Rect, Rect)> {
-        self.screen_geometry.lock_safe().clone()
+    /// The cached display geometry together with its generation, read as one
+    /// snapshot so the two cannot come from different refreshes.
+    pub fn screen_geometry_snapshot(&self) -> (u64, Vec<(Rect, Rect)>) {
+        let cached = self.screen_geometry.lock_safe();
+        (cached.generation, cached.screens.clone())
     }
 
-    /// Replace the cached display geometry. Called from the main thread.
+    /// The generation of the cached display geometry: changes whenever a
+    /// refresh has published new geometry since a snapshot was taken.
+    pub fn screen_geometry_generation(&self) -> u64 {
+        self.screen_geometry.lock_safe().generation
+    }
+
+    /// Replace the cached display geometry, advancing its generation. Called
+    /// from the main thread.
     pub fn set_screen_geometry(&self, screens: Vec<(Rect, Rect)>) {
-        *self.screen_geometry.lock_safe() = screens;
+        let mut cached = self.screen_geometry.lock_safe();
+        cached.screens = screens;
+        cached.generation = cached.generation.wrapping_add(1);
     }
 
     /// Re-read the display geometry from the window manager into the cache.
@@ -336,6 +360,26 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_screen_geometry_refresh_advances_the_generation() {
+        let state = state();
+        let (g0, screens) = state.screen_geometry_snapshot();
+        assert!(screens.is_empty());
+        let display = (
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            Rect::new(0.0, 0.0, 100.0, 90.0),
+        );
+        state.set_screen_geometry(vec![display]);
+        let (g1, screens) = state.screen_geometry_snapshot();
+        assert_ne!(g0, g1);
+        assert_eq!(screens, vec![display]);
+        // Publishing the very same geometry again still counts as a refresh:
+        // a gesture cannot tell "unchanged" from "changed back" and must
+        // re-validate either way.
+        state.set_screen_geometry(vec![display]);
+        assert_ne!(state.screen_geometry_generation(), g1);
+    }
     use tomari_core::WindowPreset;
     use tomari_keyboard::ModifierEngine;
     use tomari_window::MockWindowManager;
