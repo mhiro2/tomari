@@ -76,10 +76,23 @@ static LID_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// that re-enables the override after cleanup has already cleared it.
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// PID of the `osascript` process currently presenting administrator
-/// authorization. Only one can run because `LID_OP_LOCK` serializes them.
+/// The `osascript` process currently presenting administrator authorization,
+/// held as the `Child` itself rather than a bare PID. Only one can run because
+/// `LID_OP_LOCK` serializes them. The waiter reaps it only under this lock and
+/// the canceller signals it only under this lock, so a cancel can never reach a
+/// PID that has since been reaped and handed to an unrelated process — the
+/// window a PID-only record leaves open between `wait()` returning and the
+/// record being cleared.
 #[cfg(target_os = "macos")]
-static AUTH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static AUTH_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Bumped by every [`kill_authorization`], i.e. every intent to cancel the
+/// dialog. A worker records it before it decides to proceed and re-reads it
+/// once its `osascript` is published in [`AUTH_CHILD`]: a cancel that fired in
+/// between found the slot empty and would otherwise be lost, leaving the
+/// superseded dialog up and the reverse worker stuck behind `LID_OP_LOCK`.
+#[cfg(target_os = "macos")]
+static CANCEL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 const LOW_BATTERY_PERCENT: u8 = 20;
 const LONG_RUNNING_PROCESS_SECS: u64 = 5 * 60;
@@ -1364,13 +1377,19 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
     // this runs before the first `pmset`: a worker already past this point still
     // completes and records the ownership it acquired, exactly as the
     // cancel-during-the-dialog path relies on.
+    // Read the cancel epoch *before* the generation check: a cancel is a
+    // generation bump followed by a kill, so one that lands after this check
+    // bumps the epoch after this read and is caught when the dialog is
+    // published (see `CANCEL_EPOCH`).
+    let cancel_epoch = CANCEL_EPOCH.load(std::sync::atomic::Ordering::Acquire);
     if state.keep_awake.lock_safe().generation != request_generation {
         return;
     }
     let ownership = state.keep_awake.lock_safe().ownership;
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
-    let outcome = reconcile_lid_close_with(&RealSys::INTERACTIVE, desired_on, ownership);
+    let outcome =
+        reconcile_lid_close_with(&RealSys::interactive(cancel_epoch), desired_on, ownership);
     {
         let mut k = state.keep_awake.lock_safe();
         // Always record ownership — even when superseded — so a later worker or
@@ -1473,19 +1492,27 @@ struct RealSys {
     /// have their own Cancel. Exit paths set a deadline: nobody may be there to
     /// answer, and the process has to be allowed to end.
     auth_deadline: Option<std::time::Duration>,
+    /// The [`CANCEL_EPOCH`] the worker saw when it decided to proceed, so a
+    /// cancel that lands before its dialog is published is still honoured.
+    /// `None` for the exit path, which is itself the canceller.
+    cancel_epoch: Option<u64>,
 }
 
 #[cfg(target_os = "macos")]
 impl RealSys {
     /// Wait for the user: they asked for this, and can cancel it.
-    const INTERACTIVE: Self = Self {
-        auth_deadline: None,
-    };
+    fn interactive(cancel_epoch: u64) -> Self {
+        Self {
+            auth_deadline: None,
+            cancel_epoch: Some(cancel_epoch),
+        }
+    }
     /// Bounded, for quit / logout / the updater's relaunch. (The launch
     /// reconcile shows no dialog at all: it clears nothing on the marker's
     /// evidence alone and leaves the decision to the user.)
     const EXITING: Self = Self {
         auth_deadline: Some(EXIT_AUTH_DEADLINE),
+        cancel_epoch: None,
     };
 }
 
@@ -1513,7 +1540,7 @@ impl LidCloseSys for RealSys {
         read_sleep_disabled()
     }
     fn set_disablesleep(&self, on: bool) -> bool {
-        run_disablesleep(on, self.auth_deadline)
+        run_disablesleep(on, self.auth_deadline, self.cancel_epoch)
     }
     fn write_marker(&self) -> bool {
         write_marker()
@@ -1532,7 +1559,11 @@ impl LidCloseSys for RealSys {
 /// applied — the caller then confirms against the kernel flag as always, so an
 /// override that did land in the meantime keeps its marker and ownership.
 #[cfg(target_os = "macos")]
-fn run_disablesleep(on: bool, deadline: Option<std::time::Duration>) -> bool {
+fn run_disablesleep(
+    on: bool,
+    deadline: Option<std::time::Duration>,
+    cancel_epoch: Option<u64>,
+) -> bool {
     let value = if on { "1" } else { "0" };
     let script = format!(
         "do shell script \"/usr/bin/pmset -a disablesleep {value}\" with administrator privileges"
@@ -1541,15 +1572,28 @@ fn run_disablesleep(on: bool, deadline: Option<std::time::Duration>) -> bool {
         .arg("-e")
         .arg(&script)
         .spawn();
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(e) => {
             tracing::warn!(error = %e, on, "failed to run osascript for pmset disablesleep");
             return false;
         }
     };
-    let pid = child.id();
-    AUTH_PID.store(pid, std::sync::atomic::Ordering::Release);
+    // Publish the child for `kill_authorization` before waiting on it; from
+    // here on it is only ever touched under `AUTH_CHILD`'s lock.
+    *AUTH_CHILD.lock_safe() = Some(child);
+    // A cancel that fired between the worker's decision to proceed and this
+    // publish found no child to signal. Honour it now rather than leave a
+    // dialog nobody wants on screen (and its reverse worker waiting behind it).
+    if cancel_epoch
+        .is_some_and(|epoch| CANCEL_EPOCH.load(std::sync::atomic::Ordering::Acquire) != epoch)
+    {
+        tracing::info!(
+            on,
+            "administrator authorization was cancelled while starting; dismissing it"
+        );
+        kill_authorization();
+    }
     // A shutdown that began between `kill_authorization` and this spawn missed
     // the dialog; it will kill it on its next pass, but do not let an interactive
     // wait outlive the process regardless.
@@ -1558,13 +1602,7 @@ fn run_disablesleep(on: bool, deadline: Option<std::time::Duration>) -> bool {
     } else {
         deadline
     };
-    let result = wait_child(&mut child, deadline);
-    let _ = AUTH_PID.compare_exchange(
-        pid,
-        0,
-        std::sync::atomic::Ordering::AcqRel,
-        std::sync::atomic::Ordering::Acquire,
-    );
+    let result = wait_auth_child(deadline);
     match result {
         ChildExit::Exited(status) if status.success() => true,
         ChildExit::Exited(status) => {
@@ -1669,23 +1707,74 @@ fn wait_child(child: &mut std::process::Child, deadline: Option<std::time::Durat
     }
 }
 
+/// Wait for the authorization child in [`AUTH_CHILD`], for at most `deadline`
+/// when one is given, and take it out of the slot once it is gone. Every
+/// `try_wait` — the only thing that can reap it — happens under the slot's
+/// lock, which is also what [`kill_authorization`] holds to signal it, so the
+/// PID it signals is always this still-running child's. Polls rather than
+/// blocking in `wait()` so the lock is held only for the check, never across
+/// the dialog.
+#[cfg(target_os = "macos")]
+fn wait_auth_child(deadline: Option<std::time::Duration>) -> ChildExit {
+    let until = deadline.map(|d| std::time::Instant::now() + d);
+    loop {
+        {
+            let mut slot = AUTH_CHILD.lock_safe();
+            let Some(child) = slot.as_mut() else {
+                return ChildExit::Failed(std::io::Error::other(
+                    "the authorization child vanished from its slot",
+                ));
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *slot = None;
+                    return ChildExit::Exited(status);
+                }
+                Ok(None) if until.is_some_and(|until| std::time::Instant::now() >= until) => {
+                    // Reap only a child the kill reached; a kill that fails
+                    // means it is already gone, and a blocking `wait` on it
+                    // would be the unbounded wait this exists to avoid.
+                    if child.kill().is_ok() {
+                        let _ = child.wait();
+                    } else {
+                        let _ = child.try_wait();
+                    }
+                    *slot = None;
+                    return ChildExit::TimedOut;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *slot = None;
+                    return ChildExit::Failed(e);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Ask the administrator dialog to go away: SIGTERM to the `osascript` that is
+/// presenting it. Signals the live [`AUTH_CHILD`] under its lock — the child
+/// cannot be reaped while the lock is held, so its PID is still its own and
+/// the signal cannot land on an unrelated process that inherited a reused PID.
+/// A no-op when no dialog is up.
 #[cfg(target_os = "macos")]
 fn kill_authorization() {
-    let pid = AUTH_PID.load(std::sync::atomic::Ordering::Acquire);
-    if pid == 0 {
+    // Record the intent first, so a worker publishing its child concurrently
+    // sees it (see `CANCEL_EPOCH`).
+    CANCEL_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let slot = AUTH_CHILD.lock_safe();
+    let Some(child) = slot.as_ref() else {
         return;
-    }
-    match std::process::Command::new("/bin/kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-    {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            tracing::warn!(code = ?status.code(), pid, "failed to cancel administrator authorization")
-        }
-        Err(error) => {
-            tracing::warn!(%error, pid, "failed to invoke kill for administrator authorization")
-        }
+    };
+    let pid = child.id();
+    // SAFETY: `kill(2)` has no memory-safety preconditions. The PID belongs to
+    // the `Child` we hold under the lock, which nothing else can reap
+    // meanwhile, so it cannot have been reused.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(%error, pid, "failed to cancel administrator authorization");
     }
 }
 
