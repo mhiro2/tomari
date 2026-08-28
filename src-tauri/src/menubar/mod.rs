@@ -44,8 +44,10 @@ mod inventory {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::{
+    Condvar, Mutex, TryLockError,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -654,7 +656,7 @@ pub fn toggle(app: &AppHandle) {
     let pending = {
         let mut menu_bar = state.menu_bar.lock_safe();
         menu_bar.toggle(now);
-        menu_bar.pending_collapse()
+        menu_bar.timer_request()
     };
     publish(app);
     arm_auto_collapse(app, pending);
@@ -675,7 +677,7 @@ pub fn set_collapsed(app: &AppHandle, collapsed: bool) -> MenuBarStatus {
     let pending = {
         let mut menu_bar = state.menu_bar.lock_safe();
         menu_bar.set_collapsed(collapsed, now);
-        menu_bar.pending_collapse()
+        menu_bar.timer_request()
     };
     publish(app);
     arm_auto_collapse(app, pending);
@@ -700,7 +702,7 @@ pub fn apply_settings(app: &AppHandle, previous: &AppSettings, next: &AppSetting
             // collapsed — the resting position a later switch-on starts from.
             menu_bar.collapse();
         }
-        menu_bar.pending_collapse()
+        menu_bar.timer_request()
     };
     publish(app);
     arm_auto_collapse(app, pending);
@@ -751,33 +753,147 @@ fn schedule_status_reconciliation(app: &AppHandle) {
     });
 }
 
-/// Arm a one-shot timer to collapse the expand identified by `generation`.
-/// `None` means nothing to do — collapsed, or the auto-collapse timer is off,
-/// which is the default.
-fn arm_auto_collapse(app: &AppHandle, pending: Option<(u64, u64)>) {
-    let Some((at_ms, generation)) = pending else {
+/// The single auto-collapse timer: the latest request from the state machine —
+/// its generation, and the deadline to fire at or `None` — served by one
+/// worker thread.
+struct CollapseTimer {
+    slot: Mutex<TimerSlot>,
+    wake: Condvar,
+    /// Whether the worker thread is running. Set only once a spawn succeeded,
+    /// so a failed spawn is retried by the next arm instead of leaving the
+    /// timer dead for the rest of the process.
+    started: Mutex<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimerSlot {
+    /// Generation of the state change this request came from.
+    generation: u64,
+    deadline_ms: Option<u64>,
+}
+
+static COLLAPSE_TIMER: CollapseTimer = CollapseTimer {
+    slot: Mutex::new(TimerSlot {
+        generation: 0,
+        deadline_ms: None,
+    }),
+    wake: Condvar::new(),
+    started: Mutex::new(false),
+};
+
+/// Hand the timer the state machine's latest request (see
+/// `MenuBarState::timer_request`): arm for the deadline, or clear when `None`.
+///
+/// One worker thread serves every request, sleeping until the armed deadline
+/// and re-evaluating whenever it is re-armed or cleared. It replaces a thread
+/// per arm: those cost a sleeping OS thread per expand, and a delay the
+/// frontend chose (now bounded by `validate::sanitize_settings`, but any bound
+/// is only as good as the code behind it) would have parked each of them for
+/// that long.
+///
+/// Requests are ordered by generation, not by arrival: the state lock is
+/// released before this is called, so two state changes can reach the timer in
+/// the other order, and a stale request (arm *or* clear) must not overwrite a
+/// newer one. The generation check on firing remains the authority on whether
+/// to collapse.
+fn arm_auto_collapse(app: &AppHandle, request: (u64, Option<u64>)) {
+    ensure_timer_worker(app);
+    let (generation, deadline_ms) = request;
+    let mut slot = COLLAPSE_TIMER.slot.lock_safe();
+    if !request_supersedes(slot.generation, generation) {
         return;
+    }
+    *slot = TimerSlot {
+        generation,
+        deadline_ms,
     };
-    let Some(state) = app.try_state::<AppState>() else {
+    drop(slot);
+    COLLAPSE_TIMER.wake.notify_all();
+}
+
+/// Whether a request from `incoming` may replace what `current` holds. Equal
+/// generations replace too: the same state change re-publishing its request
+/// is harmless, and `0` (the initial slot) must accept the first real one.
+fn request_supersedes(current: u64, incoming: u64) -> bool {
+    incoming >= current
+}
+
+/// Start the timer worker if it is not running. A spawn failure is logged and
+/// left for the next arm to retry.
+fn ensure_timer_worker(app: &AppHandle) {
+    let mut started = COLLAPSE_TIMER.started.lock_safe();
+    if *started {
         return;
-    };
-    let delay = Duration::from_millis(at_ms.saturating_sub(state.now_ms()));
+    }
     let app = app.clone();
-    // A plain sleeping thread rather than a repeating tick: expands are rare
-    // and short-lived, and a superseded timer costs nothing — it wakes, finds
-    // its generation stale and exits.
-    std::thread::spawn(move || {
-        std::thread::sleep(delay);
+    match std::thread::Builder::new()
+        .name("tomari-menubar-collapse".into())
+        .spawn(move || collapse_timer_worker(app))
+    {
+        Ok(_) => *started = true,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start the menu bar auto-collapse timer")
+        }
+    }
+}
+
+/// What the timer worker should do next, given what is armed and the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerStep {
+    /// Nothing armed: wait for an arm.
+    Idle,
+    /// Wait this long (or until re-armed), then look again.
+    Sleep(Duration),
+    /// The armed deadline has passed: fire for this generation.
+    Fire(u64),
+}
+
+fn timer_step(pending: Option<(u64, u64)>, now_ms: u64) -> TimerStep {
+    match pending {
+        None => TimerStep::Idle,
+        Some((at_ms, generation)) if at_ms <= now_ms => TimerStep::Fire(generation),
+        Some((at_ms, _)) => TimerStep::Sleep(Duration::from_millis(at_ms - now_ms)),
+    }
+}
+
+fn collapse_timer_worker(app: AppHandle) {
+    let mut slot = COLLAPSE_TIMER.slot.lock_safe();
+    loop {
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
-        let fired = state.menu_bar.lock_safe().auto_collapse_elapsed(generation);
-        if fired {
-            // `publish` defers the physical collapse if a scan or move owns the
-            // divider, while still updating the panel and tray immediately.
-            publish(&app);
+        let pending = slot.deadline_ms.map(|at| (at, slot.generation));
+        match timer_step(pending, state.now_ms()) {
+            TimerStep::Idle => {
+                slot = COLLAPSE_TIMER
+                    .wake
+                    .wait(slot)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            TimerStep::Sleep(delay) => {
+                // Woken early by a re-arm or a clear; either way, re-evaluate.
+                slot = COLLAPSE_TIMER
+                    .wake
+                    .wait_timeout(slot, delay)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
+            }
+            TimerStep::Fire(generation) => {
+                // Consumed; the generation stays so a stale request that
+                // arrives later is still recognised as stale.
+                slot.deadline_ms = None;
+                drop(slot);
+                let fired = state.menu_bar.lock_safe().auto_collapse_elapsed(generation);
+                if fired {
+                    // `publish` defers the physical collapse if a scan or move
+                    // owns the divider, while still updating the panel and tray
+                    // immediately.
+                    publish(&app);
+                }
+                slot = COLLAPSE_TIMER.slot.lock_safe();
+            }
         }
-    });
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -924,5 +1040,31 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&outcome).unwrap(), wire);
         }
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn the_timer_worker_idles_sleeps_and_fires_from_what_is_armed() {
+        assert_eq!(timer_step(None, 1_000), TimerStep::Idle);
+        assert_eq!(
+            timer_step(Some((1_500, 7)), 1_000),
+            TimerStep::Sleep(Duration::from_millis(500))
+        );
+        assert_eq!(timer_step(Some((1_500, 7)), 1_500), TimerStep::Fire(7));
+        assert_eq!(timer_step(Some((1_500, 7)), 9_000), TimerStep::Fire(7));
+    }
+
+    #[test]
+    fn a_stale_request_never_overwrites_a_newer_one() {
+        // Two state changes reach the timer in the wrong order: the older one
+        // — arm or clear alike — must not replace the newer.
+        assert!(request_supersedes(0, 1));
+        assert!(request_supersedes(5, 5));
+        assert!(request_supersedes(5, 6));
+        assert!(!request_supersedes(6, 5));
     }
 }

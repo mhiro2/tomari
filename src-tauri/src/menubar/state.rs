@@ -45,11 +45,21 @@ impl MenuBarState {
         self.visibility == Visibility::Collapsed
     }
 
-    /// The deadline the caller should arm a timer for, with the generation to
-    /// hand back to [`Self::auto_collapse_elapsed`]. `None` when nothing is
-    /// pending — collapsed, or expanded with the timer switched off.
+    /// The deadline armed, with the generation to hand back to
+    /// [`Self::auto_collapse_elapsed`]. `None` when nothing is pending —
+    /// collapsed, or expanded with the timer switched off. Production code
+    /// uses [`Self::timer_request`], which also carries a clear's generation.
+    #[cfg(test)]
     pub fn pending_collapse(&self) -> Option<(u64, u64)> {
         self.deadline_ms.map(|at| (at, self.generation))
+    }
+
+    /// What the auto-collapse timer should hold after this state change: the
+    /// generation the change produced, and the deadline to fire at (`None` to
+    /// clear). Unlike [`Self::pending_collapse`] a clear carries the generation
+    /// too, so the timer can order it against an arm that raced it.
+    pub fn timer_request(&self) -> (u64, Option<u64>) {
+        (self.generation, self.deadline_ms)
     }
 
     pub fn expand(&mut self, now_ms: u64) {

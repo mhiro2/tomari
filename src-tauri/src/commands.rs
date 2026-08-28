@@ -133,6 +133,9 @@ pub async fn save_settings(
     // Persisting is the hard requirement: a failure here rejects so the UI knows
     // nothing was saved. The side effects below are applied on a best-effort
     // basis and reported as warnings — the preference is stored either way.
+    // Don't trust the frontend: bound the fields that drive timers before
+    // anything is stored or armed.
+    let settings = crate::validate::sanitize_settings(settings)?;
     state.db.save_settings(&settings)?;
 
     // Reconcile the side-effecting toggles every save — not only when they

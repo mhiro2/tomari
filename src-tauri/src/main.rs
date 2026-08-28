@@ -540,6 +540,9 @@ fn build_state(paths: &AppPaths) -> AppState {
         );
         AppSettings::default()
     });
+    // A row this build would not have accepted (older build, hand edit) is
+    // repaired rather than trusted: the live settings drive timers.
+    let settings = validate::repair_settings(settings);
 
     // The stored modifier rules plus the built-in left/right ⌘ IME toggle,
     // which lives behind a setting rather than as an editable row.

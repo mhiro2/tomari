@@ -4,7 +4,7 @@
 //! letter would shadow normal typing once registered globally, and an unbounded
 //! id/label could be persisted unchecked.
 
-use tomari_core::{AppAction, Hotkey, KeySide, ModifierKey, ModifierRule};
+use tomari_core::{AppAction, AppSettings, Hotkey, KeySide, ModifierKey, ModifierRule};
 use tomari_keyboard::accelerator;
 
 use crate::error::CmdError;
@@ -14,6 +14,39 @@ use crate::error::CmdError;
 /// input.
 const MAX_ID_LEN: usize = 128;
 const MAX_LABEL_LEN: usize = 200;
+
+/// Longest menu-bar auto-collapse delay accepted: one hour. The panel offers
+/// seconds-scale choices; anything beyond this is a value no UI produced, and a
+/// timer armed for `u32::MAX` seconds would be a deadline 136 years out.
+pub const MAX_AUTO_COLLAPSE_SECS: u32 = 3600;
+
+/// Don't trust the frontend's `AppSettings`: bound every numeric field that
+/// drives a timer or a resource. `0` for the auto-collapse delay means off.
+pub fn sanitize_settings(settings: AppSettings) -> Result<AppSettings, CmdError> {
+    if settings.menu_bar_auto_collapse_secs > MAX_AUTO_COLLAPSE_SECS {
+        return Err(CmdError::other(format!(
+            "menuBarAutoCollapseSecs must be 0 (off) or at most {MAX_AUTO_COLLAPSE_SECS} seconds"
+        )));
+    }
+    Ok(settings)
+}
+
+/// Bring settings read back from the database into range, for launch. A save
+/// is *rejected* when out of range ([`sanitize_settings`]); a stored row that
+/// is out of range anyway — written by an older build, or edited by hand — is
+/// repaired to the default instead, with a warning, so the live settings the
+/// engines run from are always ones this build would have accepted.
+pub fn repair_settings(mut settings: AppSettings) -> AppSettings {
+    if settings.menu_bar_auto_collapse_secs > MAX_AUTO_COLLAPSE_SECS {
+        tracing::warn!(
+            stored = settings.menu_bar_auto_collapse_secs,
+            max = MAX_AUTO_COLLAPSE_SECS,
+            "stored menu bar auto-collapse delay is out of range; using the default"
+        );
+        settings.menu_bar_auto_collapse_secs = AppSettings::default().menu_bar_auto_collapse_secs;
+    }
+    settings
+}
 
 /// Validate and canonicalize a hotkey before it is stored. Returns a sanitized
 /// copy — trimmed id/label, normalized accelerator — or a [`CmdError`]
@@ -204,6 +237,31 @@ fn side_label(side: KeySide) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_collapse_delay_is_bounded() {
+        let with = |secs: u32| AppSettings {
+            menu_bar_auto_collapse_secs: secs,
+            ..Default::default()
+        };
+        assert!(sanitize_settings(with(0)).is_ok());
+        assert!(sanitize_settings(with(MAX_AUTO_COLLAPSE_SECS)).is_ok());
+        assert!(sanitize_settings(with(MAX_AUTO_COLLAPSE_SECS + 1)).is_err());
+        assert!(sanitize_settings(with(u32::MAX)).is_err());
+    }
+
+    #[test]
+    fn a_stored_out_of_range_delay_is_repaired_to_the_default_at_launch() {
+        let with = |secs: u32| AppSettings {
+            menu_bar_auto_collapse_secs: secs,
+            ..Default::default()
+        };
+        assert_eq!(repair_settings(with(30)).menu_bar_auto_collapse_secs, 30);
+        assert_eq!(
+            repair_settings(with(u32::MAX)).menu_bar_auto_collapse_secs,
+            AppSettings::default().menu_bar_auto_collapse_secs
+        );
+    }
     use tomari_core::AppAction;
 
     fn hotkey(accelerator: &str) -> Hotkey {
