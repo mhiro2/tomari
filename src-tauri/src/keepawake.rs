@@ -41,9 +41,14 @@
 //!   exit status: `pmset` can apply the change while `osascript` still reports
 //!   failure (or, in principle, the reverse), so the marker and ownership track
 //!   the *confirmed* kernel state — never a setter result that did not take.
-//! * **Ownership.** We only ever clear a `disablesleep` we turned on ourselves
-//!   (`we_own_override`); a value already set by the user or another process is
-//!   left untouched.
+//! * **Ownership.** We only ever clear a `disablesleep` we turned on ourselves;
+//!   a value already set by the user or another process is left untouched.
+//!   Ownership is three-valued ([`Ownership`]): *confirmed* once the kernel flag
+//!   has been read back set after our enable, *possibly* ours when our enable
+//!   ran but the flag could not be read back and a compensating clear could not
+//!   be confirmed either, and *unowned* otherwise. A possibly-owned override is
+//!   never written off as foreign: the next reconcile that reads it set confirms
+//!   it as ours, off clears it, and the UI shows the unresolved state until then.
 //!
 //! The slow, admin-authed `pmset` calls are serialized through `LID_OP_LOCK`
 //! and always drive the system toward the current desired state. This also
@@ -89,8 +94,8 @@ pub struct KeepAwake {
     /// Lid-close veto status, surfaced to the UI.
     lid_close: LidCloseState,
     /// Whether *we* turned `disablesleep` on (vs. it being set before us). We
-    /// only ever clear an override we engaged ourselves.
-    we_own_override: bool,
+    /// only ever clear an override we engaged ourselves — or might have.
+    ownership: Ownership,
     /// Bumped on every desired-state transition (engage / disengage / shutdown).
     /// Each reconcile worker captures the value *at spawn time* (under the same
     /// lock that bumped it) and carries it through its slow admin-auth dialog; on
@@ -139,7 +144,7 @@ impl Default for KeepAwake {
             active: false,
             assertion: None,
             lid_close: LidCloseState::Off,
-            we_own_override: false,
+            ownership: Ownership::Unowned,
             generation: 0,
             phase: KeepAwakePhase::Off,
             options: KeepAwakeOptions::default(),
@@ -211,6 +216,34 @@ pub enum KeepAwakeNotice {
     LowBattery,
     TimerElapsed,
     AuthorizationDeclined,
+    /// The lid-close override was enabled but its state could not be read back,
+    /// and clearing it again could not be confirmed either: the Mac may be unable
+    /// to sleep although keep-awake shows off. Retry clears it.
+    LidCloseUnconfirmed,
+}
+
+/// Who set the live `disablesleep` override, as far as Tomari can tell. The
+/// kernel flag records no provenance, so this is tracked from what we did and
+/// what we then read back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Ownership {
+    /// Not ours: never enabled by us, or confirmed cleared since.
+    #[default]
+    Unowned,
+    /// Our enable ran, but neither it nor a compensating clear could be
+    /// confirmed against the kernel flag. Treated as ours for every purpose
+    /// that matters — it is cleared on off and at exit, and a later read that
+    /// finds it set confirms it — and reported to the UI as unresolved.
+    PossiblyOwned,
+    /// We enabled it and read it back set.
+    Confirmed,
+}
+
+impl Ownership {
+    /// Whether the override is ours to clear — certainly or possibly.
+    fn may_own(self) -> bool {
+        self != Self::Unowned
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -279,7 +312,7 @@ fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
         power_source: k.power_source,
         battery_percent: k.battery_percent,
         kernel_sleep_disabled: k.kernel_sleep_disabled,
-        owns_lid_close: k.we_own_override,
+        owns_lid_close: k.ownership.may_own(),
         long_running_processes: k.long_running_processes.clone(),
         revision: k.revision,
     }
@@ -352,10 +385,50 @@ pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus 
 
 /// Retry whichever direction most recently failed authorization or a safety
 /// precondition. No-op when there is no failed transition.
+///
+/// A retry toward *off* while keep-awake is already off is the recovery of a
+/// lid-close override that is only possibly ours (`lidCloseUnconfirmed`): there
+/// is nothing to turn off in the ordinary sense — `disengage` would return at
+/// once — so it runs the clear directly, as its own stamped transition.
 pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
-    let target = state.keep_awake.lock_safe().retry_target;
+    let (target, recovery) = {
+        let k = state.keep_awake.lock_safe();
+        (
+            k.retry_target,
+            k.retry_target == Some(false) && !k.active && k.ownership.may_own(),
+        )
+    };
+    if recovery {
+        return recover_lid_close(app);
+    }
     target.map_or_else(|| status(state.inner()), |target| set(app, target, None))
+}
+
+/// Clear a lid-close override that is possibly ours while keep-awake is off:
+/// the recovery behind the `lidCloseUnconfirmed` notice. Stamped and run on the
+/// worker like any other transition, so a cancel can supersede it and the
+/// writeback (`Off`, or `RecoveryFailed`) decides what the UI shows.
+fn recover_lid_close(app: &AppHandle) -> KeepAwakeStatus {
+    let state = app.state::<AppState>();
+    #[cfg(target_os = "macos")]
+    let request_generation = {
+        let mut k = state.keep_awake.lock_safe();
+        if k.phase.is_pending() {
+            return status_from(&k);
+        }
+        k.generation = k.generation.wrapping_add(1);
+        k.phase = KeepAwakePhase::Disabling;
+        k.notice = None;
+        k.retry_target = None;
+        k.generation
+    };
+    #[cfg(target_os = "macos")]
+    {
+        notify(app);
+        spawn_reconcile(app.clone(), false, request_generation);
+    }
+    status(state.inner())
 }
 
 /// Cancel the administrator prompt and drive the system back toward the stable
@@ -369,6 +442,21 @@ pub fn cancel_transition(app: &AppHandle) -> KeepAwakeStatus {
         let mut k = state.keep_awake.lock_safe();
         let reverse_target = match k.phase {
             KeepAwakePhase::Enabling => false,
+            // Cancelling the *recovery* clear (`recover_lid_close`: disabling
+            // while already off) has no "on" to go back to. Reversing it would
+            // start an enable — re-asserting `disablesleep` if the clear had
+            // just landed. Supersede the worker and return to the unresolved
+            // state the recovery started from, retry still armed.
+            KeepAwakePhase::Disabling if !k.active => {
+                k.generation = k.generation.wrapping_add(1);
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+                k.retry_target = Some(false);
+                drop(k);
+                kill_authorization();
+                notify(app);
+                return status(state.inner());
+            }
             KeepAwakePhase::Disabling => true,
             _ => return status_from(&k),
         };
@@ -770,7 +858,7 @@ trait LidCloseSys {
 #[derive(Debug, PartialEq, Eq)]
 struct LidCloseOutcome {
     lid_close: LidCloseState,
-    we_own: bool,
+    ownership: Ownership,
 }
 
 /// Drive the lid-close veto toward the desired `active` state, returning the
@@ -788,14 +876,15 @@ struct LidCloseOutcome {
 fn reconcile_lid_close_with<S: LidCloseSys>(
     sys: &S,
     active: bool,
-    we_own: bool,
+    ownership: Ownership,
 ) -> LidCloseOutcome {
     if !active {
-        // Toggled off: only an override we engaged ourselves is ours to clear.
-        if !we_own {
+        // Toggled off: only an override we engaged ourselves — or might have —
+        // is ours to clear.
+        if !ownership.may_own() {
             return LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: false,
+                ownership: Ownership::Unowned,
             };
         }
         // Attempt the clear, then confirm against the kernel flag rather than the
@@ -804,16 +893,16 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
         // unreadable, keep both so the next launch's reconcile / cleanup retries
         // rather than leaking the override.
         sys.set_disablesleep(false);
-        let we_own = match sys.read_sleep_disabled() {
+        let ownership = match sys.read_sleep_disabled() {
             Some(false) => {
                 sys.remove_marker();
-                false
+                Ownership::Unowned
             }
-            Some(true) | None => true,
+            Some(true) | None => ownership,
         };
         return LidCloseOutcome {
             lid_close: LidCloseState::Off,
-            we_own,
+            ownership,
         };
     }
     // If we already own the override it is on by definition; otherwise read it.
@@ -826,18 +915,21 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
     // no macOS API to set `SleepDisabled` conditionally on its prior value, and
     // the race requires another process to touch this exact, rarely-toggled
     // flag in the same instant we do — accepted rather than engineered around.
-    let sleep_disabled = if we_own {
-        Some(true)
-    } else {
-        sys.read_sleep_disabled()
+    let sleep_disabled = match ownership {
+        Ownership::Confirmed => Some(true),
+        Ownership::PossiblyOwned | Ownership::Unowned => sys.read_sleep_disabled(),
     };
     match sleep_disabled {
         // Already vetoed — by us, or by the user/another process. The lid-close
-        // guarantee holds; never take ownership of a value we did not set, so we
-        // never clear someone else's override later.
+        // guarantee holds either way. Ownership is carried through unchanged:
+        // a value we did not set is never taken over (so we never clear someone
+        // else's later), and a *possibly* ours stays possibly ours — reading it
+        // set now is consistent with our unconfirmed enable but does not prove
+        // it (the compensating clear may have worked and someone else set it
+        // since), so it keeps being cleared on off and reported as unresolved.
         Some(true) => LidCloseOutcome {
             lid_close: LidCloseState::Engaged,
-            we_own,
+            ownership,
         },
         // Safe to enable. Persist the marker *before* enabling so a crash in
         // between leaves a record the next launch reconciles. If the marker
@@ -850,46 +942,17 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
                 // No failsafe on disk → don't enable; there would be no record
                 // to recover from after a crash.
                 sys.remove_marker();
-                LidCloseOutcome {
+                return LidCloseOutcome {
                     lid_close: LidCloseState::Unavailable,
-                    we_own: false,
-                }
-            } else {
-                // Enable, then confirm against the kernel flag instead of the
-                // setter's result: `osascript` can report failure after `pmset`
-                // already set `SleepDisabled`, and dropping the marker then would
-                // strand the Mac awake with no record to recover from.
-                sys.set_disablesleep(true);
-                match sys.read_sleep_disabled() {
-                    // Confirmed on: own it and keep the marker guarding it.
-                    Some(true) => LidCloseOutcome {
-                        lid_close: LidCloseState::Engaged,
-                        we_own: true,
-                    },
-                    // Confirmed still off (auth declined / `pmset` failed): the
-                    // enable really did nothing, so drop the marker.
-                    Some(false) => {
-                        sys.remove_marker();
-                        LidCloseOutcome {
-                            lid_close: LidCloseState::Unavailable,
-                            we_own: false,
-                        }
-                    }
-                    // Unreadable: the override may be in force. Keep the marker as
-                    // the failsafe (launch reconcile / cleanup will clear it) but
-                    // don't claim ownership — an unverified override must not
-                    // satisfy the `we_own ⇒ on` shortcut above.
-                    None => {
-                        tracing::warn!(
-                            "could not confirm sleep state after enabling lid-close veto; keeping the failsafe marker"
-                        );
-                        LidCloseOutcome {
-                            lid_close: LidCloseState::Unavailable,
-                            we_own: false,
-                        }
-                    }
-                }
+                    ownership: Ownership::Unowned,
+                };
             }
+            // Enable, then confirm against the kernel flag instead of the
+            // setter's result: `osascript` can report failure after `pmset`
+            // already set `SleepDisabled`, and dropping the marker then would
+            // strand the Mac awake with no record to recover from.
+            sys.set_disablesleep(true);
+            confirm_enable(sys)
         }
         // Unreadable: don't clobber an override we can't see, and don't claim a
         // guarantee we can't make.
@@ -897,7 +960,70 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
             tracing::warn!("could not read sleep state; not engaging lid-close veto");
             LidCloseOutcome {
                 lid_close: LidCloseState::Unavailable,
-                we_own,
+                ownership,
+            }
+        }
+    }
+}
+
+/// Settle an enable that has just run against the kernel flag.
+///
+/// Read back set: ours, confirmed. Read back clear (auth declined / `pmset`
+/// failed): the enable did nothing, drop the marker. Unreadable is the case
+/// that must not end in "off" with the Mac unable to sleep: the flag *was* clear
+/// before the enable, so if it is set now the enable took. Rather than give up,
+/// read once more, and if that fails too, compensate — clear the override in
+/// this same worker and confirm *that*. Only when the clear cannot be confirmed
+/// either is the override left as [`Ownership::PossiblyOwned`], marker kept, for
+/// off, exit and the next reconcile to finish; the worker reports that state
+/// rather than a plain failure so the UI shows it as unresolved.
+fn confirm_enable<S: LidCloseSys>(sys: &S) -> LidCloseOutcome {
+    let confirmed = || LidCloseOutcome {
+        lid_close: LidCloseState::Engaged,
+        ownership: Ownership::Confirmed,
+    };
+    let did_nothing = || {
+        sys.remove_marker();
+        LidCloseOutcome {
+            lid_close: LidCloseState::Unavailable,
+            ownership: Ownership::Unowned,
+        }
+    };
+    match sys.read_sleep_disabled() {
+        Some(true) => return confirmed(),
+        Some(false) => return did_nothing(),
+        None => {}
+    }
+    // One more read before doing anything drastic: a transient `pmset -g`
+    // failure is the common cause.
+    match sys.read_sleep_disabled() {
+        Some(true) => return confirmed(),
+        Some(false) => return did_nothing(),
+        None => {}
+    }
+    tracing::warn!(
+        "could not confirm sleep state after enabling lid-close veto; clearing it again rather \
+         than leave the Mac possibly unable to sleep"
+    );
+    sys.set_disablesleep(false);
+    match sys.read_sleep_disabled() {
+        // Compensation confirmed: the enable is fully undone.
+        Some(false) => did_nothing(),
+        // Still set after our clear: it was clear before we began, so this is
+        // ours and the clear was declined — own it and stay engaged rather than
+        // report off over a live override.
+        Some(true) => confirmed(),
+        // Nothing can be read: the override may be in force. Keep the marker as
+        // the failsafe and remember it as possibly ours, so off and exit clear
+        // it, a later read that finds it set confirms it, and the UI says so.
+        None => {
+            tracing::warn!(
+                "could not confirm the compensating clear either; keeping the failsafe marker and \
+                 treating the lid-close override as possibly ours"
+            );
+            LidCloseOutcome {
+                lid_close: LidCloseState::Unavailable,
+                ownership: Ownership::PossiblyOwned,
             }
         }
     }
@@ -917,8 +1043,17 @@ enum ReconcileWriteback {
     Off,
     /// Enabling failed before the mandatory lid-close veto was established.
     EnableFailed,
+    /// Enabling failed *and* the override may nonetheless be in force: our
+    /// enable ran but could not be confirmed, and neither could the clear that
+    /// followed. Keep-awake is off, but the Mac may be unable to sleep until the
+    /// clear is retried.
+    EnableUnconfirmed,
     /// Disabling failed and Tomari still owns a live lid-close veto.
     DisableFailed,
+    /// A recovery clear — run from the off state, for an override that is only
+    /// possibly ours — could not be confirmed. Keep-awake stays off (nothing
+    /// holds an assertion), the unresolved notice stays, and retry stays armed.
+    RecoveryFailed,
 }
 
 /// Decide the committed keep-awake state from a reconcile, given whether the
@@ -929,23 +1064,34 @@ enum ReconcileWriteback {
 fn reconcile_writeback(
     superseded: bool,
     desired_on: bool,
+    was_active: bool,
     lid_close: LidCloseState,
-    we_own: bool,
+    ownership: Ownership,
 ) -> ReconcileWriteback {
     if superseded {
         ReconcileWriteback::Superseded
     } else if desired_on {
         // Turning on: the veto is mandatory, so commit on only if it engaged;
-        // otherwise (declined / unreadable) roll the whole switch back off.
+        // otherwise (declined / unreadable) roll the whole switch back off —
+        // saying so when the override may still be in force.
         if lid_close == LidCloseState::Engaged {
             ReconcileWriteback::On
+        } else if ownership == Ownership::PossiblyOwned {
+            ReconcileWriteback::EnableUnconfirmed
         } else {
             ReconcileWriteback::EnableFailed
         }
-    } else if we_own {
-        // Turning off but the override clear was declined: we still own it, so
-        // sleep is still prevented — keep keep-awake on instead of lying it is off.
-        ReconcileWriteback::DisableFailed
+    } else if ownership.may_own() {
+        // Turning off but the override clear was declined (or could not be
+        // confirmed): we still own it — or might — so sleep may still be
+        // prevented. From on, keep keep-awake on instead of lying it is off.
+        // From off (a recovery of a possibly-owned override) there is no "on"
+        // to fall back to: stay off, keep saying it is unresolved.
+        if was_active {
+            ReconcileWriteback::DisableFailed
+        } else {
+            ReconcileWriteback::RecoveryFailed
+        }
     } else {
         // Turning off and nothing is left we own (cleared, or never ours): off.
         ReconcileWriteback::Off
@@ -957,10 +1103,10 @@ fn reconcile_writeback(
 /// that crashed after writing the marker but before recording ownership). A
 /// `disablesleep` we never touched — no ownership, no marker — is left alone, so
 /// quit / logout / updater restart never clears a foreign override.
-fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, we_own: bool) -> bool {
-    if !(we_own || sys.marker_exists()) {
+fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, ownership: Ownership) -> Ownership {
+    if !(ownership.may_own() || sys.marker_exists()) {
         // Nothing of ours to clear; never touch a foreign override.
-        return we_own;
+        return ownership;
     }
     // Confirm the clear against the kernel flag rather than the setter's result:
     // trusting a reported success that did not take would drop the failsafe
@@ -970,11 +1116,11 @@ fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, we_own: bool) -> bool {
     match sys.read_sleep_disabled() {
         Some(false) => {
             sys.remove_marker();
-            false
+            Ownership::Unowned
         }
         // Still set, or unreadable: keep the marker so the next launch's
         // reconcile clears the leftover rather than leaking the override.
-        Some(true) | None => we_own,
+        Some(true) | None => ownership,
     }
 }
 
@@ -983,22 +1129,46 @@ fn cleanup_lid_close_with<S: LidCloseSys>(sys: &S, we_own: bool) -> bool {
 /// so at launch the intended state is always off: any override we still own
 /// must go. This is the one place an auth prompt can appear at launch, and only
 /// after an unclean exit with the override still set (a reboot clears it).
-pub fn reconcile_on_launch(_app: &AppHandle) {
+pub fn reconcile_on_launch(app: &AppHandle) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     #[cfg(target_os = "macos")]
-    match reconcile_decision(marker_exists(), read_sleep_disabled()) {
-        ReconcileAction::Nothing => {}
-        ReconcileAction::Keep => {
-            tracing::warn!("could not read sleep state at launch; keeping the keep-awake marker")
-        }
-        ReconcileAction::RemoveMarker => remove_marker(),
-        ReconcileAction::ClearOverride => {
-            tracing::warn!("clearing a leftover lid-close sleep override from a previous run");
-            // Goes through the same verified clear as exit-time cleanup rather
-            // than trusting `osascript`'s exit status. This is the last chance to
-            // recover a leaked override, so a setter that reports success without
-            // changing `SleepDisabled` must not take the marker with it — that
-            // would strand the Mac awake with no record left to recover from.
-            cleanup_lid_close_with(&RealSys, true);
+    {
+        let unresolved = match reconcile_decision(marker_exists(), read_sleep_disabled()) {
+            ReconcileAction::Nothing => false,
+            ReconcileAction::Keep => {
+                tracing::warn!(
+                    "could not read sleep state at launch; keeping the keep-awake marker"
+                );
+                true
+            }
+            ReconcileAction::RemoveMarker => {
+                remove_marker();
+                false
+            }
+            ReconcileAction::ClearOverride => {
+                tracing::warn!("clearing a leftover lid-close sleep override from a previous run");
+                // Goes through the same verified clear as exit-time cleanup rather
+                // than trusting `osascript`'s exit status. This is the last chance
+                // to recover a leaked override, so a setter that reports success
+                // without changing `SleepDisabled` must not take the marker with
+                // it — that would strand the Mac awake with no record left to
+                // recover from.
+                cleanup_lid_close_with(&RealSys, Ownership::Confirmed).may_own()
+            }
+        };
+        // A marker that survives launch is an override we may still be holding.
+        // Carry that into the runtime state — as *possibly* ours, since the
+        // previous run's confirmation is gone with it — so a later engage does
+        // not mistake the set flag for someone else's, off and exit clear it,
+        // and the UI offers the retry instead of showing a clean off.
+        if unresolved {
+            let state = app.state::<AppState>();
+            let mut k = state.keep_awake.lock_safe();
+            k.ownership = Ownership::PossiblyOwned;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+            k.retry_target = Some(false);
         }
     }
 }
@@ -1042,10 +1212,10 @@ pub fn cleanup_blocking(app: &AppHandle) {
         // anything that still slips past.
         // Lock order is always LID_OP_LOCK → keep_awake (never the reverse).
         let _op = LID_OP_LOCK.lock_safe();
-        let we_own = state.keep_awake.lock_safe().we_own_override;
-        let still_own = cleanup_lid_close_with(&RealSys, we_own);
-        if still_own != we_own {
-            state.keep_awake.lock_safe().we_own_override = still_own;
+        let ownership = state.keep_awake.lock_safe().ownership;
+        let remaining = cleanup_lid_close_with(&RealSys, ownership);
+        if remaining != ownership {
+            state.keep_awake.lock_safe().ownership = remaining;
         }
     }
 }
@@ -1096,15 +1266,15 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
     if state.keep_awake.lock_safe().generation != request_generation {
         return;
     }
-    let we_own = state.keep_awake.lock_safe().we_own_override;
+    let ownership = state.keep_awake.lock_safe().ownership;
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
-    let outcome = reconcile_lid_close_with(&RealSys, desired_on, we_own);
+    let outcome = reconcile_lid_close_with(&RealSys, desired_on, ownership);
     {
         let mut k = state.keep_awake.lock_safe();
         // Always record ownership — even when superseded — so a later worker or
         // cleanup can clear an override this cycle set.
-        k.we_own_override = outcome.we_own;
+        k.ownership = outcome.ownership;
         // Compare the *current* generation against the one stamped when this
         // worker was spawned. Reading it here (after winning `LID_OP_LOCK`)
         // instead would compare against whatever the latest transition set and
@@ -1112,8 +1282,9 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
         match reconcile_writeback(
             k.generation != request_generation,
             desired_on,
+            k.active,
             outcome.lid_close,
-            outcome.we_own,
+            outcome.ownership,
         ) {
             ReconcileWriteback::Superseded => return,
             ReconcileWriteback::On => {
@@ -1146,6 +1317,17 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
                 k.lid_close = LidCloseState::Off;
                 k.phase = KeepAwakePhase::Off;
                 k.retry_target = None;
+                // A confirmed clear is exactly what resolves this notice.
+                if k.notice == Some(KeepAwakeNotice::LidCloseUnconfirmed) {
+                    k.notice = None;
+                }
+            }
+            ReconcileWriteback::RecoveryFailed => {
+                k.active = false;
+                k.lid_close = LidCloseState::Off;
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+                k.retry_target = Some(false);
             }
             ReconcileWriteback::EnableFailed => {
                 if let Some(id) = k.assertion.take() {
@@ -1156,6 +1338,19 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
                 k.phase = KeepAwakePhase::Failed;
                 k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
                 k.retry_target = Some(true);
+            }
+            ReconcileWriteback::EnableUnconfirmed => {
+                if let Some(id) = k.assertion.take() {
+                    release_assertion(id);
+                }
+                // Off, but not clean: the override may be live. The notice says
+                // so, `owns_lid_close` stays true, and a retry runs the *clear*
+                // (not another enable) so the user can finish the recovery.
+                k.active = false;
+                k.lid_close = LidCloseState::Off;
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+                k.retry_target = Some(false);
             }
             ReconcileWriteback::DisableFailed => {
                 k.active = true;
@@ -1657,11 +1852,17 @@ mod tests {
         // commit nothing, whatever the direction/outcome — the newer cycle's
         // worker owns the final state, so a stale cancel can't clobber it.
         assert_eq!(
-            reconcile_writeback(true, true, LidCloseState::Unavailable, false),
+            reconcile_writeback(
+                true,
+                true,
+                false,
+                LidCloseState::Unavailable,
+                Ownership::Unowned
+            ),
             ReconcileWriteback::Superseded
         );
         assert_eq!(
-            reconcile_writeback(true, false, LidCloseState::Off, true),
+            reconcile_writeback(true, false, true, LidCloseState::Off, Ownership::Confirmed),
             ReconcileWriteback::Superseded
         );
     }
@@ -1671,11 +1872,23 @@ mod tests {
         // Turning on commits only if the veto engaged; a declined / unreadable
         // veto rolls the whole (mandatory-veto) switch back off.
         assert_eq!(
-            reconcile_writeback(false, true, LidCloseState::Engaged, true),
+            reconcile_writeback(
+                false,
+                true,
+                false,
+                LidCloseState::Engaged,
+                Ownership::Confirmed
+            ),
             ReconcileWriteback::On
         );
         assert_eq!(
-            reconcile_writeback(false, true, LidCloseState::Unavailable, false),
+            reconcile_writeback(
+                false,
+                true,
+                false,
+                LidCloseState::Unavailable,
+                Ownership::Unowned
+            ),
             ReconcileWriteback::EnableFailed
         );
     }
@@ -1685,7 +1898,7 @@ mod tests {
         // Turning off but the override clear was declined: we still own it, so
         // sleep is still prevented — keep keep-awake on rather than report off.
         assert_eq!(
-            reconcile_writeback(false, false, LidCloseState::Off, true),
+            reconcile_writeback(false, false, true, LidCloseState::Off, Ownership::Confirmed),
             ReconcileWriteback::DisableFailed
         );
     }
@@ -1694,7 +1907,7 @@ mod tests {
     fn writeback_turn_off_commits_when_cleared() {
         // Turning off and nothing left we own (cleared, or never ours): commit off.
         assert_eq!(
-            reconcile_writeback(false, false, LidCloseState::Off, false),
+            reconcile_writeback(false, false, true, LidCloseState::Off, Ownership::Unowned),
             ReconcileWriteback::Off
         );
     }
@@ -1741,6 +1954,13 @@ mod tests {
         marker: std::cell::Cell<bool>,
         /// Every side-effecting call, in order.
         ops: std::cell::RefCell<Vec<Op>>,
+        /// Reads that fail (return `None`) before the flag becomes readable
+        /// again, once a `pmset` has run. `None`: reads never fail this way.
+        read_failures_left: std::cell::Cell<Option<usize>>,
+        /// Whether a `set_disablesleep(false)` ends the read failures.
+        reads_recover_on_clear: bool,
+        /// Whether any `pmset` has run yet (arms the read failures above).
+        pmset_ran: std::cell::Cell<bool>,
     }
 
     impl FakeSys {
@@ -1753,6 +1973,9 @@ mod tests {
                 pmset_effect: PmsetEffect::Apply,
                 marker: std::cell::Cell::new(false),
                 ops: std::cell::RefCell::new(Vec::new()),
+                read_failures_left: std::cell::Cell::new(None),
+                reads_recover_on_clear: false,
+                pmset_ran: std::cell::Cell::new(false),
             }
         }
         /// Simulate a directory the marker cannot be written to.
@@ -1786,6 +2009,19 @@ mod tests {
             self.pmset_effect = PmsetEffect::BecomeUnreadable;
             self
         }
+        /// Simulate one transient read failure after the `pmset` call; the flag
+        /// itself is applied and readable again afterwards.
+        fn readback_fails_once(self) -> Self {
+            self.read_failures_left.set(Some(1));
+            self
+        }
+        /// Simulate reads failing after an enable until a clear has run — the
+        /// compensating clear is what makes the state readable again.
+        fn readback_fails_until_clear(mut self) -> Self {
+            self.read_failures_left.set(Some(usize::MAX));
+            self.reads_recover_on_clear = true;
+            self
+        }
         /// Start with the failsafe marker already on disk.
         fn with_marker(self) -> Self {
             self.marker.set(true);
@@ -1814,10 +2050,23 @@ mod tests {
 
     impl LidCloseSys for FakeSys {
         fn read_sleep_disabled(&self) -> Option<bool> {
+            // Read failures are armed by the first `pmset` call (they model the
+            // read-back), so the pre-check read is unaffected.
+            if self.pmset_ran.get()
+                && let Some(left) = self.read_failures_left.get()
+                && left > 0
+            {
+                self.read_failures_left.set(Some(left - 1));
+                return None;
+            }
             self.sleep_disabled.get()
         }
         fn set_disablesleep(&self, on: bool) -> bool {
             self.ops.borrow_mut().push(Op::SetDisablesleep(on));
+            self.pmset_ran.set(true);
+            if !on && self.reads_recover_on_clear {
+                self.read_failures_left.set(None);
+            }
             match self.pmset_effect {
                 PmsetEffect::Apply => self.sleep_disabled.set(Some(on)),
                 PmsetEffect::NoChange => {}
@@ -1848,12 +2097,12 @@ mod tests {
         // Nothing was vetoing sleep; we engage, own the override, and the marker
         // must guard it (written before the `pmset`).
         let sys = FakeSys::new(Some(false));
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Engaged,
-                we_own: true,
+                ownership: Ownership::Confirmed,
             }
         );
         assert!(
@@ -1877,12 +2126,12 @@ mod tests {
         // roll-back: it turns Unavailable-for-a-wanted-on into a full switch-off),
         // so the assertion outcome here is just `Unavailable`. No marker may linger.
         let sys = FakeSys::new(Some(false)).pmset_fails();
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Unavailable,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert!(
@@ -1897,12 +2146,12 @@ mod tests {
         // If the failsafe marker can't be persisted we must not enable the
         // override — there would be no record to recover from after a crash.
         let sys = FakeSys::new(Some(false)).marker_write_fails();
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Unavailable,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert!(
@@ -1918,12 +2167,12 @@ mod tests {
         // on it for the lid-close guarantee but never take ownership, so we will
         // not clear it later.
         let sys = FakeSys::new(Some(true));
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Engaged,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert!(
@@ -1941,12 +2190,12 @@ mod tests {
         // Can't read SleepDisabled: don't clobber a possibly-foreign override and
         // don't claim the lid-close guarantee.
         let sys = FakeSys::new(None);
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Unavailable,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert!(sys.pmset_calls().is_empty());
@@ -1956,12 +2205,12 @@ mod tests {
     fn disable_clears_an_override_we_own() {
         // Normal toggle off: clear our override and drop the marker.
         let sys = FakeSys::new(Some(true)).with_marker();
-        let out = reconcile_lid_close_with(&sys, false, true);
+        let out = reconcile_lid_close_with(&sys, false, Ownership::Confirmed);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert_eq!(sys.pmset_calls(), vec![false]);
@@ -1973,12 +2222,12 @@ mod tests {
         // We turned our idle assertion off, but the lingering `disablesleep`
         // isn't ours — never touch it.
         let sys = FakeSys::new(Some(true));
-        let out = reconcile_lid_close_with(&sys, false, false);
+        let out = reconcile_lid_close_with(&sys, false, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: false,
+                ownership: Ownership::Unowned,
             }
         );
         assert!(sys.pmset_calls().is_empty());
@@ -1989,12 +2238,12 @@ mod tests {
         // Auth declined on the way down: stay owner and keep the marker so launch
         // reconcile / cleanup retries rather than leaking the override.
         let sys = FakeSys::new(Some(true)).with_marker().pmset_fails();
-        let out = reconcile_lid_close_with(&sys, false, true);
+        let out = reconcile_lid_close_with(&sys, false, Ownership::Confirmed);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: true,
+                ownership: Ownership::Confirmed,
             }
         );
         assert_eq!(sys.pmset_calls(), vec![false]);
@@ -2009,8 +2258,8 @@ mod tests {
         // Clean exit (tray quit / logout / normal close / updater restart): the
         // override we engaged must be cleared so it never outlives Tomari.
         let sys = FakeSys::new(Some(true)).with_marker();
-        let still_own = cleanup_lid_close_with(&sys, true);
-        assert!(!still_own);
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Confirmed);
+        assert_eq!(still_own, Ownership::Unowned);
         assert_eq!(sys.pmset_calls(), vec![false]);
         assert!(!sys.marker_present());
     }
@@ -2020,8 +2269,8 @@ mod tests {
         // An engage that crashed after writing the marker but before recording
         // ownership: the marker alone triggers a failsafe clear at exit.
         let sys = FakeSys::new(Some(true)).with_marker();
-        let still_own = cleanup_lid_close_with(&sys, false);
-        assert!(!still_own);
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Unowned);
+        assert_eq!(still_own, Ownership::Unowned);
         assert_eq!(sys.pmset_calls(), vec![false]);
         assert!(!sys.marker_present());
     }
@@ -2031,8 +2280,8 @@ mod tests {
         // `disablesleep` is on but isn't ours and there's no marker: never clear
         // an override Tomari didn't set, even on quit / logout.
         let sys = FakeSys::new(Some(true));
-        let still_own = cleanup_lid_close_with(&sys, false);
-        assert!(!still_own);
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Unowned);
+        assert_eq!(still_own, Ownership::Unowned);
         assert!(
             sys.pmset_calls().is_empty(),
             "must not clear a foreign override at exit"
@@ -2044,8 +2293,12 @@ mod tests {
         // Auth declined during shutdown: stay owner and keep the marker so the
         // next launch's reconcile clears the leftover override.
         let sys = FakeSys::new(Some(true)).with_marker().pmset_fails();
-        let still_own = cleanup_lid_close_with(&sys, true);
-        assert!(still_own, "ownership must survive a failed cleanup");
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Confirmed);
+        assert_eq!(
+            still_own,
+            Ownership::Confirmed,
+            "ownership must survive a failed cleanup"
+        );
         assert!(
             sys.marker_present(),
             "the marker must survive a failed cleanup"
@@ -2058,8 +2311,8 @@ mod tests {
         // ownership, but the clear itself is declined: the marker must survive so
         // the next launch's reconcile retries rather than leaking the override.
         let sys = FakeSys::new(Some(true)).with_marker().pmset_fails();
-        let still_own = cleanup_lid_close_with(&sys, false);
-        assert!(!still_own);
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Unowned);
+        assert_eq!(still_own, Ownership::Unowned);
         assert_eq!(
             sys.pmset_calls(),
             vec![false],
@@ -2078,12 +2331,12 @@ mod tests {
         // stays unable to sleep with no record — the reliability bug. Confirming
         // against the kernel flag must instead own it and keep the marker.
         let sys = FakeSys::new(Some(false)).pmset_applies_despite_reporting_failure();
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Engaged,
-                we_own: true,
+                ownership: Ownership::Confirmed,
             }
         );
         assert!(
@@ -2094,25 +2347,152 @@ mod tests {
     }
 
     #[test]
-    fn enable_with_unreadable_state_afterwards_keeps_the_failsafe_marker() {
-        // The state could not be read back after enabling: the override may be in
-        // force, so the marker must be kept as the failsafe (launch reconcile /
-        // cleanup clears it). Ownership is *not* taken — an unverified override
-        // must not satisfy the `we_own ⇒ on` shortcut on the next engage.
+    fn enable_with_unreadable_state_afterwards_compensates_and_reports_possible_ownership() {
+        // The state could not be read back after enabling, twice. The worker
+        // must not settle for "off" with the Mac possibly unable to sleep: it
+        // clears the override again in the same cycle. Here that clear cannot be
+        // confirmed either, so the marker stays as the failsafe and the override
+        // is recorded as *possibly* ours — never written off as foreign — for
+        // off, exit and the next reconcile to finish, and for the UI to report.
         let sys = FakeSys::new(Some(false)).pmset_leaves_state_unreadable();
-        let out = reconcile_lid_close_with(&sys, true, false);
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Unavailable,
-                we_own: false,
+                ownership: Ownership::PossiblyOwned,
             }
         );
         assert!(
             sys.marker_present(),
             "an unverifiable enable must keep the failsafe marker"
         );
+        assert_eq!(
+            sys.pmset_calls(),
+            vec![true, false],
+            "the enable is compensated in the same cycle"
+        );
+        assert_eq!(
+            reconcile_writeback(false, true, false, out.lid_close, out.ownership),
+            ReconcileWriteback::EnableUnconfirmed
+        );
+    }
+
+    #[test]
+    fn enable_whose_readback_recovers_on_the_second_read_is_confirmed() {
+        // A single transient `pmset -g` failure must not trigger the compensating
+        // clear (and its admin prompt): the second read settles it.
+        let sys = FakeSys::new(Some(false)).readback_fails_once();
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Engaged,
+                ownership: Ownership::Confirmed,
+            }
+        );
         assert_eq!(sys.pmset_calls(), vec![true]);
+        assert!(sys.marker_present());
+    }
+
+    #[test]
+    fn enable_whose_compensating_clear_is_confirmed_ends_clean() {
+        // Unreadable after the enable, but the compensating clear reads back
+        // clear: nothing is left set, so no marker and no ownership remain, and
+        // the switch rolls back as a plain failure.
+        let sys = FakeSys::new(Some(false)).readback_fails_until_clear();
+        let out = reconcile_lid_close_with(&sys, true, Ownership::Unowned);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Unavailable,
+                ownership: Ownership::Unowned,
+            }
+        );
+        assert_eq!(sys.pmset_calls(), vec![true, false]);
+        assert!(!sys.marker_present());
+        assert_eq!(
+            reconcile_writeback(false, true, false, out.lid_close, out.ownership),
+            ReconcileWriteback::EnableFailed
+        );
+    }
+
+    #[test]
+    fn a_possibly_owned_override_read_back_set_stays_possibly_ours() {
+        // The next engage finds the override set. It is not treated as someone
+        // else's — it stays ours to clear — but reading it set does not prove
+        // our enable took either, so the claim is not upgraded.
+        let sys = FakeSys::new(Some(true)).with_marker();
+        let out = reconcile_lid_close_with(&sys, true, Ownership::PossiblyOwned);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Engaged,
+                ownership: Ownership::PossiblyOwned,
+            }
+        );
+        assert!(sys.pmset_calls().is_empty());
+    }
+
+    #[test]
+    fn off_clears_a_possibly_owned_override() {
+        // The unresolved state is recovered by the ordinary off path: possibly
+        // ours is ours to clear, and a confirmed clear drops marker and claim.
+        let sys = FakeSys::new(Some(true)).with_marker();
+        let out = reconcile_lid_close_with(&sys, false, Ownership::PossiblyOwned);
+        assert_eq!(
+            out,
+            LidCloseOutcome {
+                lid_close: LidCloseState::Off,
+                ownership: Ownership::Unowned,
+            }
+        );
+        assert_eq!(sys.pmset_calls(), vec![false]);
+        assert!(!sys.marker_present());
+    }
+
+    #[test]
+    fn a_possibly_owned_override_is_never_reported_off_and_clean() {
+        // Enable could not be confirmed either way → the writeback must say so,
+        // and turning off while it is still possibly ours must not read as a
+        // clean off while the clear is unconfirmed.
+        assert_eq!(
+            reconcile_writeback(
+                false,
+                true,
+                false,
+                LidCloseState::Unavailable,
+                Ownership::PossiblyOwned
+            ),
+            ReconcileWriteback::EnableUnconfirmed
+        );
+        // From on, a declined clear keeps keep-awake on; from off — the
+        // recovery of a possibly-owned override — there is no on to keep, so it
+        // stays off with the notice and retry intact.
+        assert_eq!(
+            reconcile_writeback(
+                false,
+                false,
+                true,
+                LidCloseState::Off,
+                Ownership::PossiblyOwned
+            ),
+            ReconcileWriteback::DisableFailed
+        );
+        assert_eq!(
+            reconcile_writeback(
+                false,
+                false,
+                false,
+                LidCloseState::Off,
+                Ownership::PossiblyOwned
+            ),
+            ReconcileWriteback::RecoveryFailed
+        );
+        assert_eq!(
+            reconcile_writeback(false, false, false, LidCloseState::Off, Ownership::Unowned),
+            ReconcileWriteback::Off
+        );
     }
 
     #[test]
@@ -2124,12 +2504,12 @@ mod tests {
         let sys = FakeSys::new(Some(true))
             .with_marker()
             .pmset_reports_success_without_effect();
-        let out = reconcile_lid_close_with(&sys, false, true);
+        let out = reconcile_lid_close_with(&sys, false, Ownership::Confirmed);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: true,
+                ownership: Ownership::Confirmed,
             }
         );
         assert_eq!(sys.pmset_calls(), vec![false]);
@@ -2146,12 +2526,12 @@ mod tests {
         let sys = FakeSys::new(Some(true))
             .with_marker()
             .pmset_leaves_state_unreadable();
-        let out = reconcile_lid_close_with(&sys, false, true);
+        let out = reconcile_lid_close_with(&sys, false, Ownership::Confirmed);
         assert_eq!(
             out,
             LidCloseOutcome {
                 lid_close: LidCloseState::Off,
-                we_own: true,
+                ownership: Ownership::Confirmed,
             }
         );
         assert_eq!(sys.pmset_calls(), vec![false]);
@@ -2166,8 +2546,12 @@ mod tests {
         let sys = FakeSys::new(Some(true))
             .with_marker()
             .pmset_reports_success_without_effect();
-        let still_own = cleanup_lid_close_with(&sys, true);
-        assert!(still_own, "ownership must survive an unconfirmed clear");
+        let still_own = cleanup_lid_close_with(&sys, Ownership::Confirmed);
+        assert_eq!(
+            still_own,
+            Ownership::Confirmed,
+            "ownership must survive an unconfirmed clear"
+        );
         assert_eq!(sys.pmset_calls(), vec![false]);
         assert!(
             sys.marker_present(),

@@ -141,7 +141,8 @@ export type KeepAwakeNotice =
   | 'acDisconnected'
   | 'lowBattery'
   | 'timerElapsed'
-  | 'authorizationDeclined';
+  | 'authorizationDeclined'
+  | 'lidCloseUnconfirmed';
 
 export interface KeepAwakeOptions {
   durationSecs: number | null;

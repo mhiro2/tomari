@@ -680,7 +680,22 @@ The lid-close veto is a **required** part of keep-awake, not an optional add-on,
 and both directions go through it on the worker thread — which (not the toggle)
 commits the `active` flag. Turning on takes the idle assertion immediately and
 shows on; if the veto then cannot be engaged (auth declined, or the sleep state
-is unreadable) the whole switch rolls back off. Turning off is deferred to the
+is unreadable) the whole switch rolls back off. An enable whose read-back fails
+is not written off as "off": the flag was clear before the enable, so the worker
+reads once more, then clears the override again in the same cycle and confirms
+*that*; only when neither can be confirmed is the override recorded as
+*possibly* ours (`Ownership::PossiblyOwned`, marker kept) and the switch rolled
+back with a `lidCloseUnconfirmed` notice. Retry from that state is a dedicated
+recovery: keep-awake is already off, so instead of `disengage` (which would
+return at once) it stamps its own transition and runs the clear on the worker;
+a clear that cannot be confirmed lands as `RecoveryFailed` — still off, notice
+and retry intact — never as a spurious "on", and cancelling it returns to that
+same unresolved state rather than reversing into an enable. A possibly-owned override is never
+mistaken for a foreign one afterwards: reading it set leaves it possibly ours
+(consistent with our enable, not proof of it), and off and exit clear it. A
+marker that survives `reconcile_on_launch` (unreadable state, or a clear that
+could not be confirmed) is carried into the runtime state the same way, so the
+new run offers the retry rather than showing a clean off. Turning off is deferred to the
 worker: clearing the override needs an admin dialog that can be declined, and
 sleep is still prevented until it succeeds, so a declined clear keeps keep-awake
 on. The exported state machine distinguishes `off`, `enabling`, `on`,

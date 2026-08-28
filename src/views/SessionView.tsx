@@ -49,6 +49,7 @@ const NOTICE_LABEL: Record<KeepAwakeNotice, MessageKey> = {
   lowBattery: 'settings.noticeLowBattery',
   timerElapsed: 'settings.noticeTimerElapsed',
   authorizationDeclined: 'settings.noticeAuthorizationDeclined',
+  lidCloseUnconfirmed: 'settings.noticeLidCloseUnconfirmed',
 };
 
 const POWER_LABEL: Record<PowerSource, MessageKey> = {

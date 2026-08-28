@@ -362,6 +362,8 @@ const en = {
   'settings.noticeTimerElapsed': 'The Keep Awake timer ended.',
   'settings.noticeAuthorizationDeclined':
     'The administrator change was declined or could not be confirmed.',
+  'settings.noticeLidCloseUnconfirmed':
+    'Keep Awake is off, but the lid-close sleep setting could not be confirmed and may still be active. Retry to restore it.',
 
   'settings.externalControl': 'Links from other apps',
   'settings.externalControlHint':
@@ -762,6 +764,8 @@ const ja: Record<MessageKey, string> = {
   'settings.noticeTimerElapsed': 'スリープ防止タイマーが終了しました。',
   'settings.noticeAuthorizationDeclined':
     '管理者による変更が拒否されたか、結果を確認できませんでした。',
+  'settings.noticeLidCloseUnconfirmed':
+    'スリープ防止はオフですが、ふたを閉じたときのスリープ設定を確認できず、まだ有効なままかもしれません。再試行すると元に戻します。',
 
   'settings.externalControl': 'ほかのアプリとの連携',
   'settings.externalControlHint':
