@@ -82,6 +82,11 @@ pub fn set_accessibility_granted(granted: bool) {
     ACCESSIBILITY.store(granted, Ordering::SeqCst);
 }
 
+/// Set when [`reconcile_caps_mapping`] was asked to change the Caps Lock HID
+/// remap while Caps Lock was physically held, and so put the change off until
+/// the release (see there). The tap callback drains it on that release.
+static CAPS_RECONCILE_DEFERRED: AtomicBool = AtomicBool::new(false);
+
 /// (Re)start the tap to match the current settings: tears down any existing tap
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
 /// repeatedly (e.g. when the feature is toggled). Callers that do not need the
@@ -107,6 +112,9 @@ pub fn restart(app: &AppHandle) {
 pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = EVENT_TAP.lock_safe();
     *guard = None; // Drop stops the previous tap.
+    // The engine's hold state is dropped below and the remap reconciled right
+    // here, so a reconcile put off for a Caps Lock hold has nothing to wait for.
+    CAPS_RECONCILE_DEFERRED.store(false, Ordering::SeqCst);
 
     let Some(state) = app.try_state::<AppState>() else {
         return true;
@@ -161,6 +169,8 @@ pub fn restart_result(app: &AppHandle) -> bool {
 pub fn teardown(app: &AppHandle) {
     let mut guard = EVENT_TAP.lock_safe();
     *guard = None;
+    // Quit restores the Caps Lock remap itself; nothing is left to defer.
+    CAPS_RECONCILE_DEFERRED.store(false, Ordering::SeqCst);
     if let Some(state) = app.try_state::<AppState>() {
         release_held_remaps(&state, state.windows.permission_granted());
     }
@@ -248,11 +258,80 @@ pub fn is_running() -> bool {
 /// state first and retries the transition, calling this on every save both keeps
 /// a still-unresolved mismatch warning (it does not silently vanish on an
 /// unrelated save) and heals it as soon as the failing step cooperates again.
+///
+/// While Caps Lock is physically held the HID remap is left as it is and the
+/// reconcile is put off until the release. Flipping the remap mid-hold would
+/// deliver the release as a different key (a native Caps Lock `flagsChanged`
+/// instead of an F18 key-up, or the reverse) or swallow it, leaving the engine
+/// holding Caps Lock — and stamping its target onto every keystroke — until the
+/// key is pressed again. The deferred case still answers honestly: it reports
+/// whether the *current* live mapping already matches what is asked for (and
+/// the last reconcile that produced it was clean), so a mismatch left by an
+/// earlier `hidutil` failure keeps warning rather than being masked by the
+/// hold, and a change genuinely waiting on the release is reported as not yet
+/// applied. The release then runs the same reconcile, and the next save
+/// re-checks it as usual.
 pub fn reconcile_caps_mapping(state: &AppState) -> bool {
-    let manage = EVENT_TAP.lock_safe().is_some()
-        && state.keyboard_enabled()
-        && state.engine.lock_safe().has_caps_lock_rule();
-    crate::capsmap::reconcile(manage).reconciled
+    // Hold `EVENT_TAP` for the whole reconcile, as `restart_result` does: the
+    // two then serialize, so the "is a tap running" this decides `manage` from
+    // cannot go stale under it (a restart stopping the tap, or failing to start
+    // it, between the check and the `hidutil` write would otherwise remap Caps
+    // Lock to F18 with nothing to handle F18). Lock order is `EVENT_TAP` then
+    // engine — the same as `restart_result`, never the reverse; the engine lock
+    // is dropped before the reconcile so the tap callback is not held up by it.
+    let tap_guard = EVENT_TAP.lock_safe();
+    let tap_running = tap_guard.is_some();
+    let (manage, deferred) = {
+        let engine = state.engine.lock_safe();
+        let manage = tap_running && state.keyboard_enabled() && engine.has_caps_lock_rule();
+        // The deferred flag is published while the engine lock still proves the
+        // key held: the release callback clears the hold and drains the flag
+        // after taking the same lock, so it cannot slip between the two and
+        // leave a set flag with nobody left to drain it.
+        let deferred = engine.is_held(ModifierKey::CapsLock);
+        CAPS_RECONCILE_DEFERRED.store(deferred, Ordering::SeqCst);
+        (manage, deferred)
+    };
+    if deferred {
+        tracing::info!(
+            manage,
+            "caps-lock HID remap reconcile deferred until Caps Lock is released"
+        );
+        return crate::capsmap::matches(manage);
+    }
+    let reconciled = crate::capsmap::reconcile(manage).reconciled;
+    drop(tap_guard);
+    reconciled
+}
+
+/// Run a Caps Lock HID reconcile that [`reconcile_caps_mapping`] put off for a
+/// hold, once the hold is over. Called from the tap callback, so the reconcile
+/// itself — a `hidutil` round-trip — is moved to its own thread: a child
+/// process must never run inside the callback, where it would stall every
+/// keystroke and get the tap disabled for timeout. A no-op unless a reconcile
+/// is actually pending, so the common release costs one atomic read.
+fn run_deferred_caps_reconcile(app: &AppHandle) {
+    if !CAPS_RECONCILE_DEFERRED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let handle = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("tomari-caps-reconcile".into())
+        .spawn(move || {
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            if reconcile_caps_mapping(&state) {
+                tracing::info!("deferred caps-lock HID remap reconcile applied");
+            } else {
+                tracing::warn!("deferred caps-lock HID remap reconcile did not match the rules");
+            }
+        });
+    if let Err(e) = spawned {
+        // Leave it pending: the next save's authoritative check retries it.
+        CAPS_RECONCILE_DEFERRED.store(true, Ordering::SeqCst);
+        tracing::warn!(error = %e, "could not spawn the deferred caps-lock HID remap reconcile");
+    }
 }
 
 /// Mutable state local to the tap thread, reached through a `Mutex` because the
@@ -321,6 +400,9 @@ fn handle_event(
             // from the mirror — no TCC call from the callback.
             release_held_remaps(&app_state, ACCESSIBILITY.load(Ordering::SeqCst));
         }
+        // The reset just forgot any Caps Lock hold, so a remap change that was
+        // waiting on its release can go ahead now.
+        run_deferred_caps_reconcile(app);
         {
             let mut ts = state.lock_safe();
             // Clear the derived stamps: they are recomputed from the engine's
@@ -420,15 +502,16 @@ fn drive_modifier(
 ) -> (Option<ModifierKey>, bool) {
     let ModifierEvent { key, side, is_down } = *ev;
 
-    // Feed the engine and read back this key's held role plus the post-event
-    // held set (so the stamp tracking reflects this very up/down). The remap
-    // role is read *before* the event is processed: for a release the engine
-    // still holds the role recorded at the press, which is what the app has
-    // been holding and therefore what the release must be rewritten into —
-    // even if the rules changed in between. Processing the release forgets it.
+    // Feed the engine and read back this key's held roles plus the post-event
+    // held set (so the stamp tracking reflects this very up/down). The remap and
+    // hyper roles are read *before* the event is processed: for a release the
+    // engine still holds the roles recorded at the press, which is what the app
+    // has been holding and therefore what the release must be rewritten into —
+    // even if the rules changed in between. Processing the release forgets them.
     let (tap_action, remap, hyper, any_hyper_held, held_remap_stamp) = {
         let mut engine = app_state.engine.lock_safe();
         let remap = engine.remap_for(key, side);
+        let hyper = engine.is_hyper(key, side);
         let action = engine.process(if is_down {
             KeyEvent::ModifierDown {
                 key,
@@ -445,7 +528,7 @@ fn drive_modifier(
         (
             action,
             remap,
-            engine.is_hyper(key, side),
+            hyper,
             engine.is_any_hyper_held(),
             engine.held_remap_stamp(),
         )
@@ -464,6 +547,12 @@ fn drive_modifier(
 
     if let Some(action) = tap_action {
         dispatch_tap_action(app, proxy, action);
+    }
+
+    // A Caps Lock HID remap change held back for this key's hold lands now that
+    // the hold is over (see `reconcile_caps_mapping`).
+    if key == ModifierKey::CapsLock && !is_down {
+        run_deferred_caps_reconcile(app);
     }
 
     (remap, hyper)

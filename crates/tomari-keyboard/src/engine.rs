@@ -61,12 +61,13 @@ pub struct ModifierEngine {
     held: Vec<Held>,
 }
 
-/// A managed modifier that is physically down, with the remap role it took
-/// when it went down. The role is fixed at the press: the down event was
-/// rewritten into `remap` (if any) and the app has been holding *that* modifier
-/// since, so the release has to undo the same thing whatever the rules say by
-/// then — a rule edited or removed mid-hold must not turn a Command release
-/// into a Control one and leave Command stuck.
+/// A managed modifier that is physically down, with the role it took when it
+/// went down. The role is fixed at the press: the down event was rewritten into
+/// `remap` (if any) or stripped as a hyper key, and the app has been holding
+/// *that* since, so the release — and every keystroke stamped in between — has
+/// to keep saying the same thing whatever the rules say by then. A rule edited
+/// or removed mid-hold must not turn a Command release into a Control one and
+/// leave Command stuck, nor drop the ⌃⌥⇧⌘ stamp from a hyper hold in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
     key: ModifierKey,
@@ -74,6 +75,9 @@ struct Held {
     /// The modifier this key's down was rewritten into, when a non-hyper rule
     /// remapped it to a *different* modifier.
     remap: Option<ModifierKey>,
+    /// Whether the key went down as a hyper key (its own flag stripped, the
+    /// ⌃⌥⇧⌘ combo stamped onto the keystrokes typed while it is held).
+    hyper: bool,
 }
 
 /// How long a modifier must be held before its release no longer counts as a
@@ -93,7 +97,9 @@ impl ModifierEngine {
 
     /// Replace the active rule set, discarding any in-flight press state. The
     /// physical-hold tracking is left intact — changing rules does not change
-    /// which keys the user is holding.
+    /// which keys the user is holding — and so are the roles recorded at each
+    /// press (see [`Held`]): a key held across the reload keeps behaving as it
+    /// did when it went down, and only its next press picks up the new rules.
     pub fn set_rules(&mut self, rules: Vec<ModifierRule>) {
         self.rules = rules;
         self.press = None;
@@ -222,17 +228,39 @@ impl ModifierEngine {
         self.held_remap_stamp().1
     }
 
-    /// Whether holding/chording this key should act as the hyper combo (⌃⌥⇧⌘).
+    /// Whether holding/chording this key acts as the hyper combo (⌃⌥⇧⌘). While
+    /// the key is held this is the role recorded at its press (see [`Held`]),
+    /// so the release matches the down even if the rules changed in between;
+    /// otherwise — i.e. for the press itself — it is what the current rule says.
     pub fn is_hyper(&self, key: ModifierKey, side: KeySide) -> bool {
+        match self.held.iter().find(|h| (h.key, h.side) == (key, side)) {
+            Some(held) => held.hyper,
+            None => self.rule_hyper(key, side),
+        }
+    }
+
+    /// Whether a press of `key`/`side` is a hyper key under the current rules.
+    fn rule_hyper(&self, key: ModifierKey, side: KeySide) -> bool {
         self.find_rule(key, side).is_some_and(|r| r.hyper)
     }
 
-    /// Whether *any* currently-held managed modifier is a hyper key. The tap
-    /// keeps the ⌃⌥⇧⌘ stamp active for as long as this holds, so releasing one
-    /// of two simultaneously-held hyper keys does not drop hyper while the other
-    /// is still down (tracking a single `bool` off each key's own up/down would).
+    /// Whether *any* currently-held managed modifier went down as a hyper key.
+    /// The tap keeps the ⌃⌥⇧⌘ stamp active for as long as this holds, so
+    /// releasing one of two simultaneously-held hyper keys does not drop hyper
+    /// while the other is still down (tracking a single `bool` off each key's
+    /// own up/down would). Read off the roles recorded at each press, so a rule
+    /// reload mid-hold neither drops nor adds the stamp until the release.
     pub fn is_any_hyper_held(&self) -> bool {
-        self.held.iter().any(|h| self.is_hyper(h.key, h.side))
+        self.held.iter().any(|h| h.hyper)
+    }
+
+    /// Whether `key` (either side) is currently physically held. Lets a caller
+    /// postpone a change that must not land mid-hold — the Caps Lock HID remap
+    /// especially: switching Caps Lock between native and its F18 proxy while
+    /// it is down would deliver its release as a different key, or not at all,
+    /// and leave the engine believing it is still held.
+    pub fn is_held(&self, key: ModifierKey) -> bool {
+        self.held.iter().any(|h| h.key == key)
     }
 
     /// Feed one event in; returns an action to perform, if a tap completed.
@@ -247,6 +275,7 @@ impl ModifierEngine {
                         key,
                         side,
                         remap: self.rule_remap(key, side),
+                        hyper: self.rule_hyper(key, side),
                     });
                 }
                 match self.press.as_mut() {
@@ -656,6 +685,85 @@ mod tests {
             at_ms: 500,
         });
         assert_eq!(e.remap_for(ModifierKey::Control, KeySide::Left), None);
+    }
+
+    #[test]
+    fn a_held_hyper_key_keeps_the_role_it_was_pressed_with() {
+        // Control is held as a hyper key when the rule is removed. Its down was
+        // stripped and the keystrokes typed since carry ⌃⌥⇧⌘, so the hold must
+        // keep stamping hyper and the release must still be treated as hyper —
+        // not fall through as a bare Control up under the new rules.
+        let mut r = rule(ModifierKey::Control, KeySide::Either, AppAction::NoOp);
+        r.hyper = true;
+        let mut e = engine(vec![r]);
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        e.set_rules(vec![]);
+        assert!(e.is_hyper(ModifierKey::Control, KeySide::Left));
+        assert!(e.is_any_hyper_held());
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 500,
+        });
+        // A fresh press under the new (empty) rules is not hyper.
+        assert!(!e.is_hyper(ModifierKey::Control, KeySide::Left));
+        assert!(!e.is_any_hyper_held());
+    }
+
+    #[test]
+    fn a_rule_added_mid_hold_does_not_make_the_held_key_hyper() {
+        // The mirror image: Control went down as a plain modifier (the app saw
+        // a real Control down), then a hyper rule for it appears. Stamping
+        // hyper now would turn the chord in progress into ⌃⌥⇧⌘ and the release
+        // would be stripped while the app still holds Control.
+        let mut e = engine(vec![]);
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 0,
+        });
+        let mut r = rule(ModifierKey::Control, KeySide::Either, AppAction::NoOp);
+        r.hyper = true;
+        e.set_rules(vec![r]);
+        assert!(!e.is_hyper(ModifierKey::Control, KeySide::Left));
+        assert!(!e.is_any_hyper_held());
+        assert_eq!(e.remap_for(ModifierKey::Control, KeySide::Left), None);
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::Control,
+            side: KeySide::Left,
+            at_ms: 500,
+        });
+        // Once released, the next press takes the new rule.
+        assert!(e.is_hyper(ModifierKey::Control, KeySide::Left));
+    }
+
+    #[test]
+    fn is_held_tracks_the_physical_key_across_a_rule_reload() {
+        let mut e = engine(vec![rule(
+            ModifierKey::CapsLock,
+            KeySide::Either,
+            AppAction::NoOp,
+        )]);
+        assert!(!e.is_held(ModifierKey::CapsLock));
+        e.process(KeyEvent::ModifierDown {
+            key: ModifierKey::CapsLock,
+            side: KeySide::Either,
+            at_ms: 0,
+        });
+        assert!(e.is_held(ModifierKey::CapsLock));
+        // Removing the rule does not release the key.
+        e.set_rules(vec![]);
+        assert!(e.is_held(ModifierKey::CapsLock));
+        e.process(KeyEvent::ModifierUp {
+            key: ModifierKey::CapsLock,
+            side: KeySide::Either,
+            at_ms: 500,
+        });
+        assert!(!e.is_held(ModifierKey::CapsLock));
     }
 
     #[test]

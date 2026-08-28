@@ -89,7 +89,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::locks::MutexExt;
 
@@ -788,25 +788,64 @@ impl CapsMapSys for RealSys {
 /// file a single writer.
 static RECONCILE: Mutex<()> = Mutex::new(());
 
-/// Whether Caps Lock is currently remapped to F18, so F18 key events are the
-/// Caps Lock modifier rather than a real F18 key ([`crate::eventtap`]). Written
-/// only under [`RECONCILE`], from the reconcile's *actual* outcome; read on the
-/// tap thread for every keystroke, so it is an atomic rather than behind a lock.
-static CAPS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The live Caps Lock remap status, packed into one word so the two facts a
+/// reader combines — is F18 standing in for Caps Lock, and did the reconcile
+/// that made it so fully succeed — always come from the *same* reconcile. Two
+/// separate atomics could pair an older mapping with a newer verdict when a
+/// reconcile lands between the loads. Written only under [`RECONCILE`], from the
+/// reconcile's *actual* outcome; read on the tap thread for every keystroke, so
+/// it is an atomic rather than behind a lock. Starts as "not remapped, in
+/// step" — nothing has been asked for yet.
+static CAPS_STATUS: AtomicU8 = AtomicU8::new(STATUS_RECONCILED);
+
+/// [`CAPS_STATUS`] bit: Caps Lock is remapped to F18.
+const STATUS_PROXY_ACTIVE: u8 = 0b01;
+/// [`CAPS_STATUS`] bit: the last reconcile fully reached its request.
+const STATUS_RECONCILED: u8 = 0b10;
+
+fn pack_status(outcome: ReconcileOutcome) -> u8 {
+    (if outcome.proxy_active {
+        STATUS_PROXY_ACTIVE
+    } else {
+        0
+    }) | (if outcome.reconciled {
+        STATUS_RECONCILED
+    } else {
+        0
+    })
+}
+
+/// The outcome of the reconcile that most recently ran, read as one snapshot.
+pub fn live_status() -> ReconcileOutcome {
+    let bits = CAPS_STATUS.load(Ordering::SeqCst);
+    ReconcileOutcome {
+        proxy_active: bits & STATUS_PROXY_ACTIVE != 0,
+        reconciled: bits & STATUS_RECONCILED != 0,
+    }
+}
 
 /// Whether F18 key events should be treated as Caps Lock.
 pub fn caps_proxy_active() -> bool {
-    CAPS_PROXY_ACTIVE.load(Ordering::SeqCst)
+    live_status().proxy_active
 }
 
-/// See [`reconcile_with`]. The proxy flag is published from inside the lock, so
-/// it always reflects the reconcile that most recently *ran*, not whichever one
+/// Whether the live mapping already matches `should_manage` *and* the reconcile
+/// that produced it was clean — the answer a caller that is putting a reconcile
+/// off (Caps Lock is held) gives in its place, so a mismatch left by an earlier
+/// failure keeps surfacing instead of being masked.
+pub fn matches(should_manage: bool) -> bool {
+    let status = live_status();
+    status.proxy_active == should_manage && status.reconciled
+}
+
+/// See [`reconcile_with`]. The status is published from inside the lock, so it
+/// always reflects the reconcile that most recently *ran*, not whichever one
 /// happened to return last.
 #[must_use]
 pub fn reconcile(should_manage: bool) -> ReconcileOutcome {
     let _serialized = RECONCILE.lock_safe();
     let outcome = reconcile_with(&RealSys, should_manage);
-    CAPS_PROXY_ACTIVE.store(outcome.proxy_active, Ordering::SeqCst);
+    CAPS_STATUS.store(pack_status(outcome), Ordering::SeqCst);
     outcome
 }
 

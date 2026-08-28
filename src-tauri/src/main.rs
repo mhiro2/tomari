@@ -386,20 +386,25 @@ fn main() {
         // backstop for any exit path that slips past both.
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                // Restore Caps Lock's native behavior first: the HID remap
-                // persists until reboot or removal, so a quit must take it
-                // back down, and `hidutil` needs no permission and returns
-                // quickly. Doing this *before* `cleanup_blocking` — which can
-                // sit behind the admin-auth dialog for the lid-close veto —
-                // means Caps Lock is never left remapped for however long that
-                // dialog is up (or declined).
-                let _ = capsmap::reconcile(false);
                 // Stop the keyboard tap now, releasing any remapped modifier it
                 // still holds downstream — left running into the slow cleanup
                 // below it would keep stamping stale targets, and dying with
-                // the process it would leave the app holding them.
+                // the process it would leave the app holding them. This goes
+                // *before* the Caps Lock restore: a Caps reconcile the tap had
+                // put off for a hold runs under the same lock `teardown` takes,
+                // so once it returns no such worker can re-enable the remap
+                // behind the restore (one still to run sees no tap and turns it
+                // off too).
                 #[cfg(target_os = "macos")]
                 eventtap::teardown(app);
+                // Restore Caps Lock's native behavior: the HID remap persists
+                // until reboot or removal, so a quit must take it back down,
+                // and `hidutil` needs no permission and returns quickly. Doing
+                // this *before* `cleanup_blocking` — which can sit behind the
+                // admin-auth dialog for the lid-close veto — means Caps Lock is
+                // never left remapped for however long that dialog is up (or
+                // declined).
+                let _ = capsmap::reconcile(false);
                 // Drop the divider before the slow part below: it is the one
                 // piece of teardown the user can see, and `cleanup_blocking`
                 // can sit behind an admin-auth dialog for a while.

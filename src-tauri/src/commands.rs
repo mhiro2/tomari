@@ -633,6 +633,8 @@ fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     // The live tap picks up the new rules straight from the engine, but the Caps
     // Lock HID remap is out-of-band and must be brought into step here — adding,
     // disabling or deleting a Caps Lock rule changes whether it should be on.
+    // (Not while Caps Lock is physically held: the reconcile then waits for the
+    // release, so the key finishes its hold under the mapping it began with.)
     // The event tap is macOS-only, so gate the call to keep a non-macOS
     // `cargo check` building (the rest of this file already gates eventtap).
     #[cfg(target_os = "macos")]
