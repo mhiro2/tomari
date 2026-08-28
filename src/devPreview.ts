@@ -159,6 +159,7 @@ export async function installDevPreview() {
         frame: { x: 0.5, y: 0.04, width: 0.5, height: 0.92 },
       },
     ],
+    damagedPlacements: [],
     canMoveToDisplay: true,
   };
   let menuItemGeneration = 1;

@@ -53,6 +53,42 @@ impl Database {
         })
     }
 
+    /// The slots for which a row is stored but cannot be used — its frame does
+    /// not parse, or parses to something invalid. [`Self::list_window_placements`]
+    /// skips such rows silently so the rest stay usable; this names them so the
+    /// UI can offer to replace or forget them instead of showing an empty slot
+    /// that a later save then "mysteriously" fills.
+    pub fn damaged_window_placement_slots(&self, bundle_id: &str) -> Result<Vec<PlacementSlot>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT slot, frame FROM window_placements WHERE bundle_id = ?1
+                 ORDER BY CASE slot WHEN 'primary' THEN 0 ELSE 1 END",
+            )?;
+            let rows = stmt.query_map([bundle_id], |row| {
+                let slot: String = row.get(0)?;
+                let raw: String = row.get(1)?;
+                Ok((slot, raw))
+            })?;
+            let mut damaged = Vec::new();
+            for row in rows {
+                let (slot, raw) = row?;
+                let slot = match slot.as_str() {
+                    "primary" => PlacementSlot::Primary,
+                    "secondary" => PlacementSlot::Secondary,
+                    // A row whose slot is unknown cannot be addressed by slot
+                    // at all; it is skipped by every read and left alone.
+                    _ => continue,
+                };
+                let usable = serde_json::from_str::<crate::domain::NormalizedRect>(&raw)
+                    .is_ok_and(|frame| frame.is_valid());
+                if !usable {
+                    damaged.push(slot);
+                }
+            }
+            Ok(damaged)
+        })
+    }
+
     /// Insert or replace one application's named position.
     pub fn save_window_placement(&self, placement: &WindowPlacement) -> Result<()> {
         if placement.application.bundle_id.trim().is_empty() {
@@ -110,9 +146,25 @@ fn decode_placement(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowPlacement
         }
     };
     let raw: String = row.get(3)?;
-    let frame = serde_json::from_str(&raw).map_err(|error| {
+    let frame: crate::domain::NormalizedRect = serde_json::from_str(&raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
+    // Meaning, not just shape: a frame that parses but is non-finite, empty or
+    // outside the work area would be refused on write (`save_window_placement`),
+    // so reading it back as a placement would recall a window to nowhere. Treat
+    // it as a row that does not deserialize — skipped by the list, absent to a
+    // point read — so a valid Secondary is not blocked by a damaged Primary and
+    // the slot can be overwritten or forgotten.
+    if !frame.is_valid() {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(Error::invalid(
+                "frame",
+                "stored value is not a valid normalized rectangle",
+            )),
+        ));
+    }
     Ok(WindowPlacement {
         application: WindowApplication {
             bundle_id: row.get(0)?,
@@ -238,6 +290,52 @@ mod tests {
         );
         assert!(
             !db.delete_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_stored_frame_that_parses_but_is_invalid_is_skipped_and_reported() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_window_placement(&placement(PlacementSlot::Secondary))
+            .unwrap();
+        // Bypass the write-side validation the way a hand edit or an older
+        // build would: a Primary whose frame is outside the work area.
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO window_placements (bundle_id, app_name, slot, frame)
+                 VALUES ('com.example.Editor', 'Editor', 'primary', ?1)",
+                [r#"{"x":0.9,"y":0.0,"width":0.5,"height":0.5}"#],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // The damaged Primary does not block the valid Secondary …
+        let listed = db.list_window_placements("com.example.Editor").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].slot, PlacementSlot::Secondary);
+        assert_eq!(
+            db.get_window_placement("com.example.Editor", PlacementSlot::Primary)
+                .unwrap(),
+            None
+        );
+        // … and is named as damaged, so the UI can offer to replace or forget it.
+        assert_eq!(
+            db.damaged_window_placement_slots("com.example.Editor")
+                .unwrap(),
+            vec![PlacementSlot::Primary]
+        );
+        // Overwriting and forgetting both work on the damaged slot.
+        db.save_window_placement(&placement(PlacementSlot::Primary))
+            .unwrap();
+        assert!(
+            db.damaged_window_placement_slots("com.example.Editor")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.delete_window_placement("com.example.Editor", PlacementSlot::Primary)
                 .unwrap()
         );
     }

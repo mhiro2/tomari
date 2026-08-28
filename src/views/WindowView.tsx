@@ -585,6 +585,7 @@ function RememberedPositions({
             key={slot}
             slot={slot}
             placement={context?.placements.find((placement) => placement.slot === slot)}
+            damaged={context?.damagedPlacements.includes(slot) ?? false}
             active={activeSlot === slot}
             busy={busy || !context}
             onCapture={() => onCapture(slot)}
@@ -1082,6 +1083,7 @@ function PreviewFrame({ frame, className }: { frame: NormalizedRect; className: 
 function PlacementSlotCard({
   slot,
   placement,
+  damaged,
   active,
   busy,
   onCapture,
@@ -1089,6 +1091,9 @@ function PlacementSlotCard({
 }: {
   slot: PlacementSlot;
   placement?: WindowPlacement;
+  // A stored row exists for this slot but cannot be used; the slot is offered
+  // for replacing or forgetting rather than shown as empty.
+  damaged: boolean;
   active: boolean;
   busy: boolean;
   onCapture: () => void;
@@ -1121,14 +1126,16 @@ function PlacementSlotCard({
             ? t('window.lastRestored')
             : placement
               ? t('window.homeReady')
-              : t('window.homeEmpty')}
+              : damaged
+                ? t('window.homeDamaged')
+                : t('window.homeEmpty')}
         </span>
       </div>
       <div className="placement-slot__actions">
         <button type="button" className="btn" onClick={onCapture} disabled={busy}>
-          {placement ? t('window.replaceHome') : t('window.rememberHere')}
+          {placement || damaged ? t('window.replaceHome') : t('window.rememberHere')}
         </button>
-        {placement && (
+        {(placement || damaged) && (
           <button
             type="button"
             className={`btn btn--ghost ${confirmingForget ? 'btn--warn' : ''}`}

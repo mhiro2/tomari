@@ -38,6 +38,10 @@ pub struct PlacementContext {
     pub application: WindowApplication,
     pub current_frame: NormalizedRect,
     pub placements: Vec<WindowPlacement>,
+    /// Slots with a stored row that cannot be used (a frame that does not
+    /// parse, or is invalid). Not in `placements`, so recall never uses them;
+    /// listed so the panel can offer to replace or forget them.
+    pub damaged_placements: Vec<PlacementSlot>,
     pub can_move_to_display: bool,
 }
 
@@ -343,12 +347,16 @@ pub fn placement_context(state: &AppState) -> Result<PlacementContext, CmdError>
     let placements = state
         .db
         .list_window_placements(&focused.application.bundle_id)?;
+    let damaged_placements = state
+        .db
+        .damaged_window_placement_slots(&focused.application.bundle_id)?;
     let can_move_to_display = state.windows.screen_work_areas()?.len() > 1;
     Ok(PlacementContext {
         target: window_target(&focused),
         application: focused.application,
         current_frame,
         placements,
+        damaged_placements,
         can_move_to_display,
     })
 }

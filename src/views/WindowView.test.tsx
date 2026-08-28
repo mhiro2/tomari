@@ -44,6 +44,7 @@ const CONTEXT: PlacementContext = {
   application: PRIMARY.application,
   currentFrame: { x: 0.4, y: 0.1, width: 0.5, height: 0.8 },
   placements: [PRIMARY],
+  damagedPlacements: [],
   canMoveToDisplay: true,
 };
 
@@ -185,6 +186,32 @@ describe('WindowView', () => {
       .getAllByText('Position A')
       .find((element) => element.closest('article'));
     expect(homeCard?.closest('article')).toHaveAttribute('aria-current', 'true');
+  });
+
+  it('offers to replace or forget a damaged saved position instead of showing it empty', async () => {
+    mockCommands({
+      get_placement_context: {
+        ...CONTEXT,
+        placements: [],
+        damagedPlacements: ['primary'],
+      },
+    });
+    renderView(<WindowView />);
+
+    expect(
+      await screen.findByText(
+        'The saved position is damaged and cannot be used. Replace it or forget it.',
+      ),
+    ).toBeInTheDocument();
+    // The damaged slot keeps its Forget action so the row can be cleared.
+    fireEvent.click(screen.getByRole('button', { name: 'Forget Position A' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Forget Position A?' }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'forget_window_placement',
+        expect.objectContaining({ slot: 'primary' }),
+      ),
+    );
   });
 
   it('refreshes the focused application whenever the panel is shown', async () => {

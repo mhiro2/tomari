@@ -200,6 +200,8 @@ const en = {
   'window.currentPosition': 'Current',
   'window.homeReady': 'Works on any display',
   'window.homeEmpty': 'No position remembered',
+  'window.homeDamaged':
+    'The saved position is damaged and cannot be used. Replace it or forget it.',
   'window.lastRestored': 'Last restored',
   'window.rememberHere': 'Save current position',
   'window.replaceHome': 'Replace position',
@@ -604,6 +606,7 @@ const ja: Record<MessageKey, string> = {
   'window.currentPosition': '現在位置',
   'window.homeReady': 'どのディスプレイでも使えます',
   'window.homeEmpty': '位置はまだ記憶されていません',
+  'window.homeDamaged': '保存した位置が壊れていて使えません。上書きするか削除してください。',
   'window.lastRestored': '最後に復元',
   'window.rememberHere': '現在位置を保存',
   'window.replaceHome': '保存位置を置き換える',

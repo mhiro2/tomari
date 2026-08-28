@@ -50,6 +50,9 @@ export interface PlacementContext {
   application: WindowApplication;
   currentFrame: NormalizedRect;
   placements: WindowPlacement[];
+  // Slots whose stored row cannot be used (a frame that does not parse, or is
+  // invalid): not in `placements`, offered for replacing or forgetting.
+  damagedPlacements: PlacementSlot[];
   canMoveToDisplay: boolean;
 }
 
