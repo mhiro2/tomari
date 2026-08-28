@@ -23,10 +23,12 @@
 //! granted the OS returns a null tap (and adds Tomari to the Input Monitoring
 //! list so the user can enable it).
 
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult, EventField};
+use core_graphics::event::{
+    CGEvent, CGEventTapOptions, CGEventTapProxy, CGEventType, CallbackResult, EventField,
+};
 use tauri::{AppHandle, Manager};
 use tomari_core::{AppAction, KeySide, ModifierKey};
 use tomari_keyboard::HYPER_MODIFIERS;
@@ -66,6 +68,20 @@ pub fn request_input_monitoring() -> bool {
 /// the cross-platform [`AppState`] struct.
 static EVENT_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
 
+/// Whether the *Accessibility* permission — which posting key events needs, tap
+/// proxy or not — is granted, mirrored so the callback does not call into TCC.
+/// Refreshed by [`restart_result`] and by the permission poller in `main`, whose
+/// interval bounds how stale it can be: within that window a tap's keystroke may
+/// be skipped when it could have been posted, or posted into the void when the
+/// grant has just gone. Both beat an OS call from a callback that holds up all
+/// input.
+static ACCESSIBILITY: AtomicBool = AtomicBool::new(false);
+
+/// Publish the current *Accessibility* grant for the tap callback to read.
+pub fn set_accessibility_granted(granted: bool) {
+    ACCESSIBILITY.store(granted, Ordering::SeqCst);
+}
+
 /// (Re)start the tap to match the current settings: tears down any existing tap
 /// and, if keyboard customization is enabled, starts a fresh one. Safe to call
 /// repeatedly (e.g. when the feature is toggled). Callers that do not need the
@@ -100,6 +116,7 @@ pub fn restart_result(app: &AppHandle) -> bool {
     // modifier would linger in `held` and the next solo tap would be misread as
     // a chord.
     state.engine.lock_safe().reset();
+    set_accessibility_granted(state.windows.permission_granted());
 
     // Reconcile the Caps Lock HID remap toward `manage`. `capsmap` publishes the
     // *actual* resulting state (not the request) to its proxy flag, so a failed
@@ -195,8 +212,8 @@ fn start(app: AppHandle) -> Result<RunningTap, String> {
         ],
         move |port_holder| {
             let state = Arc::new(Mutex::new(TapState::default()));
-            Box::new(move |_proxy, etype, event: &CGEvent| {
-                handle_event(&app, &state, &port_holder, etype, event)
+            Box::new(move |proxy, etype, event: &CGEvent| {
+                handle_event(&app, &state, &port_holder, proxy, etype, event)
             })
         },
     )
@@ -206,6 +223,7 @@ fn handle_event(
     app: &AppHandle,
     state: &Arc<Mutex<TapState>>,
     port_holder: &Arc<AtomicUsize>,
+    proxy: CGEventTapProxy,
     etype: CGEventType,
     event: &CGEvent,
 ) -> CallbackResult {
@@ -262,9 +280,9 @@ fn handle_event(
     let now = app_state.now_ms();
 
     match etype {
-        CGEventType::FlagsChanged => on_flags_changed(app, app_state, state, event, now),
-        CGEventType::KeyDown => on_key_down(app, app_state, state, event, now),
-        CGEventType::KeyUp => on_key_up(app, app_state, state, event, now),
+        CGEventType::FlagsChanged => on_flags_changed(app, app_state, state, proxy, event, now),
+        CGEventType::KeyDown => on_key_down(app, app_state, state, proxy, event, now),
+        CGEventType::KeyUp => on_key_up(app, app_state, state, proxy, event, now),
         _ => CallbackResult::Keep,
     }
 }
@@ -318,6 +336,7 @@ fn drive_modifier(
     app: &AppHandle,
     app_state: &AppState,
     state: &Arc<Mutex<TapState>>,
+    proxy: CGEventTapProxy,
     ev: &ModifierEvent,
     now: u64,
 ) -> (Option<ModifierKey>, bool) {
@@ -361,7 +380,7 @@ fn drive_modifier(
     }
 
     if let Some(action) = tap_action {
-        dispatch_async(app, action);
+        dispatch_tap_action(app, proxy, action);
     }
 
     (remap, hyper)
@@ -371,6 +390,7 @@ fn on_flags_changed(
     app: &AppHandle,
     app_state: &AppState,
     state: &Arc<Mutex<TapState>>,
+    proxy: CGEventTapProxy,
     event: &CGEvent,
     now: u64,
 ) -> CallbackResult {
@@ -390,6 +410,7 @@ fn on_flags_changed(
         app,
         app_state,
         state,
+        proxy,
         &ModifierEvent {
             key: modkey,
             side,
@@ -428,6 +449,7 @@ fn on_key_down(
     app: &AppHandle,
     app_state: &AppState,
     state: &Arc<Mutex<TapState>>,
+    proxy: CGEventTapProxy,
     event: &CGEvent,
     now: u64,
 ) -> CallbackResult {
@@ -456,6 +478,7 @@ fn on_key_down(
                 app,
                 app_state,
                 state,
+                proxy,
                 &ModifierEvent {
                     key: ModifierKey::CapsLock,
                     side: KeySide::Either,
@@ -481,6 +504,7 @@ fn on_key_up(
     app: &AppHandle,
     app_state: &AppState,
     state: &Arc<Mutex<TapState>>,
+    proxy: CGEventTapProxy,
     event: &CGEvent,
     now: u64,
 ) -> CallbackResult {
@@ -495,6 +519,7 @@ fn on_key_up(
             app,
             app_state,
             state,
+            proxy,
             &ModifierEvent {
                 key: ModifierKey::CapsLock,
                 side: KeySide::Either,
@@ -545,16 +570,66 @@ fn stamp_held_modifiers(state: &Arc<Mutex<TapState>>, event: &CGEvent) {
     event.set_flags(flags);
 }
 
+/// Perform a completed tap's action.
+///
+/// Synthesized input — `SwitchIme`, `SendKeystroke` — is posted right here, from
+/// the callback, through the tap's proxy (`CGEventTapPostEvent`). That is the
+/// only place the ordering the user relies on can be guaranteed: the events go
+/// into the stream at this tap's position, ahead of every event that has not yet
+/// passed through it, so the character typed after a ⌘ tap cannot overtake the
+/// IME switch. Queued onto another thread — the main thread especially, which
+/// also serves AppKit, the webview and every Accessibility round-trip — the
+/// switch could land after that character, which would then reach the old input
+/// method.
+///
+/// Downstream, the pair therefore arrives just *before* the modifier release the
+/// callback then returns (`⌘ down · 英数 down/up · ⌘ up`) rather than after it.
+/// The synthesized events carry their own, explicit flags, so the app and the
+/// input method read them as the plain keys they are; only a downstream tap
+/// that infers modifier state from `flagsChanged` history would see them as
+/// typed during the hold. Accepted over re-posting the release ahead of them
+/// and dropping the original, which cannot be verified without a device.
+///
+/// Posting needs the Accessibility grant like any other event synthesis; the
+/// tap proxy is not a way around it, and `CGEventTapPostEvent` reports nothing
+/// when the post is ignored. The grant is read off a mirror the permission
+/// poller keeps, never from TCC inside the callback. Everything else needs
+/// AppKit and is queued on the main thread; a failure to queue is logged rather
+/// than lost.
+fn dispatch_tap_action(app: &AppHandle, proxy: CGEventTapProxy, action: AppAction) {
+    if !matches!(
+        action,
+        AppAction::SwitchIme(_) | AppAction::SendKeystroke(_)
+    ) {
+        return dispatch_on_main(app, action);
+    }
+    if !ACCESSIBILITY.load(Ordering::SeqCst) {
+        tracing::warn!("event-tap keystroke skipped: Accessibility permission not granted");
+        return;
+    }
+    let sink = crate::keysend::Sink::Tap(proxy);
+    let posted = match &action {
+        AppAction::SwitchIme(mode) => crate::keysend::switch_ime(*mode, sink),
+        AppAction::SendKeystroke(accel) => crate::keysend::send_accelerator(accel, sink),
+        _ => unreachable!("routed above"),
+    };
+    if let Err(e) = posted {
+        tracing::warn!(error = %e, "event-tap keystroke action failed");
+    }
+}
+
 /// Run an action on the main thread (UI and webview calls require it).
-fn dispatch_async(app: &AppHandle, action: AppAction) {
+fn dispatch_on_main(app: &AppHandle, action: AppAction) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    if let Err(e) = app.run_on_main_thread(move || {
         if let Some(state) = handle.try_state::<AppState>()
             && let Err(e) = crate::actions::dispatch(&action, &handle, state.inner())
         {
             tracing::warn!(error = %e, "event-tap action failed");
         }
-    });
+    }) {
+        tracing::warn!(error = %e, "could not queue an event-tap action on the main thread");
+    }
 }
 
 #[cfg(test)]

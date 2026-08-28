@@ -2,42 +2,66 @@
 //! `SwitchIme` and `SendKeystroke` actions. Posting key events requires the
 //! Accessibility permission (the same one window management uses).
 
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, EventField};
+use core_graphics::event::{
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapProxy, EventField,
+};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use tomari_core::ImeMode;
 use tomari_keyboard::accelerator;
 
 use crate::eventtap::SYNTHETIC_MARKER;
 
-fn post(keycode: u16, flags: CGEventFlags) -> Result<(), String> {
+/// Where a synthesized keystroke enters the event stream.
+#[derive(Clone, Copy)]
+pub enum Sink {
+    /// At the HID level, as if typed — from a hotkey, the tray, a URL. Goes
+    /// through every event tap, ours included (which ignores it by its marker).
+    Hid,
+    /// From inside our event tap's callback, through the tap's proxy. The
+    /// events are inserted into the stream at the tap's own position, ahead of
+    /// every event that has not yet passed through it — so a keystroke posted
+    /// while handling a modifier tap is guaranteed to reach the app before the
+    /// character key the user types next, however busy the rest of Tomari is.
+    /// Events posted this way never come back through the posting tap.
+    Tap(CGEventTapProxy),
+}
+
+/// Post a key-down/key-up pair for `keycode` with `flags`.
+///
+/// Both events are built and tagged before either is posted, so a failure to
+/// allocate the key-up cannot leave the app holding an unmatched key-down.
+fn post(keycode: u16, flags: CGEventFlags, sink: Sink) -> Result<(), String> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|()| "failed to create CGEventSource".to_string())?;
     let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
         .map_err(|()| "failed to create key-down event".to_string())?;
-    down.set_flags(flags);
-    // Tag synthesized events so our own event tap ignores them (no feedback).
-    down.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, SYNTHETIC_MARKER);
-    down.post(CGEventTapLocation::HID);
-
     let up = CGEvent::new_keyboard_event(source, keycode, false)
         .map_err(|()| "failed to create key-up event".to_string())?;
-    up.set_flags(flags);
-    up.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, SYNTHETIC_MARKER);
-    up.post(CGEventTapLocation::HID);
+    for event in [&down, &up] {
+        event.set_flags(flags);
+        // Tag synthesized events so our own event tap ignores them (no feedback).
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, SYNTHETIC_MARKER);
+    }
+    for event in [down, up] {
+        match sink {
+            Sink::Hid => event.post(CGEventTapLocation::HID),
+            Sink::Tap(proxy) => event.post_from_tap(proxy),
+        }
+    }
     Ok(())
 }
 
 /// Switch the input method by posting the JIS 英数 (0x66) / かな (0x68) keys.
-pub fn switch_ime(mode: ImeMode) -> Result<(), String> {
+pub fn switch_ime(mode: ImeMode, sink: Sink) -> Result<(), String> {
     let keycode = match mode {
         ImeMode::Alphanumeric => 0x66,
         ImeMode::Kana => 0x68,
     };
-    post(keycode, CGEventFlags::empty())
+    post(keycode, CGEventFlags::empty(), sink)
 }
 
 /// Synthesize the keystroke described by an accelerator string (e.g. "Escape").
-pub fn send_accelerator(accel: &str) -> Result<(), String> {
+pub fn send_accelerator(accel: &str, sink: Sink) -> Result<(), String> {
     let parsed = accelerator::parse(accel).map_err(|e| e.to_string())?;
     let (keycode, mut flags) =
         key_to_event(&parsed.key).ok_or_else(|| format!("no keycode for `{}`", parsed.key))?;
@@ -54,7 +78,7 @@ pub fn send_accelerator(accel: &str) -> Result<(), String> {
     if parsed.shift {
         flags |= CGEventFlags::CGEventFlagShift;
     }
-    post(keycode, flags)
+    post(keycode, flags, sink)
 }
 
 /// The keycode and any modifier flags implied by the key name alone. `Plus` is

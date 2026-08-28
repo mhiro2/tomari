@@ -95,7 +95,7 @@ fn switch_ime(state: &AppState, mode: ImeMode) -> Result<(), CmdError> {
     #[cfg(target_os = "macos")]
     {
         ensure_keystroke_permission(state)?;
-        crate::keysend::switch_ime(mode).map_err(CmdError::other)
+        crate::keysend::switch_ime(mode, crate::keysend::Sink::Hid).map_err(CmdError::other)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -108,7 +108,7 @@ fn send_keystroke(state: &AppState, accel: &str) -> Result<(), CmdError> {
     #[cfg(target_os = "macos")]
     {
         ensure_keystroke_permission(state)?;
-        crate::keysend::send_accelerator(accel).map_err(CmdError::other)
+        crate::keysend::send_accelerator(accel, crate::keysend::Sink::Hid).map_err(CmdError::other)
     }
     #[cfg(not(target_os = "macos"))]
     {

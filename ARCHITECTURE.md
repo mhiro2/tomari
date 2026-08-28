@@ -118,7 +118,9 @@ CGEventTap (dedicated thread)
   │     │   key is held, its target modifier is also stamped onto the keystrokes
   │     │   typed through it, so Control→Command + C registers as Cmd+C
   │     ├─ hyper: stamp ⌃⌥⇧⌘ onto keystrokes typed while held
-  │     └─ solo tap completed ─► AppAction ─► actions::dispatch
+  │     └─ solo tap completed ─► AppAction
+  │           ├─ SwitchIme / SendKeystroke: posted here, through the tap proxy
+  │           └─ everything else ─► main thread ─► actions::dispatch
   ├─ keyDown ─► Caps Lock (arriving as F18, see below) ─► drive as the Caps
   │     modifier, drop the F18 event; tap fires its action, held stamps its
   │     target. Other keyDowns pass through.
@@ -187,6 +189,26 @@ rather than closing it.
   かな 0x68 keys; `SendKeystroke` resolves an accelerator to a keycode) are
   stamped with a marker in `EVENT_SOURCE_USER_DATA` so Tomari's own tap never
   enters a feedback loop.
+- When a modifier tap's action *is* synthesized input (`SwitchIme`,
+  `SendKeystroke`), the tap posts it itself, from inside the callback, through
+  the tap proxy (`CGEventTapPostEvent`; `keysend::Sink::Tap`). That is the one
+  place the ordering the user relies on can be guaranteed: the events enter the
+  stream at the tap's own position, ahead of every event not yet through it, so
+  the character typed a few milliseconds after a ⌘ tap cannot overtake the IME
+  switch. Handed to any other thread — the main thread especially, which also
+  serves AppKit, the webview and every Accessibility round-trip — the switch
+  could land after that character, which would reach the old input method.
+  Both key events are built and tagged before either is posted, so a failed
+  allocation never leaves an app holding an unmatched key-down. Downstream the
+  pair lands just before the modifier release the callback then returns; the
+  events carry explicit flags, so apps and the input method read them as plain
+  keys. Posting still needs the Accessibility grant (the proxy is no way around
+  it, and a refused post is silent), read off an atomic the permission poller
+  and `restart` keep current — never from TCC inside the callback. Actions that
+  need AppKit (the panel, the menu bar, window ops with their tray refresh)
+  are queued on the main thread as before, and a failure to queue is logged
+  rather than discarded. Hotkeys, the tray and URLs post at the HID level
+  (`Sink::Hid`) as they did.
 - (Re)starting the tap is centralized in `eventtap::restart`, called when the
   feature is toggled or the permission is granted. The scaffolding underneath
   all three CGEventTaps (this one, drag-to-snap, drag-to-move) — spawn a
