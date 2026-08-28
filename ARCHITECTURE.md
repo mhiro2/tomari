@@ -752,7 +752,23 @@ clear through the same verified `cleanup_lid_close_with`, so a setter reporting
 success without moving the kernel flag never takes the marker with it. Shutdown
 also terminates an administrator prompt a worker left on screen before waiting
 on `LID_OP_LOCK`, so a quit or an updater restart cannot block on a dialog for
-work it is about to undo.
+work it is about to undo — and every wait on that path is bounded. The lock
+itself is taken with `try_lock` in a loop that keeps killing the dialog (a
+worker that spawned its `osascript` just after the first kill is caught by the
+next), giving up after `EXIT_LOCK_DEADLINE` (10 s) and leaving the override to
+the marker rather than clearing it unserialized. The clear's own administrator
+dialog is given `EXIT_AUTH_DEADLINE` (10 s), after which the `osascript` is
+killed and reaped and the clear counted as not applied; an interactive worker
+that notices shutdown has begun switches to the same bound. every child that only
+reads — `pmset -g`, `pmset -g batt`, the `ps` scan — runs under `READ_DEADLINE`
+(5 s), since none needs user input, so one hung child can neither stall exit nor
+stop the safety monitor for good. The kernel
+flag is read as always, so an override still set keeps its marker and ownership
+and the next launch recovers it; the process is never held hostage to a dialog
+nobody is there to answer. The launch reconcile — it runs in `setup`, possibly
+unattended — has `LAUNCH_AUTH_DEADLINE` (30 s) and hands an unanswered dialog to
+the unresolved state and its retry. Only the interactive toggles wait on the
+user, who has Cancel.
 
 Because `disablesleep` survives a crash, a marker file under the data directory
 records that _we_ engaged it. `reconcile_on_launch` (from `setup`) clears a

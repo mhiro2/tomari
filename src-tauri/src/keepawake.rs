@@ -1154,7 +1154,7 @@ pub fn reconcile_on_launch(app: &AppHandle) {
                 // without changing `SleepDisabled` must not take the marker with
                 // it — that would strand the Mac awake with no record left to
                 // recover from.
-                cleanup_lid_close_with(&RealSys, Ownership::Confirmed).may_own()
+                cleanup_lid_close_with(&RealSys::LAUNCHING, Ownership::Confirmed).may_own()
             }
         };
         // A marker that survives launch is an override we may still be holding.
@@ -1199,21 +1199,39 @@ pub fn cleanup_blocking(app: &AppHandle) {
     }
     #[cfg(target_os = "macos")]
     {
-        // Take down an administrator prompt a reconcile worker left on screen
-        // first. It holds `LID_OP_LOCK` for as long as that dialog is up, so
-        // without this a quit — or the updater's restart — would block until
-        // somebody answered a dialog for work we are about to undo anyway.
-        kill_authorization();
         // Serialize with any in-flight reconcile worker (it holds this lock
         // across its `pmset` call) so we cannot clear the override just before a
         // late `pmset 1` re-enables it and strands the Mac awake. The generation
         // bumped above also makes a worker still queued for the lock skip its
         // side effects entirely; the write-ahead marker is the backstop for
         // anything that still slips past.
+        //
+        // A worker that holds the lock is sitting behind an administrator
+        // dialog, and the lock is released only when that dialog is answered or
+        // its `osascript` dies — so the wait is bounded by killing the dialog,
+        // repeatedly: a worker that spawns its `osascript` just after one kill
+        // (it had won the lock before `SHUTTING_DOWN` was set) is caught by the
+        // next. Past the deadline the clear is skipped altogether rather than
+        // run unserialized; the marker then carries the override to the next
+        // launch, which is exactly what it is for.
         // Lock order is always LID_OP_LOCK → keep_awake (never the reverse).
-        let _op = LID_OP_LOCK.lock_safe();
+        let until = std::time::Instant::now() + EXIT_LOCK_DEADLINE;
+        let _op = loop {
+            kill_authorization();
+            if let Some(guard) = LID_OP_LOCK.try_lock_safe() {
+                break guard;
+            }
+            if std::time::Instant::now() >= until {
+                tracing::warn!(
+                    "a keep-awake worker did not release its lock before exit; leaving the \
+                     lid-close override to the next launch's reconcile"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         let ownership = state.keep_awake.lock_safe().ownership;
-        let remaining = cleanup_lid_close_with(&RealSys, ownership);
+        let remaining = cleanup_lid_close_with(&RealSys::EXITING, ownership);
         if remaining != ownership {
             state.keep_awake.lock_safe().ownership = remaining;
         }
@@ -1269,7 +1287,7 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
     let ownership = state.keep_awake.lock_safe().ownership;
     // Run the (possibly slow, admin-authed) side effects without holding the
     // state lock, then store the resulting status back in one shot.
-    let outcome = reconcile_lid_close_with(&RealSys, desired_on, ownership);
+    let outcome = reconcile_lid_close_with(&RealSys::INTERACTIVE, desired_on, ownership);
     {
         let mut k = state.keep_awake.lock_safe();
         // Always record ownership — even when superseded — so a later worker or
@@ -1366,7 +1384,54 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
 
 /// Production [`LidCloseSys`]: the real `pmset` calls and on-disk marker.
 #[cfg(target_os = "macos")]
-struct RealSys;
+struct RealSys {
+    /// How long an administrator dialog may stay unanswered before the `pmset`
+    /// is abandoned. `None` waits for the user — the interactive toggles, which
+    /// have their own Cancel. Exit paths set a deadline: nobody may be there to
+    /// answer, and the process has to be allowed to end.
+    auth_deadline: Option<std::time::Duration>,
+}
+
+#[cfg(target_os = "macos")]
+impl RealSys {
+    /// Wait for the user: they asked for this, and can cancel it.
+    const INTERACTIVE: Self = Self {
+        auth_deadline: None,
+    };
+    /// Bounded, for quit / logout / the updater's relaunch.
+    const EXITING: Self = Self {
+        auth_deadline: Some(EXIT_AUTH_DEADLINE),
+    };
+    /// Bounded more generously, for the launch reconcile in `setup`.
+    const LAUNCHING: Self = Self {
+        auth_deadline: Some(LAUNCH_AUTH_DEADLINE),
+    };
+}
+
+/// How long exit-time cleanup waits on the administrator dialog. Logout and the
+/// updater are waiting behind it; an unanswered dialog past this is abandoned,
+/// the override kept as ours with its marker, and the next launch recovers it.
+#[cfg(target_os = "macos")]
+const EXIT_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long exit-time cleanup waits for a reconcile worker to give up
+/// `LID_OP_LOCK` (its dialog is being killed the whole time) before skipping
+/// the clear.
+#[cfg(target_os = "macos")]
+const EXIT_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the launch reconcile waits on its administrator dialog. It runs in
+/// `setup`, so an unattended login-item launch — or the updater's relaunch —
+/// must not sit behind a dialog forever; past this the override is carried into
+/// the runtime state as unresolved and the UI offers the retry.
+#[cfg(target_os = "macos")]
+const LAUNCH_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a `pmset -g` / `pmset -g batt` / `ps` read may take. None of them
+/// needs user input, so a read that takes longer is a stuck process, not a slow
+/// one; it is killed and the value reported unknown. This also keeps the single
+/// safety monitor thread from stalling for good on one hung child.
+const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
 impl LidCloseSys for RealSys {
@@ -1374,7 +1439,7 @@ impl LidCloseSys for RealSys {
         read_sleep_disabled()
     }
     fn set_disablesleep(&self, on: bool) -> bool {
-        run_disablesleep(on)
+        run_disablesleep(on, self.auth_deadline)
     }
     fn write_marker(&self) -> bool {
         write_marker()
@@ -1388,9 +1453,12 @@ impl LidCloseSys for RealSys {
 }
 
 /// Set or clear `pmset disablesleep` with administrator privileges, via the
-/// standard macOS auth dialog. Returns whether it succeeded.
+/// standard macOS auth dialog. Returns whether it succeeded. With a `deadline`,
+/// a dialog still unanswered when it passes is torn down and counted as not
+/// applied — the caller then confirms against the kernel flag as always, so an
+/// override that did land in the meantime keeps its marker and ownership.
 #[cfg(target_os = "macos")]
-fn run_disablesleep(on: bool) -> bool {
+fn run_disablesleep(on: bool, deadline: Option<std::time::Duration>) -> bool {
     let value = if on { "1" } else { "0" };
     let script = format!(
         "do shell script \"/usr/bin/pmset -a disablesleep {value}\" with administrator privileges"
@@ -1408,7 +1476,15 @@ fn run_disablesleep(on: bool) -> bool {
     };
     let pid = child.id();
     AUTH_PID.store(pid, std::sync::atomic::Ordering::Release);
-    let result = child.wait();
+    // A shutdown that began between `kill_authorization` and this spawn missed
+    // the dialog; it will kill it on its next pass, but do not let an interactive
+    // wait outlive the process regardless.
+    let deadline = if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+        Some(deadline.unwrap_or(EXIT_AUTH_DEADLINE))
+    } else {
+        deadline
+    };
+    let result = wait_child(&mut child, deadline);
     let _ = AUTH_PID.compare_exchange(
         pid,
         0,
@@ -1416,14 +1492,105 @@ fn run_disablesleep(on: bool) -> bool {
         std::sync::atomic::Ordering::Acquire,
     );
     match result {
-        Ok(status) if status.success() => true,
-        Ok(status) => {
+        ChildExit::Exited(status) if status.success() => true,
+        ChildExit::Exited(status) => {
             tracing::warn!(code = ?status.code(), on, "pmset disablesleep was not applied (auth declined?)");
             false
         }
-        Err(e) => {
+        ChildExit::TimedOut => {
+            tracing::warn!(
+                on,
+                ?deadline,
+                "administrator authorization was not answered in time; abandoning pmset disablesleep"
+            );
+            false
+        }
+        ChildExit::Failed(e) => {
             tracing::warn!(error = %e, on, "failed to run osascript for pmset disablesleep");
             false
+        }
+    }
+}
+
+/// Run `command` to completion within `deadline`, capturing its stdout. `None`
+/// when it could not be spawned or did not finish in time (it is then killed and
+/// reaped). Stdout is drained on a helper thread so a child that writes more
+/// than the pipe holds cannot deadlock against the wait.
+fn output_within(
+    command: &mut std::process::Command,
+    deadline: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let status = match wait_child(&mut child, Some(deadline)) {
+        ChildExit::Exited(status) => status,
+        ChildExit::TimedOut => {
+            tracing::warn!(
+                ?deadline,
+                "a pmset read did not finish in time; treating the state as unreadable"
+            );
+            return None;
+        }
+        ChildExit::Failed(_) => return None,
+    };
+    // The child has exited, so its end of the pipe is closed and the reader
+    // returns promptly.
+    let stdout = reader.join().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+/// How waiting on a child ended.
+#[derive(Debug)]
+enum ChildExit {
+    Exited(std::process::ExitStatus),
+    /// The deadline passed first; the child has been killed and reaped.
+    TimedOut,
+    Failed(std::io::Error),
+}
+
+/// Wait for `child`, for at most `deadline` when one is given. On timeout the
+/// child is killed and reaped — never left as a zombie, and never left holding
+/// a dialog on screen for a process that is exiting.
+fn wait_child(child: &mut std::process::Child, deadline: Option<std::time::Duration>) -> ChildExit {
+    let Some(deadline) = deadline else {
+        return match child.wait() {
+            Ok(status) => ChildExit::Exited(status),
+            Err(e) => ChildExit::Failed(e),
+        };
+    };
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return ChildExit::Exited(status),
+            Ok(None) if std::time::Instant::now() >= until => {
+                // Reap only a child the kill reached; a kill that fails means it
+                // is already gone or beyond us, and a blocking `wait` on it
+                // would be the unbounded wait this exists to avoid.
+                if child.kill().is_ok() {
+                    let _ = child.wait();
+                } else {
+                    let _ = child.try_wait();
+                }
+                return ChildExit::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return ChildExit::Failed(e),
         }
     }
 }
@@ -1452,10 +1619,10 @@ fn kill_authorization() {
 /// `None` if `pmset` could not be run — treated as "unknown", never as "off".
 #[cfg(target_os = "macos")]
 fn read_sleep_disabled() -> Option<bool> {
-    let output = std::process::Command::new("/usr/bin/pmset")
-        .arg("-g")
-        .output()
-        .ok()?;
+    let output = output_within(
+        std::process::Command::new("/usr/bin/pmset").arg("-g"),
+        READ_DEADLINE,
+    )?;
     if !output.status.success() {
         return None;
     }
@@ -1472,11 +1639,11 @@ fn read_sleep_disabled() -> Option<bool> {
 fn read_power_status() -> (PowerSource, Option<u8>) {
     #[cfg(target_os = "macos")]
     {
-        let output = match std::process::Command::new("/usr/bin/pmset")
-            .args(["-g", "batt"])
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
+        let output = match output_within(
+            std::process::Command::new("/usr/bin/pmset").args(["-g", "batt"]),
+            READ_DEADLINE,
+        ) {
+            Some(output) if output.status.success() => output,
             _ => return (PowerSource::Unknown, None),
         };
         parse_power_status(&String::from_utf8_lossy(&output.stdout))
@@ -1508,11 +1675,11 @@ fn parse_power_status(text: &str) -> (PowerSource, Option<u8>) {
 }
 
 fn detect_long_running_processes() -> Vec<LongRunningProcess> {
-    let output = match std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,etime=,comm="])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
+    let output = match output_within(
+        std::process::Command::new("/bin/ps").args(["-axo", "pid=,etime=,comm="]),
+        READ_DEADLINE,
+    ) {
+        Some(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
     parse_long_running_processes(&String::from_utf8_lossy(&output.stdout))
@@ -2090,6 +2257,38 @@ mod tests {
         fn marker_exists(&self) -> bool {
             self.marker.get()
         }
+    }
+
+    #[test]
+    fn wait_child_reaps_a_child_that_outlives_its_deadline() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let exit = wait_child(&mut child, Some(std::time::Duration::from_millis(200)));
+        assert!(matches!(exit, ChildExit::TimedOut), "{exit:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Killed and reaped: a further wait finds it already gone.
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn wait_child_returns_the_status_of_a_child_that_exits_in_time() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let exit = wait_child(&mut child, Some(std::time::Duration::from_secs(5)));
+        assert!(
+            matches!(exit, ChildExit::Exited(status) if status.success()),
+            "{exit:?}"
+        );
+        let mut child = std::process::Command::new("/usr/bin/false")
+            .spawn()
+            .unwrap();
+        let exit = wait_child(&mut child, None);
+        assert!(
+            matches!(exit, ChildExit::Exited(status) if !status.success()),
+            "{exit:?}"
+        );
     }
 
     #[test]

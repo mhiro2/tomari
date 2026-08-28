@@ -20,10 +20,20 @@ pub trait MutexExt<T> {
     /// Lock, recovering the guard if the mutex was poisoned by a panic in
     /// another thread instead of panicking in turn.
     fn lock_safe(&self) -> MutexGuard<'_, T>;
+    /// Try to lock without waiting, with the same poison recovery. `None` only
+    /// when another thread holds the lock.
+    fn try_lock_safe(&self) -> Option<MutexGuard<'_, T>>;
 }
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_safe(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    fn try_lock_safe(&self) -> Option<MutexGuard<'_, T>> {
+        match self.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     }
 }
