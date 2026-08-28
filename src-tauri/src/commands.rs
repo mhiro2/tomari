@@ -984,6 +984,9 @@ pub fn validate_accelerator(accelerator: String) -> AcceleratorCheck {
 
 #[tauri::command]
 pub fn run_action(app: AppHandle, state: State<'_, AppState>, action: AppAction) -> CmdResult<()> {
+    // The same validator every stored action passes: an action that would be
+    // refused on save is refused to run once, too.
+    let action = crate::validate::sanitize_app_action(action)?;
     actions::dispatch(&action, &app, state.inner())
 }
 

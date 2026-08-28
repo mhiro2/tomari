@@ -469,6 +469,15 @@ fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     // dispatch does exactly what the action says — a snap never summons the
     // panel — so Tomari does not steal frontmost from the window being placed.
     let action: tomari_core::AppAction = external.into();
+    // The URL grammar only yields closed-enum actions today; validating here
+    // anyway keeps every path an action can arrive by behind one validator.
+    let action = match validate::sanitize_app_action(action) {
+        Ok(action) => action,
+        Err(e) => {
+            tracing::warn!(url = %raw, error = %e, "tomari:// action rejected");
+            return;
+        }
+    };
     if let Err(e) = actions::dispatch(&action, app, state.inner()) {
         tracing::warn!(url = %raw, error = %e, "tomari:// action failed");
     }

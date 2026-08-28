@@ -48,9 +48,38 @@ pub fn repair_settings(mut settings: AppSettings) -> AppSettings {
     settings
 }
 
+/// Validate an action wherever one crosses the command boundary — a hotkey's
+/// or a modifier rule's action on save, a `run_action` call, a `tomari://`
+/// URL — so the same rules apply on every path and a broken action can neither
+/// be persisted (to fail on every fire) nor run once.
+///
+/// Most variants are closed enums and need nothing; `SendKeystroke` carries a
+/// free-form accelerator, which must parse and — on macOS — map to a keycode
+/// the synthesizer can emit. The parser's key set is kept in lockstep with
+/// `keysend::keycode_for` (see its coverage test), so the keycode check guards
+/// against future drift rather than a known gap. The accelerator is returned
+/// in its canonical spelling.
+pub fn sanitize_app_action(action: AppAction) -> Result<AppAction, CmdError> {
+    match action {
+        AppAction::SendKeystroke(accel) => {
+            let parsed = accelerator::parse(&accel)
+                .map_err(|e| CmdError::other(format!("invalid keystroke: {e}")))?;
+            #[cfg(target_os = "macos")]
+            if crate::keysend::keycode_for(&parsed.key).is_none() {
+                return Err(CmdError::other(format!(
+                    "the key \"{}\" cannot be sent as a keystroke",
+                    parsed.key
+                )));
+            }
+            Ok(AppAction::SendKeystroke(parsed.to_canonical()))
+        }
+        other => Ok(other),
+    }
+}
+
 /// Validate and canonicalize a hotkey before it is stored. Returns a sanitized
-/// copy — trimmed id/label, normalized accelerator — or a [`CmdError`]
-/// describing the first problem found.
+/// copy — trimmed id/label, normalized accelerator, validated action — or a
+/// [`CmdError`] describing the first problem found.
 pub fn sanitize_hotkey(hotkey: Hotkey) -> Result<Hotkey, CmdError> {
     let id = hotkey.id.trim();
     if id.is_empty() {
@@ -91,7 +120,7 @@ pub fn sanitize_hotkey(hotkey: Hotkey) -> Result<Hotkey, CmdError> {
         id: id.to_string(),
         label: label.to_string(),
         accelerator: parsed.to_canonical(),
-        action: hotkey.action,
+        action: sanitize_app_action(hotkey.action)?,
         enabled: hotkey.enabled,
     })
 }
@@ -155,24 +184,11 @@ pub fn sanitize_modifier_rule(
         ));
     }
 
-    // A SendKeystroke tap must carry an accelerator that both parses and — on
-    // macOS — maps to a synthesizable keycode, or the rule would save yet fail
-    // every time the tap fired. The parser's key set is kept in lockstep with
-    // `keysend::keycode_for` (see its coverage test), so the keycode check is
-    // a guard against future drift between the two rather than a known gap.
-    if let AppAction::SendKeystroke(accel) = &rule.tap {
-        let parsed = accelerator::parse(accel)
-            .map_err(|e| CmdError::other(format!("invalid tap keystroke: {e}")))?;
-        #[cfg(target_os = "macos")]
-        if crate::keysend::keycode_for(&parsed.key).is_none() {
-            return Err(CmdError::other(format!(
-                "the key \"{}\" cannot be sent as a keystroke",
-                parsed.key
-            )));
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = parsed;
-    }
+    // The tap action goes through the same validator as every other action
+    // that crosses the boundary: a SendKeystroke tap whose accelerator does
+    // not parse, or names a key the synthesizer cannot emit, would save yet
+    // fail every time the tap fired.
+    let tap = sanitize_app_action(rule.tap.clone())?;
 
     // Two rules with the same modifier *and* side are equally specific, so the
     // engine picks whichever the DB lists first (by label) — renaming one could
@@ -212,7 +228,7 @@ pub fn sanitize_modifier_rule(
         side: rule.side,
         remap_to: rule.remap_to,
         hyper: rule.hyper,
-        tap: rule.tap,
+        tap,
         enabled: rule.enabled,
     })
 }
@@ -237,6 +253,34 @@ fn side_label(side: KeySide) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_action_crossing_the_boundary_goes_through_the_same_validator() {
+        // A hotkey whose action is a keystroke: the accelerator is validated and
+        // canonicalised like a rule's, not stored verbatim.
+        let hotkey = Hotkey {
+            id: "k".into(),
+            label: "K".into(),
+            accelerator: "Ctrl+Alt+K".into(),
+            action: AppAction::SendKeystroke("cmd+shift+4".into()),
+            enabled: true,
+        };
+        let saved = sanitize_hotkey(hotkey.clone()).expect("valid");
+        assert_eq!(
+            saved.action,
+            AppAction::SendKeystroke(accelerator::parse("cmd+shift+4").unwrap().to_canonical())
+        );
+        let broken = Hotkey {
+            action: AppAction::SendKeystroke("Frobnicate".into()),
+            ..hotkey
+        };
+        assert!(sanitize_hotkey(broken).is_err());
+        // Closed-enum actions pass through untouched.
+        assert_eq!(
+            sanitize_app_action(AppAction::UndoWindow).unwrap(),
+            AppAction::UndoWindow
+        );
+    }
 
     #[test]
     fn auto_collapse_delay_is_bounded() {
