@@ -173,7 +173,7 @@ fn apply_step(conn: &Connection, migrations: &[&str], next: i32) -> Result<()> {
         return Ok(());
     }
     tx.execute_batch(migrations[(next - 1) as usize])
-        .map_err(|e| Error::Migration(format!("migrating to schema version {next}: {e}")))?;
+        .map_err(|source| Error::MigrationStep { step: next, source })?;
     tx.pragma_update(None, "user_version", next)?;
     tx.commit()?;
     Ok(())
@@ -514,7 +514,7 @@ PRAGMA user_version = 3;
         let conn = Connection::open_in_memory().expect("open");
 
         let err = apply_migrations(&conn, migrations).expect_err("second step must fail");
-        assert!(matches!(err, Error::Migration(_)));
+        assert!(matches!(err, Error::MigrationStep { step: 2, .. }));
 
         let version: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -563,6 +563,67 @@ PRAGMA user_version = 3;
                     .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn a_failed_migration_step_keeps_the_sqlite_error() {
+        let conn = Connection::open_in_memory().expect("open");
+        let err = apply_migrations(&conn, &["CREATE TABLE ok (id INTEGER)", "THIS IS NOT SQL"])
+            .expect_err("the second step must fail");
+        match &err {
+            Error::MigrationStep { step, source } => {
+                assert_eq!(*step, 2);
+                // The SQLite error travels intact (here a parse failure, which
+                // rusqlite reports as `SqlInputError`; a real corruption would
+                // be a `SqliteFailure` with its code).
+                assert!(
+                    matches!(source, rusqlite::Error::SqlInputError { .. }),
+                    "{source:?}"
+                );
+            }
+            other => panic!("expected MigrationStep, got {other:?}"),
+        }
+        assert!(!err.is_database_corruption());
+        // The first step stayed committed; the failed one rolled back.
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn a_past_schema_fixture_corrupted_on_disk_is_recognised_as_corruption() {
+        // A v1 database whose first page (schema + table roots) is trashed
+        // past the header: the file still *looks* like SQLite, so opening it
+        // succeeds and the damage surfaces only once the migration reads the
+        // schema. That error must still classify as corruption so launch
+        // quarantines the file instead of failing the same way every time.
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tomari.sqlite3");
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(VERSION_FIXTURES[0])
+                .expect("build fixture");
+        }
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("reopen for damage");
+            // Past the 100-byte header, over the rest of page 1 where the
+            // schema cells live.
+            file.seek(SeekFrom::Start(200)).unwrap();
+            file.write_all(&vec![0xFF; 3_800]).unwrap();
+        }
+        let err = match Database::open(&path) {
+            Ok(_) => panic!("a trashed schema page must not open"),
+            Err(e) => e,
+        };
+        assert!(
+            err.is_database_corruption(),
+            "expected corruption, got {err:?}"
+        );
     }
 
     #[test]
