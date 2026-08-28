@@ -13,6 +13,7 @@ mod drag_to_snap;
 mod error;
 #[cfg(target_os = "macos")]
 mod eventtap;
+mod instance_lock;
 mod keepawake;
 #[cfg(target_os = "macos")]
 mod keycodes;
@@ -41,6 +42,7 @@ use tomari_core::{AppPaths, AppSettings, Database, defaults};
 use tomari_keyboard::ModifierEngine;
 use tomari_window::WindowManager;
 
+use crate::instance_lock::{AcquireError, InstanceLock, Outcome};
 use crate::locks::MutexExt;
 use crate::state::AppState;
 
@@ -53,16 +55,46 @@ fn main() {
         Ok(p)
     });
     init_logging(paths.as_ref().ok());
-
-    let app_state = match &paths {
-        Ok(paths) => build_state(paths),
+    let paths = match paths {
+        Ok(paths) => paths,
         Err(e) => fatal_startup_error(&format!("Tomari could not prepare its data directory: {e}")),
     };
+    let context = tauri::generate_context!();
+
+    // Before the database and before the Tauri builder: the process that holds
+    // this lock is the instance. Everything below — the single-instance socket,
+    // the database, the event taps — belongs to it alone. A launch that cannot
+    // get the lock hands itself off to the holder over the plugin's own socket
+    // and exits without ever registering the plugin, so the socket can never end
+    // up owned by a process that does not also own the data directory (the
+    // plugin would otherwise take an existing socket over when it binds).
+    let identifier = context.config().identifier.clone();
+    let lock = match InstanceLock::acquire_or_hand_off(&paths.data_dir, || {
+        instance_lock::hand_off_to_holder(&identifier).is_ok()
+    }) {
+        Ok(Outcome::Locked(lock)) => lock,
+        Ok(Outcome::HandedOff) => {
+            tracing::info!("another instance holds the data directory; handed off");
+            std::process::exit(0);
+        }
+        Err(AcquireError::Held) => {
+            tracing::warn!("another instance holds the data directory but is not listening");
+            fatal_startup_error(
+                "Tomari is already running. If it is not, wait a moment and open it again.",
+            );
+        }
+        Err(AcquireError::Io(e)) => fatal_startup_error(&format!(
+            "Tomari could not lock its data directory {}: {e}",
+            paths.data_dir.display()
+        )),
+    };
+    let app_state = build_state(&paths);
 
     tauri::Builder::default()
         // Register first: a second launch must hand off to the running
         // instance — two event taps would double-fire every remap and tap
-        // action. The callback surfaces the existing instance's panel.
+        // action. The callback surfaces the existing instance's panel. Only
+        // the lock holder gets here, so only it ever binds the socket.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A bare second launch surfaces the panel. On macOS `tomari://`
             // URLs are delivered to deep-link's `on_open_url`, not here, so this
@@ -97,6 +129,7 @@ fn main() {
                 })
                 .build(),
         )
+        .manage(lock)
         .manage(app_state)
         .manage(commands::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
@@ -335,7 +368,7 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         // Startup must not panic (see `build_state`'s doc comment): `.expect`
         // here would be exactly that, an invisible crash loop for a login-item
         // Accessory with no Dock icon or terminal. Route a build failure
@@ -658,6 +691,11 @@ const DB_SIDECARS: [&str; 2] = ["-wal", "-shm"];
 /// refused to read is exactly what someone may want to recover by hand later. It
 /// also cannot be undone, which is what makes the rollback below possible at all.
 ///
+/// `rename` must not replace an existing destination: it fails with
+/// `AlreadyExists` instead. A plain `rename(2)` would silently drop whatever was
+/// already under a `.broken-`/`.orphaned-` name, and that is the only copy of an
+/// earlier reset's evidence.
+///
 /// `exists` returns a `Result` rather than a bool because `Path::exists` reports
 /// a metadata error as "not there". Treating a sidecar we merely *failed to look
 /// at* as absent is how one gets left beside a replacement database.
@@ -670,7 +708,7 @@ struct RealFileOps;
 
 impl FileOps for RealFileOps {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::rename(from, to)
+        rename_no_clobber(from, to)
     }
     fn exists(&self, path: &Path) -> std::io::Result<bool> {
         // `symlink_metadata`, so a dangling symlink counts as present: it still
@@ -681,6 +719,36 @@ impl FileOps for RealFileOps {
             Err(e) => Err(e),
         }
     }
+}
+
+/// `rename(2)` that refuses to replace an existing destination, atomically —
+/// there is no window between an existence check and the move for another writer
+/// to slip into.
+#[cfg(target_os = "macos")]
+fn rename_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_from = CString::new(from.as_os_str().as_bytes())?;
+    let c_to = CString::new(to.as_os_str().as_bytes())?;
+    // SAFETY: both pointers come from `CString`s that outlive the call, and
+    // `renamex_np` only reads them.
+    let rc = unsafe { libc::renamex_np(c_from.as_ptr(), c_to.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Best effort where no exclusive rename exists: check, then move. Tomari does
+/// not ship on these platforms; the lock is what rules out the race in practice.
+#[cfg(not(target_os = "macos"))]
+fn rename_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    }
+    std::fs::rename(from, to)
 }
 
 /// Finish a quarantine an earlier launch could not.
@@ -760,17 +828,14 @@ fn was_absent(result: &std::io::Result<()>) -> bool {
 /// The next launch recognizes that split — a sidecar with no database — in
 /// [`sweep_orphan_sidecars`] and finishes the job before anything is opened.
 ///
-/// What this does *not* handle is two launches doing it at once. The database is
-/// opened before the single-instance plugin is registered (see `main`), so both
-/// can find the same corruption; migrations survive that race with immediate
-/// transactions, this reset has nothing equivalent. The damage is not limited to
-/// the copies kept for inspection either: the second process can arrive after
-/// the first has already created the replacement and move *that* aside, leaving
-/// one process writing to a database no longer at the canonical path and the
-/// other to a second fresh one — so settings saved in that session are gone by
-/// the next launch. `rename` replacing its destination compounds it. Ruling any
-/// of it out needs a lock held across processes from before the database is
-/// opened, which is a gap this function cannot close on its own.
+/// Two launches doing this at once is ruled out one level up: `main` takes the
+/// [`InstanceLock`] before the database is opened, so only one process can be in
+/// here. Without it the second process could move the first's fresh replacement
+/// aside and leave one of them writing to a file no longer at the canonical path.
+/// The renames themselves never replace an existing file ([`FileOps::rename`]),
+/// so a `.broken-` name that is somehow already taken — a stamp collision, or a
+/// process the lock does not bind — fails the move rather than destroying what
+/// an earlier reset kept.
 fn quarantine_database(fs: &impl FileOps, db_path: &Path, unix_ms: u128) -> bool {
     let Some(name) = db_path.file_name().and_then(|n| n.to_str()) else {
         tracing::error!(path = %db_path.display(), "the database path has no file name to move aside");
@@ -992,6 +1057,9 @@ mod tests {
                 return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
             }
             let mut present = self.present.borrow_mut();
+            if present.contains(to) {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
             if !present.remove(from) {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
@@ -1061,6 +1129,37 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             assert!(fs.kept_aside(suffix), "{suffix:?} was not kept aside");
         }
+    }
+
+    #[test]
+    fn quarantine_never_renames_over_an_existing_quarantine() {
+        // The `-wal` destination is already taken, so the sidecar move fails and
+        // the database that was already moved comes back — nothing replaced.
+        let taken = aside("-wal");
+        let fs = FakeFileOps::with(&[DB, WAL, SHM, taken.to_str().unwrap()]);
+        assert!(!quarantine_database(&fs, Path::new(DB), STAMP));
+        for path in [DB, WAL, SHM] {
+            assert!(fs.has(path), "{path} must stay in place");
+        }
+        assert!(fs.has(taken.to_str().unwrap()));
+    }
+
+    #[test]
+    fn real_rename_refuses_to_replace_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("tomari-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from");
+        let to = dir.join("to");
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"kept").unwrap();
+        let err = RealFileOps.rename(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"kept");
+        std::fs::remove_file(&to).unwrap();
+        RealFileOps.rename(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

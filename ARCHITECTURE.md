@@ -412,9 +412,8 @@ and applies none of them.
   entry `n` upgrades a version-`n` database to `n + 1`, and the version a
   binary writes is simply the list's length. Each step runs in its own
   *immediate* (write-locking) transaction that re-checks `user_version` under
-  the lock — two instances racing at launch (the database opens before the
-  single-instance guard engages) cannot double-apply a step — and stamps the
-  version it reached, so a failure rolls that step back cleanly and the next
+  the lock — so even two processes at the same database cannot double-apply a
+  step — and stamps the version it reached, so a failure rolls that step back cleanly and the next
   launch resumes from it (covered by tests, including frozen per-version
   fixtures). Shipped entries are never edited; schema changes append a step.
 - Tables: `hotkeys` / `modifier_rules` / `settings` (a single `id = 1` row
@@ -475,16 +474,26 @@ and applies none of them.
   returns a `Result`: `Path::exists` reports a metadata error as "not there", and
   treating a sidecar we merely failed to look at as absent is how one ends up
   beside the replacement.
-- What none of it handles is two launches resetting at once. The database is
-  opened *before* the single-instance plugin is registered, so both can find the
-  same corruption; migrations survive that race with immediate transactions, this
-  reset has nothing equivalent. Nor is the damage confined to the copies kept for
-  inspection: the second process can arrive after the first has created the
-  replacement and move *that* aside, leaving one process writing to a database no
-  longer at the canonical path and the other to a second fresh one — so settings
-  saved in that session are gone by the next launch. `rename` replacing its
-  destination compounds it. Ruling any of this out needs a lock held across
-  processes from before the database is opened, which is a known gap.
+- Two launches resetting at once is ruled out by the `InstanceLock`
+  (`instance_lock.rs`): an advisory `flock` on `tomari.lock` in the data
+  directory, taken in `main` before the database is opened and before the Tauri
+  builder runs, then kept in managed state for the life of the process. The
+  single-instance socket alone leaves a window where two launches both believe
+  they are the singleton — and the plugin removes any socket file it finds
+  before binding, so the later one would also take the socket from the earlier.
+  Without the lock, the second could move the first's fresh replacement aside
+  and leave one of them writing to a database no longer at the canonical path.
+  The holder is the instance: only it registers the plugin and binds the socket.
+  A launch that finds the lock held hands itself off to the holder at once over
+  the plugin's own socket — speaking the plugin's wire format itself, since it
+  must never run the plugin — and exits; if nobody is listening yet (the holder
+  is still starting, or an old instance still tearing down) it alternates lock
+  attempts and hand-offs for a few seconds, then exits with an alert. `flock` belongs to the open file description, so a crash leaves no stale
+  lock. Quarantine renames go through `renamex_np(RENAME_EXCL)`, so a `.broken-`
+  or `.orphaned-` name that is already taken fails the move atomically instead
+  of replacing what an earlier reset kept. A two-process test spawns the test
+  binary against the same directory to pin the contention down, and another
+  checks the hand-off payload against a plugin-shaped listener.
 - A failed reset exits with an alert naming the files to move by hand, and a
   fresh database that then cannot be created reports *its own* error rather than
   the corruption that started it. The file operations sit behind a `FileOps`
@@ -497,14 +506,17 @@ and applies none of them.
 
 ## 7. Tauri shell and the frontend boundary
 
-- `main.rs` is the assembly point: open and seed the DB → build `AppState`
-  (DB, both engines, the `WindowManager`, the settings cache, the shortcut
-  map, the undo history) → wire the plugins (single-instance / deep-link /
-  autostart / updater / global-shortcut) and the tray → start the event tap
-  and the drag-to-snap tap. `single-instance` is registered first: a second
-  launch would create a duplicate event tap that double-fires every remap, so it
-  hands off to the running instance (surfacing its panel) and exits.
-  `deep-link` is registered right after it, as the plugin requires.
+- `main.rs` is the assembly point: resolve the data directory and start
+  logging → take the `InstanceLock` (a launch that cannot hands off to the
+  running instance and exits before touching the database) → open and seed the
+  DB → build `AppState` (DB, both engines, the `WindowManager`, the settings
+  cache, the shortcut map, the undo history) → wire the plugins (single-instance
+  / deep-link / autostart / updater / global-shortcut) and the tray → start the
+  event tap and the drag-to-snap tap. `single-instance` is registered first
+  among the plugins: a second launch would create a duplicate event tap that
+  double-fires every remap, so it hands off to the running instance (surfacing
+  its panel) and exits. `deep-link` is registered right after it, as the plugin
+  requires.
 - The activation policy is **Accessory** (no Dock icon). A single resizable
   window (`main`, 940×720 by default, minimum 860×620, decorated, opaque, not
   always on top) is declared in `tauri.conf.json`; a fixed-width sidebar lists
