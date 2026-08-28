@@ -109,7 +109,10 @@ impl From<tomari_core::Error> for CmdError {
 impl From<tomari_window::Error> for CmdError {
     fn from(e: tomari_window::Error) -> Self {
         use tomari_window::Error;
-        let code = match &e {
+        // Key the code on the root cause so a frame write that failed
+        // part-way (`PartialApply`) is classified by *why* it failed; the
+        // message keeps the whole story, rollback outcome included.
+        let code = match e.root() {
             Error::PermissionDenied => ErrorCode::PermissionRequired,
             Error::NoFocusedWindow => ErrorCode::NoFocusedWindow,
             Error::Ax(-25204) => ErrorCode::WindowNotResponding,

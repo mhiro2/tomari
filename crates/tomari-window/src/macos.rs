@@ -30,7 +30,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSRunningApplication, NSScreen};
 use tomari_core::domain::window::{Rect, WindowApplication};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, FrameStep, Result, RollbackOutcome};
 use crate::manager::{FocusedWindow, WindowHandle, WindowManager};
 
 type AXError = i32;
@@ -741,19 +741,22 @@ unsafe fn set_window_size(window: CFTypeRef, width: f64, height: f64) -> Result<
     Ok(())
 }
 
-/// Apply a frame as position → size → position, rolling back to `original` on
-/// any failure so the outcome is all-or-nothing rather than a half-applied
-/// window. The second position write corrects an origin that the first left
-/// clamped because the old (larger) size pushed it off-screen.
+/// Apply a frame as position → size → position, all-or-nothing: the sequence
+/// stops at the first write that fails and the writes already applied are
+/// undone toward `original`, in reverse. The second position write corrects an
+/// origin that the first left clamped because the old (larger) size pushed it
+/// off-screen.
 ///
 /// Every step must succeed: a comparison against a read-back is deliberately
 /// *not* used as the success test, because a window may legitimately clamp to a
-/// minimum size, which is not a failure. If any write fails the window may be
-/// half-applied, so the same origin/size/origin sequence is replayed toward
-/// `original` (best-effort — a rollback write that itself fails is ignored, as
-/// there is nothing better to do) and the first error is returned. `original`
-/// is `None` only when the pre-move frame could not be read, leaving nothing to
-/// roll back to.
+/// minimum size, which is not a failure. Continuing past a failed write would
+/// only add states — a window resized but not moved — that nobody asked for, so
+/// it is not done. The error names the failed step, its cause, and what became
+/// of the rollback ([`RollbackOutcome`]): whether it was needed, succeeded, or
+/// failed at which step — a rollback that fails is *reported*, not swallowed,
+/// because the caller is then looking at a window left partially moved.
+/// `original` is `None` only when the pre-move frame could not be read, leaving
+/// nothing to roll back to.
 ///
 /// Generic over the two write ops so this all-or-nothing logic is testable
 /// without a live Accessibility window.
@@ -763,18 +766,56 @@ fn apply_frame_sequence(
     mut set_origin: impl FnMut(f64, f64) -> Result<()>,
     mut set_size: impl FnMut(f64, f64) -> Result<()>,
 ) -> Result<()> {
-    let r1 = set_origin(frame.x, frame.y);
-    let r2 = set_size(frame.width, frame.height);
-    let r3 = set_origin(frame.x, frame.y);
-    if let Some(err) = r1.err().or(r2.err()).or(r3.err()) {
-        if let Some(original) = original {
-            let _ = set_origin(original.x, original.y);
-            let _ = set_size(original.width, original.height);
-            let _ = set_origin(original.x, original.y);
+    // Which writes have landed, so the rollback undoes exactly those.
+    let mut origin_applied = false;
+    let mut size_applied = false;
+    let failed = if let Err(e) = set_origin(frame.x, frame.y) {
+        (FrameStep::Origin, e)
+    } else {
+        origin_applied = true;
+        if let Err(e) = set_size(frame.width, frame.height) {
+            (FrameStep::Size, e)
+        } else {
+            size_applied = true;
+            match set_origin(frame.x, frame.y) {
+                Ok(()) => return Ok(()),
+                Err(e) => (FrameStep::FinalOrigin, e),
+            }
         }
-        return Err(err);
-    }
-    Ok(())
+    };
+    let (step, cause) = failed;
+    let rollback = if !origin_applied && !size_applied {
+        RollbackOutcome::NotNeeded
+    } else {
+        match original {
+            None => RollbackOutcome::NoOriginal,
+            Some(original) => {
+                // Undo in reverse: the size first (if it landed), then the
+                // origin — the same order that would put a clamped origin
+                // back where it belongs.
+                let undone = if size_applied {
+                    set_size(original.width, original.height).map_err(|e| (FrameStep::Size, e))
+                } else {
+                    Ok(())
+                };
+                let undone = undone.and_then(|()| {
+                    set_origin(original.x, original.y).map_err(|e| (FrameStep::Origin, e))
+                });
+                match undone {
+                    Ok(()) => RollbackOutcome::RolledBack,
+                    Err((step, cause)) => RollbackOutcome::Failed {
+                        step,
+                        cause: Box::new(cause),
+                    },
+                }
+            }
+        }
+    };
+    Err(Error::PartialApply {
+        step,
+        cause: Box::new(cause),
+        rollback,
+    })
 }
 
 /// A handle to one AX window: what [`AxWindowManager`] resolves the focused
@@ -1193,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_frame_sequence_rolls_back_to_original_when_a_write_fails() {
+    fn a_failed_size_write_stops_the_sequence_and_rolls_the_origin_back() {
         use std::cell::RefCell;
         let calls = RefCell::new(Vec::new());
         let original = Rect::new(1.0, 2.0, 3.0, 4.0);
@@ -1210,16 +1251,94 @@ mod tests {
                 Err(Error::Ax(-25200))
             },
         );
-        assert!(matches!(res, Err(Error::Ax(-25200))));
+        assert_eq!(
+            res,
+            Err(Error::PartialApply {
+                step: FrameStep::Size,
+                cause: Box::new(Error::Ax(-25200)),
+                rollback: RollbackOutcome::RolledBack,
+            })
+        );
         assert_eq!(
             *calls.borrow(),
             vec![
-                // Forward: all three run (the size failure surfaces after).
+                "origin 10 20".to_string(),
+                "size 300 400".to_string(),
+                // Short-circuit: no final origin write. Only the origin had
+                // landed, so only the origin is rolled back.
+                "origin 1 2".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_failed_first_origin_needs_no_rollback() {
+        use std::cell::Cell;
+        let size_calls = Cell::new(0);
+        let res = apply_frame_sequence(
+            Some(Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Rect::new(10.0, 20.0, 300.0, 400.0),
+            |_x, _y| Err(Error::Ax(-25200)),
+            |_w, _h| {
+                size_calls.set(size_calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            res,
+            Err(Error::PartialApply {
+                step: FrameStep::Origin,
+                cause: Box::new(Error::Ax(-25200)),
+                rollback: RollbackOutcome::NotNeeded,
+            })
+        );
+        assert_eq!(size_calls.get(), 0, "nothing after the failed write runs");
+    }
+
+    #[test]
+    fn a_failed_final_origin_rolls_back_size_then_origin() {
+        // Regression: the old code dropped the second set_origin result, so a
+        // window that clamped its origin and could not be re-positioned still
+        // reported success.
+        use std::cell::RefCell;
+        let calls = RefCell::new(Vec::new());
+        let res = apply_frame_sequence(
+            Some(Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Rect::new(10.0, 20.0, 300.0, 400.0),
+            |x, y| {
+                calls.borrow_mut().push(format!("origin {x} {y}"));
+                // The second forward origin write (to the target, x == 10)
+                // fails; the rollback's origin write (to x == 1) succeeds.
+                let forward_writes = calls
+                    .borrow()
+                    .iter()
+                    .filter(|c| c.starts_with("origin 10"))
+                    .count();
+                if x == 10.0 && forward_writes == 2 {
+                    Err(Error::Ax(-25200))
+                } else {
+                    Ok(())
+                }
+            },
+            |w, h| {
+                calls.borrow_mut().push(format!("size {w} {h}"));
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            res,
+            Err(Error::PartialApply {
+                step: FrameStep::FinalOrigin,
+                rollback: RollbackOutcome::RolledBack,
+                ..
+            })
+        ));
+        assert_eq!(
+            *calls.borrow(),
+            vec![
                 "origin 10 20".to_string(),
                 "size 300 400".to_string(),
                 "origin 10 20".to_string(),
-                // Rollback toward the starting frame.
-                "origin 1 2".to_string(),
                 "size 3 4".to_string(),
                 "origin 1 2".to_string(),
             ],
@@ -1227,35 +1346,53 @@ mod tests {
     }
 
     #[test]
-    fn apply_frame_sequence_treats_a_failed_final_origin_as_failure() {
-        // Regression: the old code dropped the second set_origin result, so a
-        // window that clamped its origin and could not be re-positioned still
-        // reported success.
+    fn a_rollback_that_fails_is_reported_with_its_own_step_and_cause() {
         use std::cell::Cell;
-        let origin_calls = Cell::new(0);
+        let size_calls = Cell::new(0);
         let res = apply_frame_sequence(
             Some(Rect::new(1.0, 2.0, 3.0, 4.0)),
             Rect::new(10.0, 20.0, 300.0, 400.0),
-            |_x, _y| {
-                let n = origin_calls.get();
-                origin_calls.set(n + 1);
-                // The second forward origin write (index 1) fails.
-                if n == 1 {
-                    Err(Error::Ax(-25200))
-                } else {
-                    Ok(())
-                }
+            |_x, _y| Ok(()),
+            |_w, _h| {
+                let n = size_calls.get();
+                size_calls.set(n + 1);
+                // The forward size write fails; so does undoing it — there is
+                // no size to undo, so the failing undo here is the *origin*
+                // path's turn: make the second size call (never reached) fail
+                // too for good measure.
+                Err(Error::Ax(-25204))
             },
-            |_w, _h| Ok(()),
         );
-        assert!(
-            res.is_err(),
-            "a failed final origin must not report success"
+        // Only the origin landed; its undo succeeds, so this is a clean
+        // rollback despite the size write's failure.
+        assert_eq!(
+            res,
+            Err(Error::PartialApply {
+                step: FrameStep::Size,
+                cause: Box::new(Error::Ax(-25204)),
+                rollback: RollbackOutcome::RolledBack,
+            })
+        );
+
+        // Now the undo of the origin itself fails.
+        use std::cell::RefCell;
+        let origin_results = RefCell::new(vec![Ok(()), Err(Error::Ax(-25202))]);
+        let res = apply_frame_sequence(
+            Some(Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Rect::new(10.0, 20.0, 300.0, 400.0),
+            |_x, _y| origin_results.borrow_mut().remove(0),
+            |_w, _h| Err(Error::Ax(-25204)),
         );
         assert_eq!(
-            origin_calls.get(),
-            4,
-            "two forward origin writes plus two rollback origin writes"
+            res,
+            Err(Error::PartialApply {
+                step: FrameStep::Size,
+                cause: Box::new(Error::Ax(-25204)),
+                rollback: RollbackOutcome::Failed {
+                    step: FrameStep::Origin,
+                    cause: Box::new(Error::Ax(-25202)),
+                },
+            })
         );
     }
 
@@ -1268,18 +1405,24 @@ mod tests {
             Rect::new(10.0, 20.0, 300.0, 400.0),
             |_x, _y| {
                 calls.borrow_mut().push("origin");
-                Err(Error::Ax(-1))
+                Ok(())
             },
             |_w, _h| {
                 calls.borrow_mut().push("size");
-                Ok(())
+                Err(Error::Ax(-1))
             },
         );
-        assert!(res.is_err());
+        assert!(matches!(
+            res,
+            Err(Error::PartialApply {
+                rollback: RollbackOutcome::NoOriginal,
+                ..
+            })
+        ));
         assert_eq!(
-            calls.borrow().len(),
-            3,
-            "only the forward writes run; nothing to roll back to"
+            *calls.borrow(),
+            vec!["origin", "size"],
+            "the sequence stops at the failure; nothing to roll back to"
         );
     }
 

@@ -282,7 +282,12 @@ Three layers:
    focused-window resolution, work-area enumeration) and `WindowHandle`
    (`frame` / `set_frame` / `stable_hash`). A handle can re-target the same
    window even after focus has moved elsewhere — it is the unit the undo
-   history stores. The macOS implementation is `AxWindowManager` (direct
+   history stores. `set_frame` writes position → size → position and is
+   all-or-nothing: the sequence stops at the first write that fails, the writes
+   already applied are undone in reverse, and the error
+   (`Error::PartialApply`) names the failed step, its cause and the rollback's
+   own outcome — so a rollback that fails is reported, never swallowed, and
+   callers classify by the root cause (`Error::root`). The macOS implementation is `AxWindowManager` (direct
    bindings to the stable HIServices C functions). Focused-window resolution
    normally reads the system-wide `AXFocusedApplication`/`AXFocusedWindow`, but
    if that application turns out to be Tomari itself (e.g. a click landed on

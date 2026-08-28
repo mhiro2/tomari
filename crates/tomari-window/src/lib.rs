@@ -13,7 +13,7 @@ pub mod manager;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use error::{Error, Result};
+pub use error::{Error, FrameStep, Result, RollbackOutcome};
 pub use geometry::{
     MIN_DRAG_SIZE, compute_frame, drag_move_frame, drag_resize_frame, edge_snap_preset,
     frames_match, next_in_cycle, normalize_frame, recall_frame, remap_frame, screen_at_cursor,
