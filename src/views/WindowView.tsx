@@ -6,6 +6,7 @@ import { ShortcutRecorder } from '../components/ShortcutRecorder';
 import {
   FeatureContent,
   FeaturePageHeader,
+  FeatureSwitch,
   SegmentedPageNav,
   SettingsList,
   Toggle,
@@ -420,14 +421,14 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
 
   return (
     <div className="view">
-      <FeaturePageHeader
-        title={t('app.nav.window')}
-        description={t('window.pageDescription')}
+      <FeaturePageHeader title={t('app.nav.window')} description={t('window.pageDescription')} />
+
+      <FeatureSwitch
+        title={t('common.enable', { label: t('settings.windowManagement') })}
         checked={on}
         onChange={(value) => update({ windowManagementEnabled: value })}
-        toggleLabel={t('common.enable', { label: t('settings.windowManagement') })}
-        onLabel={t('common.on')}
-        offLabel={t('common.off')}
+        stateLabel={on ? t('common.on') : t('common.off')}
+        tone={on ? 'on' : 'neutral'}
       />
 
       <SegmentedPageNav

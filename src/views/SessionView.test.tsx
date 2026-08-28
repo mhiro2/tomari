@@ -267,7 +267,7 @@ describe('SessionView', () => {
 
     render(<SessionView />);
 
-    const toggle = await screen.findByRole('switch', { name: 'Working…' });
+    const toggle = await screen.findByRole('switch', { name: 'Keep this Mac awake' });
     expect(toggle).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
@@ -292,7 +292,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const timer = await screen.findByRole('combobox', { name: 'Turn off automatically' });
+    const timer = await screen.findByRole('combobox', { name: 'After a set time' });
     fireEvent.change(timer, { target: { value: '30m' } });
 
     await waitFor(() => {
@@ -315,7 +315,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const timer = await screen.findByRole('combobox', { name: 'Turn off automatically' });
+    const timer = await screen.findByRole('combobox', { name: 'After a set time' });
     await waitFor(() => expect(timer).toHaveValue('time'));
 
     // Engaging clears an end time that is already in the past, so the panel must
@@ -338,7 +338,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const endTime = await screen.findByLabelText('End time');
+    const endTime = await screen.findByLabelText('Allow sleep at');
     fireEvent.change(endTime, { target: { value: '' } });
 
     // Without this the backend would keep enforcing an end time the panel no
@@ -360,6 +360,6 @@ describe('SessionView', () => {
 
     render(<SessionView />);
 
-    expect(await screen.findByLabelText('Time remaining')).toHaveTextContent('1:05');
+    expect(await screen.findByText('1:05')).toHaveTextContent('Time remaining: 1:05');
   });
 });

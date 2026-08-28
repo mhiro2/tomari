@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   FeatureContent,
   FeaturePageHeader,
+  FeatureSwitch,
   PermissionStatus,
   SegmentedPageNav,
   SwitchRow,
@@ -29,17 +30,11 @@ describe('SwitchRow', () => {
 });
 
 describe('FeaturePageHeader', () => {
-  it('shows one concise introduction and uses only the master switch to turn a feature on', () => {
-    const onChange = vi.fn();
+  it('shows one concise introduction without any control of its own', () => {
     render(
       <FeaturePageHeader
         title="Windows"
         description="Configure saved positions, shortcuts, and mouse controls."
-        checked={false}
-        onChange={onChange}
-        toggleLabel="Enable window placement"
-        onLabel="On"
-        offLabel="Off"
       />,
     );
 
@@ -47,6 +42,22 @@ describe('FeaturePageHeader', () => {
     expect(
       screen.getByText('Configure saved positions, shortcuts, and mouse controls.'),
     ).toBeInTheDocument();
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+  });
+});
+
+describe('FeatureSwitch', () => {
+  it('is the only control that turns a feature on and reports its state', () => {
+    const onChange = vi.fn();
+    render(
+      <FeatureSwitch
+        title="Enable window placement"
+        checked={false}
+        onChange={onChange}
+        stateLabel="Off"
+      />,
+    );
+
     expect(screen.getByText('Off')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Turn On' })).not.toBeInTheDocument();
 

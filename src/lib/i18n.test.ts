@@ -28,7 +28,7 @@ describe('dictionaries', () => {
 describe('translate', () => {
   it('substitutes a single parameter', () => {
     expect(translate('en', 'common.enable', { label: 'Gestures' })).toBe('Enable Gestures');
-    expect(translate('ja', 'common.enable', { label: 'ジェスチャ' })).toBe('ジェスチャ を有効化');
+    expect(translate('ja', 'common.enable', { label: 'ジェスチャ' })).toBe('ジェスチャを有効化');
   });
 
   it('stringifies a numeric parameter', () => {

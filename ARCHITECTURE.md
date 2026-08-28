@@ -616,11 +616,16 @@ and applies none of them.
 - **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
   `WindowView` / `KeyboardView` / `MenuBarView` / `SessionView` /
   `GeneralView` directly; there is no Overview route. Each detail screen pairs
-  a one-sentence purpose with explicit state. Master switches wrap their page
-  controls in `FeatureContent`: turning a feature off keeps the configuration
-  visible but disables interaction. `WindowView` is segmented into Saved
+  a one-sentence purpose with explicit state. The master switch is a
+  `FeatureSwitch` row placed first in the content column (not in the page
+  header), so it lines up with every other row control; on *Prevent Sleep* that
+  row also carries the live phase, countdown, and prompt cancel. The persistent
+  features wrap their page controls in `FeatureContent`: turning a feature off
+  keeps the configuration visible but disables interaction. *Prevent Sleep*
+  deliberately does not — its auto-off conditions stay editable while off so
+  they can be set before turning it on. `WindowView` is segmented into Saved
   Positions / Shortcuts / Mouse, `KeyboardView` into Modifier Keys / Shortcuts,
-  and `MenuBarView` into Items / Behavior. `FeaturePageHeader`,
+  and `MenuBarView` into Items / Behavior. `FeaturePageHeader`, `FeatureSwitch`,
   `SegmentedPageNav`, `SettingsList`, `SettingsRow`, and `PermissionStatus`
   provide the shared presentation vocabulary instead of treating all content
   as generic cards. Missing permissions appear once in the sidebar footer;

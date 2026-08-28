@@ -32,47 +32,65 @@ export function Toggle({
 export function FeaturePageHeader({
   title,
   description,
-  checked,
-  onChange,
-  toggleLabel,
-  toggleDisabled,
-  onLabel,
-  offLabel,
-  action,
 }: {
   title: string;
   description: ReactNode;
-  checked?: boolean;
-  onChange?: (next: boolean) => void;
-  toggleLabel?: string;
-  toggleDisabled?: boolean;
-  onLabel?: string;
-  offLabel?: string;
-  action?: ReactNode;
 }) {
-  const hasSwitch = checked !== undefined && onChange !== undefined;
-
   return (
     <header className="feature-header">
       <div className="feature-header__copy">
         <h1>{title}</h1>
         <p>{description}</p>
       </div>
-      {hasSwitch && (
-        <div className="feature-header__control">
-          {(onLabel || offLabel) && (
-            <span className="feature-header__state">{checked ? onLabel : offLabel}</span>
-          )}
-          <Toggle
-            checked={checked}
-            onChange={onChange}
-            label={toggleLabel ?? title}
-            disabled={toggleDisabled}
-          />
-        </div>
-      )}
-      {!hasSwitch && action && <div className="feature-header__control">{action}</div>}
     </header>
+  );
+}
+
+// The page's master switch. It sits first in the content column as its own
+// one-row card, so the control lines up with every other row's control and
+// reads as "the thing this page turns on" rather than as window chrome.
+export function FeatureSwitch({
+  title,
+  description,
+  checked,
+  onChange,
+  toggleLabel,
+  disabled,
+  stateLabel,
+  trail,
+  tone = 'neutral',
+}: {
+  title: string;
+  description?: ReactNode;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  toggleLabel?: string;
+  disabled?: boolean;
+  stateLabel?: string;
+  trail?: ReactNode;
+  tone?: 'neutral' | 'on' | 'pending' | 'danger';
+}) {
+  const descriptionId = useId();
+  return (
+    <div className={`settings-list feature-switch feature-switch--${tone}`}>
+      <SettingsRow
+        title={title}
+        description={description && <span id={descriptionId}>{description}</span>}
+        trail={
+          <>
+            {trail}
+            {stateLabel && <span className="feature-switch__state">{stateLabel}</span>}
+            <Toggle
+              checked={checked}
+              onChange={onChange}
+              label={toggleLabel ?? title}
+              describedBy={description ? descriptionId : undefined}
+              disabled={disabled}
+            />
+          </>
+        }
+      />
+    </div>
   );
 }
 

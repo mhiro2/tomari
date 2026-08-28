@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FeatureContent,
   FeaturePageHeader,
+  FeatureSwitch,
   SegmentedPageNav,
   SettingsList,
   SettingsRow,
@@ -160,15 +161,15 @@ export function MenuBarView() {
   const enabled = settings.menuBarTidyEnabled;
   return (
     <div className="view">
-      <FeaturePageHeader
-        title={t('menubar.title')}
-        description={t('menubar.pageDescription')}
+      <FeaturePageHeader title={t('menubar.title')} description={t('menubar.pageDescription')} />
+
+      <FeatureSwitch
+        title={t('menubar.enable')}
         checked={enabled}
         onChange={(next) => update({ menuBarTidyEnabled: next })}
-        toggleLabel={t('menubar.enable')}
-        toggleDisabled={inventoryBusy || movingItemId !== null}
-        onLabel={t('common.on')}
-        offLabel={t('common.off')}
+        disabled={inventoryBusy || movingItemId !== null}
+        stateLabel={enabled ? t('common.on') : t('common.off')}
+        tone={enabled ? 'on' : 'neutral'}
       />
 
       <SegmentedPageNav

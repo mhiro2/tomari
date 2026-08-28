@@ -236,11 +236,13 @@ returns to the last selected destination (or Windows when no valid selection has
 been saved).
 
 Each feature page starts with one short purpose sentence and, where applicable,
-a master switch. Turning a feature off leaves its settings visible so its scope
-is still understandable, but disables the controls until the feature is turned
-back on. Windows, Keyboard, and Menu Bar use the focused tabs described above;
-ordinary options use divided rows, while cards are reserved for objects such as
-saved window positions.
+a master switch as the first row of the page. For Windows, Keyboard, and Menu
+Bar, turning the feature off leaves its settings visible so its scope is still
+understandable, but disables the controls until the feature is turned back on;
+Prevent Sleep keeps its auto-off conditions editable while off. Windows,
+Keyboard, and Menu Bar use the focused tabs described above; ordinary options
+use divided rows, while cards are reserved for the master switch and for objects
+such as saved window positions.
 
 On the very first launch the settings window opens automatically (the main
 features need permissions you have not granted yet); after that Tomari starts

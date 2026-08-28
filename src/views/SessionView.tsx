@@ -1,7 +1,15 @@
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 
-import { Chip, FeaturePageHeader, SettingsList, SettingsRow, Toggle } from '../components/ui';
+import {
+  Chip,
+  FeaturePageHeader,
+  FeatureSwitch,
+  HelpDisclosure,
+  SettingsList,
+  SettingsRow,
+  Toggle,
+} from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { useT, type MessageKey, type Translator } from '../lib/i18n';
@@ -262,49 +270,62 @@ export function SessionView() {
   const endsAtMs = status?.options.endsAtMs;
   const countdown = active && typeof endsAtMs === 'number' ? formatCountdown(endsAtMs, now) : null;
 
+  const phaseLabel = ready ? t(PHASE_LABEL[status.phase]) : t('common.loading');
+  const tone: 'neutral' | 'on' | 'pending' | 'danger' = !ready
+    ? 'neutral'
+    : phasePending
+      ? 'pending'
+      : status.phase === 'failed'
+        ? 'danger'
+        : active
+          ? 'on'
+          : 'neutral';
+
   return (
     <div className="view session-view">
       <FeaturePageHeader
         title={t('settings.keepAwakeToggle')}
         description={t('settings.sessionPageDescription')}
-        checked={active}
-        onChange={toggle}
-        toggleLabel={busy ? t('settings.working') : t('settings.keepAwakeAction')}
-        toggleDisabled={busy || !ready}
-        onLabel={t('common.on')}
-        offLabel={t('common.off')}
       />
 
-      <div className={`session-state session-state--${status?.phase ?? 'off'}`}>
-        <span className="session-state__mark" aria-hidden="true" />
-        <div className="session-state__copy">
-          <strong>{ready ? t(PHASE_LABEL[status.phase]) : t('common.loading')}</strong>
-          <p>{t('settings.currentSessionHint')}</p>
-        </div>
-        {countdown && (
-          <div className="session-state__countdown" aria-label={t('settings.timeRemaining')}>
-            <span>{t('settings.timeRemaining')}</span>
-            <strong>{countdown}</strong>
-          </div>
-        )}
-      </div>
-
-      {phasePending && (
-        <output className="banner">
-          <div className="banner__body">
-            <strong>{t('settings.authorizationPending')}</strong>
-            <p>{t('settings.authorizationPendingHint')}</p>
-          </div>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={commandBusy}
-            onClick={() => void run(api.cancelKeepAwakeTransition)}
-          >
-            {t('common.cancel')}
-          </button>
-        </output>
-      )}
+      <FeatureSwitch
+        title={t('settings.keepAwakeAction')}
+        description={
+          // One atomic live region, so a screen reader hears the whole phase
+          // message (label plus any instruction) as a single announcement.
+          <output className="session-phase" aria-atomic="true">
+            {phaseLabel}
+            {phasePending && ` ${t('settings.authorizationPendingHint')}`}
+          </output>
+        }
+        checked={active}
+        onChange={toggle}
+        disabled={busy || !ready}
+        // A transition trims the trail to Cancel and the (disabled) switch; the
+        // phase text already says which way it is going.
+        stateLabel={phasePending ? undefined : active ? t('common.on') : t('common.off')}
+        tone={tone}
+        trail={
+          <>
+            {countdown && !phasePending && (
+              <span className="session-countdown">
+                <span className="sr-only">{t('settings.timeRemaining')}: </span>
+                {countdown}
+              </span>
+            )}
+            {phasePending && (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={commandBusy}
+                onClick={() => void run(api.cancelKeepAwakeTransition)}
+              >
+                {t('common.cancel')}
+              </button>
+            )}
+          </>
+        }
+      />
 
       {status?.notice && (
         <div className="banner" role="alert">
@@ -465,31 +486,31 @@ function SystemState({ t, status }: { t: Translator; status: KeepAwakeStatus | n
         trail={<Chip tone="muted">{powerLabel}</Chip>}
       />
       <SettingsRow
-        title={t('settings.kernelState')}
-        description={t('settings.kernelStateHint')}
-        trail={
-          <Chip tone={status?.kernelSleepDisabled ? 'ok' : 'muted'}>
-            {status?.kernelSleepDisabled === null || !status
-              ? t('settings.systemUnknown')
-              : status.kernelSleepDisabled
-                ? t('settings.kernelBlocked')
-                : t('settings.kernelAllowed')}
-          </Chip>
-        }
-      />
-      <SettingsRow
         title={t('settings.lidClose')}
         trail={<Chip tone={lidChip.tone}>{t(lidChip.key)}</Chip>}
       />
-      <SettingsRow
-        title={t('settings.ownership')}
-        description={t('settings.ownershipHint')}
-        trail={
-          <Chip tone={status?.ownsLidClose ? 'ok' : 'muted'}>
-            {status?.ownsLidClose ? t('settings.ownedByTomari') : t('settings.notOwned')}
-          </Chip>
-        }
-      />
+      <SettingsRow>
+        <HelpDisclosure label={t('settings.advancedState')}>
+          <dl className="session-details">
+            <div>
+              <dt>{t('settings.kernelState')}</dt>
+              <dd>
+                {status?.kernelSleepDisabled === null || !status
+                  ? t('settings.systemUnknown')
+                  : status.kernelSleepDisabled
+                    ? t('settings.kernelBlocked')
+                    : t('settings.kernelAllowed')}
+              </dd>
+              <dd className="session-details__hint">{t('settings.kernelStateHint')}</dd>
+            </div>
+            <div>
+              <dt>{t('settings.ownership')}</dt>
+              <dd>{status?.ownsLidClose ? t('settings.ownedByTomari') : t('settings.notOwned')}</dd>
+              <dd className="session-details__hint">{t('settings.ownershipHint')}</dd>
+            </div>
+          </dl>
+        </HelpDisclosure>
+      </SettingsRow>
     </SettingsList>
   );
 }

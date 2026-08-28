@@ -4,6 +4,7 @@ import { AddHotkeyForm, HotkeyRow, type HotkeyActionOption } from '../components
 import {
   FeatureContent,
   FeaturePageHeader,
+  FeatureSwitch,
   SegmentedPageNav,
   SettingsList,
   Toggle,
@@ -223,11 +224,14 @@ export function KeyboardView() {
       <FeaturePageHeader
         title={t('app.nav.keyboard')}
         description={t('keyboard.pageDescription')}
+      />
+
+      <FeatureSwitch
+        title={t('common.enable', { label: t('settings.keyboardCustomization') })}
         checked={on}
         onChange={(v) => update({ keyboardEnabled: v })}
-        toggleLabel={t('common.enable', { label: t('settings.keyboardCustomization') })}
-        onLabel={t('common.on')}
-        offLabel={t('common.off')}
+        stateLabel={on ? t('common.on') : t('common.off')}
+        tone={on ? 'on' : 'neutral'}
       />
 
       <SegmentedPageNav
