@@ -181,6 +181,7 @@ pub fn apply_dragged<H>(state: &AppState, window: &H, before: Rect, frame: Rect)
 where
     H: WindowHandle + Clone + 'static,
 {
+    let _op = state.lock_window_mutation();
     if window.set_frame(frame).is_err() {
         return false;
     }
@@ -206,6 +207,7 @@ pub fn snap(
     preset: WindowPreset,
     behavior: SnapBehavior,
 ) -> Result<Option<WindowPreset>, CmdError> {
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Ok(None);
     }
@@ -252,6 +254,7 @@ pub fn snap(
 /// Move the focused window to the neighboring display, keeping its position
 /// and size proportional. A no-op on a single display.
 pub fn move_to_display(state: &AppState, direction: DisplayDirection) -> Result<(), CmdError> {
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Ok(());
     }
@@ -300,6 +303,7 @@ pub fn capture_placement(
     target: &WindowTarget,
     slot: PlacementSlot,
 ) -> Result<PlacementEditResult, CmdError> {
+    let _op = state.lock_window_mutation();
     let (focused, frame, area) = focused_context(state, Some(target))?;
     let frame = geometry::normalize_frame(frame, area)
         .ok_or_else(|| CmdError::other("the focused window has an invalid frame"))?;
@@ -308,7 +312,12 @@ pub fn capture_placement(
         slot,
         frame,
     };
-    let _mutation = state.lock_config_mutation();
+    // Placement edits are serialized by `window_mutation` (held above), not
+    // by `config_mutation`: that lock is held across a main-thread hop by the
+    // shortcut commands (the global-shortcut plugin registers on the main
+    // thread and waits), and this runs *on* the main thread — waiting for it
+    // here would deadlock the app. Nothing under `config_mutation` touches the
+    // placements table, so no ordering is lost.
     let before = state
         .db
         .get_window_placement(&placement.application.bundle_id, slot)?;
@@ -336,8 +345,14 @@ pub fn forget_placement(
     target: &WindowTarget,
     slot: PlacementSlot,
 ) -> Result<PlacementEditResult, CmdError> {
+    let _op = state.lock_window_mutation();
     let (focused, _, _) = focused_context(state, Some(target))?;
-    let _mutation = state.lock_config_mutation();
+    // Placement edits are serialized by `window_mutation` (held above), not
+    // by `config_mutation`: that lock is held across a main-thread hop by the
+    // shortcut commands (the global-shortcut plugin registers on the main
+    // thread and waits), and this runs *on* the main thread — waiting for it
+    // here would deadlock the app. Nothing under `config_mutation` touches the
+    // placements table, so no ordering is lost.
     let before = state
         .db
         .get_window_placement(&focused.application.bundle_id, slot)?;
@@ -372,7 +387,13 @@ pub fn forget_placement(
 /// capture or forget. The current row must still match that edit's result;
 /// otherwise a newer/outside write wins rather than being overwritten.
 pub fn undo_placement_edit(state: &AppState) -> Result<HistoryActionResult, CmdError> {
-    let _mutation = state.lock_config_mutation();
+    let _op = state.lock_window_mutation();
+    // Placement edits are serialized by `window_mutation` (held above), not
+    // by `config_mutation`: that lock is held across a main-thread hop by the
+    // shortcut commands (the global-shortcut plugin registers on the main
+    // thread and waits), and this runs *on* the main thread — waiting for it
+    // here would deadlock the app. Nothing under `config_mutation` touches the
+    // placements table, so no ordering is lost.
     let Some(edit) = state.pop_placement_edit() else {
         return Ok(HistoryActionResult::Empty);
     };
@@ -452,6 +473,9 @@ fn recall_placement_impl(
     state: &AppState,
     expected: Option<&WindowTarget>,
 ) -> Result<PlacementSlot, CmdError> {
+    // Taken here, in the shared body, so the shortcut/menu path (`recall_*`)
+    // and the panel path (`*_for`) are serialized alike.
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Err(CmdError::other("window management is disabled"));
     }
@@ -507,6 +531,9 @@ fn move_to_display_and_recall_impl(
     direction: DisplayDirection,
     expected: Option<&WindowTarget>,
 ) -> Result<MoveRecallResult, CmdError> {
+    // Taken here, in the shared body, so the shortcut/menu path (`recall_*`)
+    // and the panel path (`*_for`) are serialized alike.
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Err(CmdError::other("window management is disabled"));
     }
@@ -549,6 +576,7 @@ fn move_to_display_and_recall_impl(
 /// window has since closed are discarded, falling through to the next one; a
 /// transient failure keeps its entry so the user can simply retry.
 pub fn undo(state: &AppState) -> Result<HistoryActionResult, CmdError> {
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Ok(HistoryActionResult::Empty);
     }
@@ -577,6 +605,7 @@ pub fn undo(state: &AppState) -> Result<HistoryActionResult, CmdError> {
 
 /// Reapply the most recently undone window mutation.
 pub fn redo(state: &AppState) -> Result<HistoryActionResult, CmdError> {
+    let _op = state.lock_window_mutation();
     if !enabled(state) {
         return Ok(HistoryActionResult::Empty);
     }

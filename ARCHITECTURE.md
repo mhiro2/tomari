@@ -621,7 +621,24 @@ and applies none of them.
   effects only for the toggles that actually changed (so flipping an unrelated
   preference never tears down the event tap and briefly drops key monitoring) —
   flipping the ⌘ IME switch reassembles the engine's rules via
-  `reload_engine_rules`. Commands reject with a `CmdError`
+  `reload_engine_rules`. Tauri runs a synchronous command on the main thread,
+  so the hotkey and modifier-rule commands — which reach the database (a
+  `SQLITE_BUSY` wait of up to five seconds) and orchestrate a global-shortcut
+  re-registration — are `async fn`s whose body runs on the blocking pool via
+  `off_main`. Shortcut registration is main-thread work whichever thread asks
+  for it: `shortcuts::register_all` reads the database on the caller's thread,
+  then runs the plugin calls and the dispatch-map update on the main thread as
+  one closure — the plugin waits on the main thread while holding its own
+  table lock, which the hotkey handler on the main thread also takes, so doing
+  the calls piecemeal from another thread could deadlock. Nothing on the main
+  thread may wait for `config_mutation` for the same reason. The window
+  commands stay
+  synchronous on purpose: `WindowManager::work_area` / `screen_work_areas`
+  read AppKit screen geometry that is only correct on the main thread, and
+  every window operation holds `AppState::lock_window_mutation` for its whole
+  run so the panel, the shortcuts and the drag-to-snap worker never interleave
+  one (the history's own lock guards a push/pop, not the sequence). Commands
+  reject with a `CmdError`
   (`{ code, message }`, `src-tauri/src/error.rs`): the frontend localizes the
   frequent `code`s (missing permission, no focused window, shortcut conflict)
   and falls back to the English `message` for the rest.

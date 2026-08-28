@@ -73,6 +73,34 @@ pub struct PendingUpdateSlot {
 /// for the rest.
 type CmdResult<T> = Result<T, CmdError>;
 
+/// Run `task` on the blocking pool with the app state, off the main thread.
+///
+/// Tauri dispatches a synchronous command on the main thread, which also
+/// serves AppKit and the webview. A command that reaches the database (a
+/// `SQLITE_BUSY` wait of up to five seconds) or orchestrates a full
+/// global-shortcut re-registration would hold that thread — freezing the
+/// panel — for as long as it takes. Such commands are `async fn`s that hand
+/// their body here. Two caveats keep this honest: the shortcut registration
+/// itself is main-thread work (`shortcuts::register_all` reads the database
+/// on this thread, then hands the plugin calls and the dispatch-map update to
+/// the main thread as one closure — see `shortcuts::on_main_thread` for the
+/// deadlock this avoids), so only the database access and the rollback
+/// orchestration move off it; and the window commands stay synchronous,
+/// because the screen geometry they depend on is only readable on the main
+/// thread (see the note above them).
+async fn off_main<T, F>(app: AppHandle, task: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle, &AppState) -> CmdResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        task(&app, state.inner())
+    })
+    .await
+    .map_err(|error| CmdError::other(format!("command task failed: {error}")))?
+}
+
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
     // Return the live, sanitized in-memory settings rather than re-reading the
@@ -486,12 +514,22 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
 }
 
 #[tauri::command]
-pub fn list_hotkeys(state: State<'_, AppState>) -> CmdResult<Vec<Hotkey>> {
-    state.db.list_hotkeys().map_err(CmdError::from)
+pub async fn list_hotkeys(app: AppHandle) -> CmdResult<Vec<Hotkey>> {
+    off_main(app, |_, state| {
+        state.db.list_hotkeys().map_err(CmdError::from)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_hotkey(app: AppHandle, state: State<'_, AppState>, hotkey: Hotkey) -> CmdResult<()> {
+pub async fn save_hotkey(app: AppHandle, hotkey: Hotkey) -> CmdResult<()> {
+    off_main(app, move |app, state| {
+        save_hotkey_blocking(app, state, hotkey)
+    })
+    .await
+}
+
+fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> CmdResult<()> {
     // Don't trust the frontend: normalize the accelerator and reject empty /
     // overlong ids and labels and bare-letter shortcuts before anything is
     // stored or registered.
@@ -513,7 +551,7 @@ pub fn save_hotkey(app: AppHandle, state: State<'_, AppState>, hotkey: Hotkey) -
     // rollback. Failures of unrelated hotkeys are pre-existing conditions
     // (e.g. a conflict another app introduced since), already logged by
     // `register_all`, and no reason to reject this save.
-    let failure: Option<CmdError> = match shortcuts::register_all(&app, state.inner()) {
+    let failure: Option<CmdError> = match shortcuts::register_all(app, state) {
         Ok(failures) => failures
             .into_iter()
             .find(|f| f.id == hotkey.id || same_accelerator(&f.accelerator, &hotkey.accelerator))
@@ -526,6 +564,13 @@ pub fn save_hotkey(app: AppHandle, state: State<'_, AppState>, hotkey: Hotkey) -
         Err(e) => Some(CmdError::other(e)),
     };
     if let Some(error) = failure {
+        // Between the registration pass above and the re-registration below
+        // the main thread runs its event loop for a moment, so a chord pressed
+        // exactly then can reach the just-registered (about to be rolled back)
+        // action once, or miss an existing hotkey it displaced. Accepted: the
+        // window is one loop turn and only the user's own chord lands in it;
+        // folding the failure judgment and the restore into the registration
+        // closure would tie this command's rollback rules into `shortcuts`.
         let restored = match &previous {
             Some(prev) => state.db.upsert_hotkey(prev),
             None => state.db.delete_hotkey(&hotkey.id),
@@ -533,7 +578,7 @@ pub fn save_hotkey(app: AppHandle, state: State<'_, AppState>, hotkey: Hotkey) -
         if let Err(rollback) = restored {
             tracing::warn!(error = %rollback, "failed to roll back hotkey after registration failure");
         }
-        if let Err(rollback) = shortcuts::register_all(&app, state.inner()) {
+        if let Err(rollback) = shortcuts::register_all(app, state) {
             tracing::warn!(error = %rollback, "failed to re-register shortcuts after rollback");
         }
         return Err(error);
@@ -553,7 +598,14 @@ fn same_accelerator(a: &str, b: &str) -> bool {
 }
 
 #[tauri::command]
-pub fn delete_hotkey(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn delete_hotkey(app: AppHandle, id: String) -> CmdResult<()> {
+    off_main(app, move |app, state| {
+        delete_hotkey_blocking(app, state, id)
+    })
+    .await
+}
+
+fn delete_hotkey_blocking(app: &AppHandle, state: &AppState, id: String) -> CmdResult<()> {
     let _config = state.lock_config_mutation();
     // Snapshot the row before deleting so a systemic re-registration failure can
     // be rolled back: `register_all` returns `Err` only when it left the live
@@ -566,14 +618,14 @@ pub fn delete_hotkey(app: AppHandle, state: State<'_, AppState>, id: String) -> 
     // and returned as per-hotkey failures; they are pre-existing conflicts
     // unrelated to this deletion (removing a hotkey only frees an accelerator,
     // never breaks another), so `Ok(_)` is a success here regardless of them.
-    if let Err(e) = shortcuts::register_all(&app, state.inner()) {
+    if let Err(e) = shortcuts::register_all(app, state) {
         // Restore the deleted row so the DB matches the still-live OS set, then
         // re-register best-effort — same rollback contract as `save_hotkey`.
         if let Some(prev) = &previous {
             if let Err(rollback) = state.db.upsert_hotkey(prev) {
                 tracing::warn!(error = %rollback, "failed to restore hotkey after delete re-registration failure");
             }
-            if let Err(rollback) = shortcuts::register_all(&app, state.inner()) {
+            if let Err(rollback) = shortcuts::register_all(app, state) {
                 tracing::warn!(error = %rollback, "failed to re-register shortcuts after delete rollback");
             }
         }
@@ -583,8 +635,11 @@ pub fn delete_hotkey(app: AppHandle, state: State<'_, AppState>, id: String) -> 
 }
 
 #[tauri::command]
-pub fn list_modifier_rules(state: State<'_, AppState>) -> CmdResult<Vec<ModifierRule>> {
-    state.db.list_modifier_rules().map_err(CmdError::from)
+pub async fn list_modifier_rules(app: AppHandle) -> CmdResult<Vec<ModifierRule>> {
+    off_main(app, |_, state| {
+        state.db.list_modifier_rules().map_err(CmdError::from)
+    })
+    .await
 }
 
 // `async fn`: a failed reload can call `reload_engine_rules` (and thus
@@ -720,6 +775,14 @@ fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
     Ok(caps_ok)
 }
 
+// The window commands stay synchronous — on the main thread — on purpose.
+// They do reach the focused app over Accessibility, but they also read screen
+// geometry (`WindowManager::work_area` / `screen_work_areas`), which AppKit
+// only answers on the main thread: off it the manager falls back to the main
+// display, so a window on a secondary display would be normalized, recalled
+// and moved against the wrong work area. Each Accessibility call is bounded by
+// the messaging timeout, and every operation holds `lock_window_mutation` so
+// the panel, the shortcuts and the drag worker cannot interleave one.
 #[tauri::command]
 pub fn undo_window(
     app: AppHandle,
@@ -873,26 +936,28 @@ pub fn request_input_monitoring() -> bool {
 /// being recorded in the settings panel reaches the webview instead of firing
 /// its bound action; `false` re-registers everything from the database.
 #[tauri::command]
-pub fn set_hotkeys_suspended(
-    app: AppHandle,
-    state: State<'_, AppState>,
+pub async fn set_hotkeys_suspended(app: AppHandle, suspended: bool) -> CmdResult<()> {
+    off_main(app, move |app, state| {
+        set_hotkeys_suspended_blocking(app, state, suspended)
+    })
+    .await
+}
+
+fn set_hotkeys_suspended_blocking(
+    app: &AppHandle,
+    state: &AppState,
     suspended: bool,
 ) -> CmdResult<()> {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
     // This mutates the shortcut registration and `state.shortcuts`, so it must
     // not interleave with a hotkey save's `register_all` (which would otherwise
     // leave the OS and the dispatch map disagreeing).
     let _config = state.lock_config_mutation();
     if suspended {
-        app.global_shortcut()
-            .unregister_all()
-            .map_err(|e| CmdError::other(e.to_string()))?;
-        state.shortcuts.lock_safe().clear();
-        Ok(())
+        shortcuts::suspend_all(app).map_err(CmdError::other)
     } else {
         // Hotkeys that fail to come back are logged by `register_all`; the
         // recorder resuming must not error over a pre-existing conflict.
-        shortcuts::register_all(&app, state.inner())
+        shortcuts::register_all(app, state)
             .map(|_| ())
             .map_err(CmdError::other)
     }

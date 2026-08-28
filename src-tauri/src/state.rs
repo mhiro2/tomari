@@ -111,6 +111,15 @@ pub struct AppState {
     /// they never interleave. It guards the *sequence* of operations, not a
     /// value, hence `Mutex<()>`.
     config_mutation: Mutex<()>,
+    /// Serializes window mutations end to end. A snap, recall, undo or redo
+    /// is a sequence — read the history, move the window over Accessibility,
+    /// record the result — reachable from the main thread (global shortcuts,
+    /// modifier taps, the panel) and from the drag-to-snap worker at once.
+    /// The history's own lock guards each push/pop, not the sequence: an undo
+    /// that popped its entry, then lost the CPU to a snap that cleared the redo
+    /// branch, would push the stale entry back onto redo after it. Every
+    /// window operation in `window_ops` holds this for its whole run.
+    window_mutation: Mutex<()>,
     /// Sleep-prevention ("keep awake") runtime state. Not persisted — always
     /// starts inactive at launch. See [`crate::keepawake`].
     pub keep_awake: Mutex<KeepAwake>,
@@ -154,6 +163,7 @@ impl AppState {
             last_placement: Mutex::new(None),
             screen_geometry: Mutex::new(Vec::new()),
             config_mutation: Mutex::new(()),
+            window_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
             menu_bar: Mutex::new(menu_bar),
             first_run,
@@ -176,8 +186,21 @@ impl AppState {
     /// Hold the returned guard for the whole operation — DB write *and* the
     /// live-state sync that follows — so config mutations stay serialized and
     /// the in-memory engines never disagree with the database.
+    ///
+    /// Never wait for this on the main thread. Its holders run off the main
+    /// thread and, while holding it, re-register global shortcuts — which the
+    /// plugin performs *on* the main thread, waiting for it — so a main-thread
+    /// caller blocked here would deadlock the app. Window operations use
+    /// [`Self::lock_window_mutation`] instead.
     pub fn lock_config_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
         self.config_mutation.lock_safe()
+    }
+
+    /// Acquire the window-mutation lock for one whole window operation (see
+    /// the field). Only the entry points in `window_ops` take it; the helpers
+    /// they call must not, or a nested call would deadlock.
+    pub fn lock_window_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.window_mutation.lock_safe()
     }
 
     pub(crate) fn set_shortcut_registration_incomplete(&self, incomplete: bool) {

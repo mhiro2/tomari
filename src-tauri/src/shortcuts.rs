@@ -4,7 +4,7 @@
 
 use std::str::FromStr;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tomari_core::{AppAction, Hotkey};
 
@@ -64,11 +64,72 @@ fn hotkeys_for_registration(state: &AppState) -> Result<Vec<Hotkey>, String> {
 /// individually rather than failing the whole pass: one stale conflict — e.g.
 /// an accelerator another app grabbed since — must not block saving or
 /// toggling every other hotkey. `Err` is reserved for not being able to read
-/// the hotkey list at all.
+/// the hotkey list at all, or for the main thread not answering.
+///
+/// The database read happens on the caller's thread; everything that touches
+/// the global-shortcut plugin, and the dispatch map with it, runs on the main
+/// thread (see [`on_main_thread`]). Callable from any thread.
 pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<RegistrationFailure>, String> {
-    let result = register_all_inner(app, state);
+    // Read the hotkey list *before* unregistering anything: if the DB cannot be
+    // read, bailing out leaves the current, working set untouched. When the
+    // master switch is off, `hotkeys_for_registration` deliberately skips the
+    // DB read; releasing live shortcuts must not be blocked by an unrelated
+    // persistence failure.
+    let result = match hotkeys_for_registration(state) {
+        Ok(hotkeys) => on_main_thread(app, move |app, state| {
+            apply_registrations(app, state, hotkeys)
+        }),
+        Err(e) => Err(e),
+    };
     record_registration_result(state, &result);
     result
+}
+
+/// Release every registered shortcut and clear the dispatch map, e.g. while
+/// the settings panel records a new chord. Callable from any thread; the
+/// plugin work runs on the main thread like [`register_all`]'s.
+pub fn suspend_all(app: &AppHandle) -> Result<(), String> {
+    on_main_thread(app, |app, state| {
+        app.global_shortcut()
+            .unregister_all()
+            .map_err(|e| e.to_string())?;
+        state.shortcuts.lock_safe().clear();
+        Ok(())
+    })
+}
+
+/// Run `task` on the main thread and wait for its result — inline when already
+/// there.
+///
+/// The global-shortcut plugin performs each register/unregister on the main
+/// thread and, called from any other thread, waits for it *while holding its
+/// own shortcut table lock*. The hotkey event handler, which runs on the main
+/// thread, takes that same lock: a hotkey event queued ahead of the plugin's
+/// task would then wait on a lock held by a thread waiting on the main thread —
+/// a deadlock. The same shape applies to `AppState::shortcuts`, which the
+/// dispatch path locks on the main thread. So the plugin calls and the dispatch
+/// map update are never made from off the main thread piecemeal: the whole
+/// sequence is handed to the main thread as one closure, and the caller waits
+/// for it holding nothing the main thread needs (`config_mutation` is never
+/// awaited on the main thread — see `AppState::lock_config_mutation`).
+fn on_main_thread<T, F>(app: &AppHandle, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle, &AppState) -> Result<T, String> + Send + 'static,
+{
+    if objc2_foundation::MainThreadMarker::new().is_some() {
+        let state = app.state::<AppState>();
+        return task(app, state.inner());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let state = handle.state::<AppState>();
+        let _ = tx.send(task(&handle, state.inner()));
+    })
+    .map_err(|e| format!("could not reach the main thread to update shortcuts: {e}"))?;
+    rx.recv()
+        .map_err(|_| "the main thread dropped the shortcut update without answering".to_string())?
 }
 
 fn record_registration_result(state: &AppState, result: &Result<Vec<RegistrationFailure>, String>) {
@@ -78,18 +139,14 @@ fn record_registration_result(state: &AppState, result: &Result<Vec<Registration
     ));
 }
 
-fn register_all_inner(
+/// The main-thread half of [`register_all`]: replace the live registrations
+/// and the dispatch map with `hotkeys`.
+fn apply_registrations(
     app: &AppHandle,
     state: &AppState,
+    hotkeys: Vec<Hotkey>,
 ) -> Result<Vec<RegistrationFailure>, String> {
     let gs = app.global_shortcut();
-
-    // When enabled, read the hotkey list *before* unregistering anything: if
-    // the DB cannot be read, bailing out leaves the current, working set
-    // untouched. When the master switch is off, `hotkeys_for_registration`
-    // deliberately skips the DB read; releasing live shortcuts must not be
-    // blocked by an unrelated persistence failure.
-    let hotkeys = hotkeys_for_registration(state)?;
 
     // If the previous set cannot be cleared, re-registering would fail with
     // "already registered" for every hotkey while the dispatch map is gone —
