@@ -238,6 +238,13 @@ rather than closing it.
   `TapDisabledByTimeout`/`TapDisabledByUserInput` — is itself centralized in
   `tap::spawn`/`tap::reenable` (`src-tauri/src/tap.rs`); only the tap name,
   `CGEventTapOptions`, watched event types, and the callback differ per tap.
+  Each tap also keeps a `tap::TapHealthCell` — `Stopped / Starting / Healthy /
+  DisabledByTimeout / PermissionDenied / Failed` plus disable/recovery counters,
+  logged on every change and never carrying input — and `is_running` reads that
+  state rather than the presence of a handle. The permission poller rebuilds
+  the taps on *every* Input Monitoring transition, so a revoke lands as
+  `PermissionDenied` (and the `keyboardTap`-style warnings) instead of a handle
+  to a tap the system no longer feeds.
 - Neither half of that lifecycle waits forever: starting waits at most
   `START_DEADLINE` for the run loop to report in, stopping at most
   `STOP_DEADLINE` for the thread to return. The callers are the settings save,

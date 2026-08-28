@@ -61,10 +61,13 @@ use tomari_window::{
 
 use crate::locks::MutexExt;
 use crate::state::AppState;
-use crate::tap::{self, RunningTap};
+use crate::tap::{self, RunningTap, TapHealth, TapHealthCell};
 
 /// The single live drag-to-move tap, owned globally like the other taps.
 static MOVE_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
+
+/// Where this tap stands (see [`TapHealth`]); logged on every change.
+static HEALTH: TapHealthCell = TapHealthCell::new("drag-to-move");
 
 /// Whether the feature is on, mirrored out of the settings by
 /// [`restart_result`] so the callback can check it with one atomic load instead
@@ -128,6 +131,9 @@ pub fn restart(app: &AppHandle) {
 /// a missing Input Monitoring grant).
 pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = MOVE_TAP.lock_safe();
+    // Published before the old tap goes down, so no reader sees `Healthy` over
+    // a tap being torn down; also retires the old callback's generation.
+    HEALTH.begin_start();
     *guard = None; // Drop stops the previous tap.
 
     if let Some(state) = app.try_state::<AppState>() {
@@ -136,29 +142,45 @@ pub fn restart_result(app: &AppHandle) -> bool {
     let enabled = drag_to_move_enabled_for(app);
     ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
+        HEALTH.set(TapHealth::Stopped);
         return true;
     }
 
     match start() {
         Ok(tap) => {
             *guard = Some(tap);
+            // `Healthy` only once the handle is in place, so the state never
+            // says "running" ahead of it.
+            HEALTH.set(TapHealth::Healthy);
             tracing::info!("drag-to-move event tap started");
             true
         }
         Err(e) => {
+            HEALTH.record_start_failure(crate::eventtap::input_monitoring_granted());
             tracing::warn!(error = %e, "drag-to-move event tap not started (grant Input Monitoring?)");
             false
         }
     }
 }
 
-/// Whether the drag-to-move tap is currently running. A cheap lock-and-check
+/// Whether the drag-to-move tap is currently running. A cheap state read
 /// so `save_settings` can verify on *every* save that an enabled feature
 /// actually has its tap alive — a warning must reflect the live state, not
 /// just the last restart attempt, or it would vanish from the UI on the next
 /// unrelated save while the tap is still dead.
 pub fn is_running() -> bool {
-    MOVE_TAP.lock_safe().is_some()
+    // Read off the health state rather than the handle: a handle only proves
+    // a start once succeeded, while the state also knows a tap the system
+    // disabled and that is being asked back (still counted as running — it
+    // is not a configuration problem the user can act on), and a revoke or
+    // failure the restart recorded. The tap lock is taken first so a restart
+    // in flight (which holds it from `Starting` through to its outcome) is
+    // waited out rather than read as "not running" mid-way.
+    let _serialized = MOVE_TAP.lock_safe();
+    matches!(
+        HEALTH.state(),
+        TapHealth::Healthy | TapHealth::DisabledByTimeout
+    )
 }
 
 fn drag_to_move_enabled_for(app: &AppHandle) -> bool {
@@ -546,8 +568,11 @@ fn start() -> Result<RunningTap, String> {
             // The state never leaves this thread: the callback runs only on this
             // run loop, and the applier it owns is joined when it drops.
             let state = DragToMoveState::default();
+            // The generation this tap is started under; its health reports
+            // are dropped once a later start retires it.
+            let generation = HEALTH.generation();
             Box::new(move |_proxy, etype, event: &CGEvent| {
-                handle_event(&state, &port_holder, etype, event)
+                handle_event(&state, &port_holder, generation, etype, event)
             })
         },
     )
@@ -556,6 +581,7 @@ fn start() -> Result<RunningTap, String> {
 fn handle_event(
     state: &DragToMoveState,
     port_holder: &Arc<AtomicUsize>,
+    generation: u64,
     etype: CGEventType,
     event: &CGEvent,
 ) -> CallbackResult {
@@ -569,7 +595,8 @@ fn handle_event(
         // if its mouse-up does arrive after the re-enable, it is still ours to
         // swallow, and if it never does the next mouse-down clears it.
         state.stop_gesture();
-        tap::reenable(port_holder);
+        HEALTH.record_disabled(generation);
+        HEALTH.record_reenable(generation, tap::reenable(port_holder));
         return CallbackResult::Keep;
     }
 

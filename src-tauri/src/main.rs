@@ -320,13 +320,18 @@ fn main() {
                         // The event taps created at launch return a null tap
                         // when Input Monitoring is missing and stay dead until
                         // restarted, so revive them when it is newly granted.
-                        let input_monitoring_granted =
-                            matches!(last, Some((_, was_im)) if !was_im) && current.1;
+                        // A revoke rebuilds them too: the start then fails
+                        // and each tap records `PermissionDenied` — its true
+                        // state — instead of a handle to a tap the system
+                        // will no longer feed, which the settings check would
+                        // otherwise keep reporting as running.
+                        let input_monitoring_changed =
+                            matches!(last, Some((_, was_im)) if was_im != current.1);
                         last = Some(current);
                         let refresh_handle = poll_handle.clone();
                         let refresh_version = poll_version.clone();
                         let _ = poll_handle.run_on_main_thread(move || {
-                            if input_monitoring_granted {
+                            if input_monitoring_changed {
                                 eventtap::restart(&refresh_handle);
                                 drag_to_snap::restart(&refresh_handle);
                                 drag_to_move::restart(&refresh_handle);

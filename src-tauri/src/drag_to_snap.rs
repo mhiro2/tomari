@@ -51,10 +51,13 @@ use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, s
 use crate::locks::MutexExt;
 use crate::overlay;
 use crate::state::AppState;
-use crate::tap::{self, RunningTap};
+use crate::tap::{self, RunningTap, TapHealth, TapHealthCell};
 
 /// The single live drag-to-snap tap, owned globally like the keyboard tap.
 static DRAG_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
+
+/// Where this tap stands (see [`TapHealth`]); logged on every change.
+static HEALTH: TapHealthCell = TapHealthCell::new("drag-to-snap");
 
 /// Whether the feature is on, mirrored out of the settings by
 /// [`restart_result`] so the callback can check it with one atomic load instead
@@ -80,6 +83,9 @@ pub fn restart(app: &AppHandle) {
 /// a missing Input Monitoring grant).
 pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = DRAG_TAP.lock_safe();
+    // Published before the old tap goes down, so no reader sees `Healthy` over
+    // a tap being torn down; also retires the old callback's generation.
+    HEALTH.begin_start();
     *guard = None; // Drop stops the previous tap and joins its worker.
     // Any snap preview on screen belongs to the tap we just dropped; a restart
     // (settings change, wake, permission grant) must not leave it stuck.
@@ -88,29 +94,45 @@ pub fn restart_result(app: &AppHandle) -> bool {
     let enabled = drag_to_snap_enabled_for(app);
     ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
+        HEALTH.set(TapHealth::Stopped);
         return true;
     }
 
     match start(app.clone()) {
         Ok(tap) => {
             *guard = Some(tap);
+            // `Healthy` only once the handle is in place, so the state never
+            // says "running" ahead of it.
+            HEALTH.set(TapHealth::Healthy);
             tracing::info!("drag-to-snap event tap started");
             true
         }
         Err(e) => {
+            HEALTH.record_start_failure(crate::eventtap::input_monitoring_granted());
             tracing::warn!(error = %e, "drag-to-snap event tap not started (grant Input Monitoring?)");
             false
         }
     }
 }
 
-/// Whether the drag-to-snap tap is currently running. A cheap lock-and-check
+/// Whether the drag-to-snap tap is currently running. A cheap state read
 /// so `save_settings` can verify on *every* save that an enabled feature
 /// actually has its tap alive — a warning must reflect the live state, not
 /// just the last restart attempt, or it would vanish from the UI on the next
 /// unrelated save while the tap is still dead.
 pub fn is_running() -> bool {
-    DRAG_TAP.lock_safe().is_some()
+    // Read off the health state rather than the handle: a handle only proves
+    // a start once succeeded, while the state also knows a tap the system
+    // disabled and that is being asked back (still counted as running — it
+    // is not a configuration problem the user can act on), and a revoke or
+    // failure the restart recorded. The tap lock is taken first so a restart
+    // in flight (which holds it from `Starting` through to its outcome) is
+    // waited out rather than read as "not running" mid-way.
+    let _serialized = DRAG_TAP.lock_safe();
+    matches!(
+        HEALTH.state(),
+        TapHealth::Healthy | TapHealth::DisabledByTimeout
+    )
 }
 
 /// Whether drag-to-snap should run: it shares the window-management master
@@ -751,8 +773,11 @@ fn start(app: AppHandle) -> Result<RunningTap, String> {
             // The state never leaves this thread: the callback runs only on this
             // run loop, and the worker it owns is joined when it drops.
             let state = SnapTapState::new(app);
+            // The generation this tap is started under; its health reports
+            // are dropped once a later start retires it.
+            let generation = HEALTH.generation();
             Box::new(move |_proxy, etype, event: &CGEvent| {
-                handle_event(&state, &port_holder, etype, event)
+                handle_event(&state, &port_holder, generation, etype, event)
             })
         },
     )
@@ -761,6 +786,7 @@ fn start(app: AppHandle) -> Result<RunningTap, String> {
 fn handle_event(
     state: &SnapTapState,
     port_holder: &AtomicUsize,
+    generation: u64,
     etype: CGEventType,
     event: &CGEvent,
 ) -> CallbackResult {
@@ -773,7 +799,8 @@ fn handle_event(
         // While disabled we may have missed the matching mouse-up, which would
         // otherwise leave a snap preview stranded.
         state.cancel();
-        tap::reenable(port_holder);
+        HEALTH.record_disabled(generation);
+        HEALTH.record_reenable(generation, tap::reenable(port_holder));
         return CallbackResult::Keep;
     }
 

@@ -55,7 +55,7 @@
 //! with nobody holding it — and its liveness flag is cleared too, since no
 //! `RunningTap` will ever exist to do that later.
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -157,14 +157,229 @@ fn join_bounded(handle: JoinHandle<()>, tap_label: &str, deadline: Duration) -> 
 /// port published via the `port_holder` passed to the tap's callback factory.
 /// A no-op if the port has not been published yet (tap creation still failing
 /// or racing startup).
-pub fn reenable(port_holder: &AtomicUsize) {
+pub fn reenable(port_holder: &AtomicUsize) -> bool {
     let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
-    if !port.is_null() {
-        // Safety: `port` is the mach port of a `CGEventTap` created and kept
-        // alive by this same tap's thread (published by `spawn` before the
-        // callback can observe any events, including the disable notification
-        // that leads here); `CGEventTapEnable` is safe to call from any thread.
-        unsafe { CGEventTapEnable(port, true) };
+    if port.is_null() {
+        return false;
+    }
+    // Safety: `port` is the mach port of a `CGEventTap` created and kept
+    // alive by this same tap's thread (published by `spawn` before the
+    // callback can observe any events, including the disable notification
+    // that leads here); `CGEventTapEnable` is safe to call from any thread.
+    unsafe { CGEventTapEnable(port, true) };
+    true
+}
+
+/// Where a tap stands, as a state rather than the presence of a handle. A
+/// handle says only that a start once succeeded; it does not say that the
+/// system has since disabled the tap, or *why* a start failed — which is what
+/// decides whether the fix is "grant Input Monitoring" or "something broke".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TapHealth {
+    /// Not meant to be running: the feature is off, or the app is quitting.
+    Stopped = 0,
+    /// A start is in progress.
+    Starting = 1,
+    /// Running and, as far as the app knows, delivering events.
+    Healthy = 2,
+    /// The system disabled the tap (timeout or heavy input) and the callback
+    /// has asked for it back; events are missed until that lands.
+    DisabledByTimeout = 3,
+    /// The start failed with Input Monitoring not granted — the tap cannot
+    /// exist until the user grants it (or grants it again after a revoke).
+    PermissionDenied = 4,
+    /// The start failed for some other reason.
+    Failed = 5,
+}
+
+impl TapHealth {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Starting,
+            2 => Self::Healthy,
+            3 => Self::DisabledByTimeout,
+            4 => Self::PermissionDenied,
+            5 => Self::Failed,
+            _ => Self::Stopped,
+        }
+    }
+}
+
+/// One tap's [`TapHealth`] plus the counters that make a flapping tap visible
+/// in the logs: how often the system disabled it and how often the callback
+/// got it back. Counts only — never what was being typed. Lock-free, since the
+/// disable/re-enable transitions are recorded from the tap callback itself.
+///
+/// Every start bumps a *generation*, and a callback records against the
+/// generation it was created under. A callback of a tap that has been retired
+/// but whose thread outlived the bounded join (see [`RunningTap`]) can still
+/// run for a while; its reports are stale and are dropped, so it cannot turn a
+/// `PermissionDenied` recorded by the start that replaced it back into
+/// `Healthy`, nor pad the counters of the tap that is actually live. The
+/// generation and the state share one atomic word, and every transition is a
+/// compare-and-swap against the word it was decided from — so a generation
+/// check and the state change it guards are indivisible, and a restart landing
+/// between the two cannot be overwritten by the report it retired.
+pub struct TapHealthCell {
+    label: &'static str,
+    /// `generation << 8 | state`.
+    word: AtomicU64,
+    disables: AtomicU32,
+    recoveries: AtomicU32,
+}
+
+fn pack(generation: u64, state: TapHealth) -> u64 {
+    (generation << 8) | state as u64
+}
+
+fn unpack(word: u64) -> (u64, TapHealth) {
+    (word >> 8, TapHealth::from_u8((word & 0xff) as u8))
+}
+
+impl TapHealthCell {
+    pub const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            word: AtomicU64::new(0),
+            disables: AtomicU32::new(0),
+            recoveries: AtomicU32::new(0),
+        }
+    }
+
+    pub fn state(&self) -> TapHealth {
+        unpack(self.word.load(Ordering::SeqCst)).1
+    }
+
+    /// The generation of the most recent start. A callback factory reads this
+    /// to stamp the callback it builds.
+    pub fn generation(&self) -> u64 {
+        unpack(self.word.load(Ordering::SeqCst)).0
+    }
+
+    fn log_transition(&self, generation: u64, prev: TapHealth, next: TapHealth) {
+        if prev != next {
+            tracing::info!(
+                tap = self.label,
+                from = ?prev,
+                to = ?next,
+                generation,
+                disables = self.disables.load(Ordering::SeqCst),
+                recoveries = self.recoveries.load(Ordering::SeqCst),
+                "event tap health changed"
+            );
+        }
+    }
+
+    /// Move the *current* generation to `next` (the restart path's own
+    /// transitions: `Healthy` once the handle is stored, `Stopped` when the
+    /// feature is off).
+    pub fn set(&self, next: TapHealth) {
+        let mut current = self.word.load(Ordering::SeqCst);
+        loop {
+            let (generation, prev) = unpack(current);
+            match self.word.compare_exchange(
+                current,
+                pack(generation, next),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return self.log_transition(generation, prev, next),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Open a new generation in `state`, retiring every callback of the
+    /// previous one in the same atomic step.
+    fn advance(&self, state: TapHealth) -> u64 {
+        let mut current = self.word.load(Ordering::SeqCst);
+        loop {
+            let (generation, prev) = unpack(current);
+            let next = generation + 1;
+            match self.word.compare_exchange(
+                current,
+                pack(next, state),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    self.log_transition(next, prev, state);
+                    return next;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// A (re)start begins: publish [`TapHealth::Starting`] and open a new
+    /// generation, retiring every callback of the previous one. Called *before*
+    /// the old tap is dropped, so no window shows the old `Healthy` over a tap
+    /// that is being torn down.
+    pub fn begin_start(&self) -> u64 {
+        self.advance(TapHealth::Starting)
+    }
+
+    /// The tap is being stopped for good (quit): publish [`TapHealth::Stopped`]
+    /// and retire the running callback's generation in one step, so a report
+    /// it still makes while its thread winds down cannot revive the state.
+    pub fn stop(&self) {
+        self.advance(TapHealth::Stopped);
+    }
+
+    /// The start failed. With Input Monitoring not granted that is
+    /// [`TapHealth::PermissionDenied`]; any other failure is
+    /// [`TapHealth::Failed`]. Success is published by the caller with
+    /// `set(Healthy)` once the running tap's handle is stored, so the state
+    /// never says "running" ahead of the handle.
+    pub fn record_start_failure(&self, input_monitoring_granted: bool) {
+        self.set(if input_monitoring_granted {
+            TapHealth::Failed
+        } else {
+            TapHealth::PermissionDenied
+        });
+    }
+
+    /// A callback's report: move to `next` only while `generation` is still
+    /// the live one, atomically with that check. Returns whether it applied.
+    fn report(&self, generation: u64, next: TapHealth) -> bool {
+        let mut current = self.word.load(Ordering::SeqCst);
+        loop {
+            let (live, prev) = unpack(current);
+            if live != generation {
+                return false;
+            }
+            match self.word.compare_exchange(
+                current,
+                pack(generation, next),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    self.log_transition(generation, prev, next);
+                    return true;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// The system disabled the tap of `generation`; its callback is about to
+    /// ask for it back. Ignored for a retired generation.
+    pub fn record_disabled(&self, generation: u64) {
+        if self.report(generation, TapHealth::DisabledByTimeout) {
+            self.disables.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The callback of `generation` re-enabled its tap. Left in
+    /// [`TapHealth::DisabledByTimeout`] when it could not (`reenabled ==
+    /// false`), so the log shows a tap that is asked for but not back. Ignored
+    /// for a retired generation.
+    pub fn record_reenable(&self, generation: u64, reenabled: bool) {
+        if reenabled && self.report(generation, TapHealth::Healthy) {
+            self.recoveries.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -432,6 +647,102 @@ fn run_tap<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_health_records_start_disable_and_recovery() {
+        let cell = TapHealthCell::new("test");
+        assert_eq!(cell.state(), TapHealth::Stopped);
+        let first = cell.begin_start();
+        assert_eq!(cell.state(), TapHealth::Starting);
+        cell.record_start_failure(false);
+        assert_eq!(cell.state(), TapHealth::PermissionDenied);
+        cell.record_start_failure(true);
+        assert_eq!(cell.state(), TapHealth::Failed);
+        cell.set(TapHealth::Healthy);
+        cell.record_disabled(first);
+        assert_eq!(cell.state(), TapHealth::DisabledByTimeout);
+        // A re-enable that found no port yet leaves the tap marked disabled.
+        cell.record_reenable(first, false);
+        assert_eq!(cell.state(), TapHealth::DisabledByTimeout);
+        cell.record_reenable(first, true);
+        assert_eq!(cell.state(), TapHealth::Healthy);
+        assert_eq!(cell.disables.load(Ordering::SeqCst), 1);
+        assert_eq!(cell.recoveries.load(Ordering::SeqCst), 1);
+        cell.set(TapHealth::Stopped);
+        assert_eq!(cell.state(), TapHealth::Stopped);
+    }
+
+    #[test]
+    fn a_retired_generation_cannot_report_health() {
+        // The old tap's callback outlives the restart that replaced it (a
+        // detached thread) and keeps reporting: none of it may touch the state
+        // the new start recorded, nor the counters.
+        let cell = TapHealthCell::new("test");
+        let old = cell.begin_start();
+        cell.set(TapHealth::Healthy);
+        let new = cell.begin_start();
+        assert_ne!(old, new);
+        cell.record_start_failure(false);
+        assert_eq!(cell.state(), TapHealth::PermissionDenied);
+        cell.record_disabled(old);
+        cell.record_reenable(old, true);
+        assert_eq!(cell.state(), TapHealth::PermissionDenied);
+        assert_eq!(cell.disables.load(Ordering::SeqCst), 0);
+        assert_eq!(cell.recoveries.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stop_retires_the_running_generation() {
+        // Quit: the callback's thread may still be winding down; a report it
+        // makes after `stop` must not revive the state.
+        let cell = TapHealthCell::new("test");
+        let running = cell.begin_start();
+        cell.set(TapHealth::Healthy);
+        cell.stop();
+        assert_eq!(cell.state(), TapHealth::Stopped);
+        cell.record_disabled(running);
+        cell.record_reenable(running, true);
+        assert_eq!(cell.state(), TapHealth::Stopped);
+        assert_ne!(cell.generation(), running);
+    }
+
+    #[test]
+    fn a_report_races_a_restart_without_overwriting_it() {
+        // Many callbacks of the old generation hammer reports while restarts
+        // keep advancing the generation: whatever the interleaving, the state
+        // that finally stands belongs to the newest generation, never to a
+        // stale report that slipped in after the generation moved on.
+        use std::sync::Arc;
+        let cell = Arc::new(TapHealthCell::new("test"));
+        let start = cell.begin_start();
+        cell.set(TapHealth::Healthy);
+        let reporters: Vec<_> = (0..4)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        cell.record_disabled(start);
+                        cell.record_reenable(start, true);
+                    }
+                })
+            })
+            .collect();
+        let restarter = {
+            let cell = Arc::clone(&cell);
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    cell.begin_start();
+                    cell.record_start_failure(false);
+                }
+            })
+        };
+        for r in reporters {
+            r.join().unwrap();
+        }
+        restarter.join().unwrap();
+        assert_eq!(cell.state(), TapHealth::PermissionDenied);
+        assert_eq!(cell.generation(), start + 200);
+    }
 
     /// Long enough that a wrongly-unbounded wait is unmistakable, short enough
     /// not to slow the suite down.

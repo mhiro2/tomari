@@ -37,7 +37,7 @@ use tomari_keyboard::engine::KeyEvent;
 use crate::keycodes;
 use crate::locks::MutexExt;
 use crate::state::AppState;
-use crate::tap::{self, RunningTap};
+use crate::tap::{self, RunningTap, TapHealth, TapHealthCell};
 
 /// Marker written into `EVENT_SOURCE_USER_DATA` on input Tomari synthesizes,
 /// so its keyboard and pointer gesture taps ignore their own injected events.
@@ -67,6 +67,9 @@ pub fn request_input_monitoring() -> bool {
 /// The single live event tap, owned globally so its lifecycle is independent of
 /// the cross-platform [`AppState`] struct.
 static EVENT_TAP: Mutex<Option<RunningTap>> = Mutex::new(None);
+
+/// Where the keyboard tap stands (see [`TapHealth`]); logged on every change.
+static HEALTH: TapHealthCell = TapHealthCell::new("keyboard");
 
 /// Whether the *Accessibility* permission — which posting key events needs, tap
 /// proxy or not — is granted, mirrored so the callback does not call into TCC.
@@ -111,6 +114,9 @@ pub fn restart(app: &AppHandle) {
 /// `capsLockRemap` warning is raised.
 pub fn restart_result(app: &AppHandle) -> bool {
     let mut guard = EVENT_TAP.lock_safe();
+    // Published before the old tap goes down, so no reader sees `Healthy` over
+    // a tap being torn down; also retires the old callback's generation.
+    HEALTH.begin_start();
     *guard = None; // Drop stops the previous tap.
     // The engine's hold state is dropped below and the remap reconciled right
     // here, so a reconcile put off for a Caps Lock hold has nothing to wait for.
@@ -138,6 +144,7 @@ pub fn restart_result(app: &AppHandle) -> bool {
     };
 
     if !state.keyboard_enabled() {
+        HEALTH.set(TapHealth::Stopped);
         // Feature off: take the Caps Lock HID remap down along with the tap.
         reconcile_caps(false);
         return true;
@@ -146,6 +153,9 @@ pub fn restart_result(app: &AppHandle) -> bool {
     match start(app.clone()) {
         Ok(tap) => {
             *guard = Some(tap);
+            // `Healthy` only once the handle is in place, so the state never
+            // says "running" ahead of it.
+            HEALTH.set(TapHealth::Healthy);
             tracing::info!("keyboard event tap started");
             // Remap Caps Lock to F18 only now the tap that handles F18 is live.
             let manage = state.engine.lock_safe().has_caps_lock_rule();
@@ -153,6 +163,7 @@ pub fn restart_result(app: &AppHandle) -> bool {
             true
         }
         Err(e) => {
+            HEALTH.record_start_failure(input_monitoring_granted());
             tracing::warn!(error = %e, "keyboard event tap not started (grant Input Monitoring?)");
             // No tap to handle F18 — keep Caps Lock native.
             reconcile_caps(false);
@@ -168,6 +179,10 @@ pub fn restart_result(app: &AppHandle) -> bool {
 /// leaves the app holding them.
 pub fn teardown(app: &AppHandle) {
     let mut guard = EVENT_TAP.lock_safe();
+    // `Stopped` and the retirement of the running callback's generation in
+    // one step, so a report the callback still makes while its thread winds
+    // down cannot revive the state.
+    HEALTH.stop();
     *guard = None;
     // Quit restores the Caps Lock remap itself; nothing is left to defer.
     CAPS_RECONCILE_DEFERRED.store(false, Ordering::SeqCst);
@@ -235,13 +250,24 @@ fn release_held_remaps(state: &AppState, accessibility: bool) {
     }
 }
 
-/// Whether the keyboard tap is currently running. A cheap lock-and-check so
+/// Whether the keyboard tap is currently running. A cheap state read so
 /// `save_settings` can verify on *every* save that an enabled feature actually
 /// has its tap alive — a warning must reflect the live state, not just the
 /// last restart attempt, or it would vanish from the UI on the next unrelated
 /// save while the tap is still dead.
 pub fn is_running() -> bool {
-    EVENT_TAP.lock_safe().is_some()
+    // Read off the health state rather than the handle: a handle only proves
+    // a start once succeeded, while the state also knows a tap the system
+    // disabled and that is being asked back (still counted as running — it
+    // is not a configuration problem the user can act on), and a revoke or
+    // failure the restart recorded. The tap lock is taken first so a restart
+    // in flight (which holds it from `Starting` through to its outcome) is
+    // waited out rather than read as "not running" mid-way.
+    let _serialized = EVENT_TAP.lock_safe();
+    matches!(
+        HEALTH.state(),
+        TapHealth::Healthy | TapHealth::DisabledByTimeout
+    )
 }
 
 /// Reconcile the Caps Lock HID remap (and the F18 proxy flag) with the current
@@ -379,8 +405,11 @@ fn start(app: AppHandle) -> Result<RunningTap, String> {
         ],
         move |port_holder| {
             let state = Arc::new(Mutex::new(TapState::default()));
+            // The generation this tap is started under; its health reports
+            // are dropped once a later start retires it.
+            let generation = HEALTH.generation();
             Box::new(move |proxy, etype, event: &CGEvent| {
-                handle_event(&app, &state, &port_holder, proxy, etype, event)
+                handle_event(&app, &state, &port_holder, generation, proxy, etype, event)
             })
         },
     )
@@ -390,6 +419,7 @@ fn handle_event(
     app: &AppHandle,
     state: &Arc<Mutex<TapState>>,
     port_holder: &Arc<AtomicUsize>,
+    generation: u64,
     proxy: CGEventTapProxy,
     etype: CGEventType,
     event: &CGEvent,
@@ -424,7 +454,8 @@ fn handle_event(
             ts.hyper_active = false;
             ts.remap_stamp = (Vec::new(), Vec::new());
         }
-        tap::reenable(port_holder);
+        HEALTH.record_disabled(generation);
+        HEALTH.record_reenable(generation, tap::reenable(port_holder));
         return CallbackResult::Keep;
     }
 
