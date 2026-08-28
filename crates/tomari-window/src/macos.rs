@@ -80,20 +80,25 @@ unsafe extern "C" {
 const AX_MESSAGING_TIMEOUT_SECS: f32 = 0.25;
 
 /// Bound every Accessibility message sent to `element` to
-/// [`AX_MESSAGING_TIMEOUT_SECS`]. Best-effort: if the call fails the element
-/// keeps the (unbounded) global default, so log it — that is the case where a
-/// wedged app could still block a caller, and it must not pass silently.
+/// [`AX_MESSAGING_TIMEOUT_SECS`]. Fails closed: if the call fails the element
+/// keeps the (unbounded) global default, and a wedged target app could then
+/// block the caller — a command, or a drag worker whose stall backs up into
+/// the gesture tap — for as long as it likes. The caller must therefore not
+/// use the element at all; the error is returned so the operation is aborted
+/// and reported instead of proceeding unbounded.
 ///
 /// # Safety
 /// `element` must be a valid `AXUIElementRef`.
-unsafe fn set_messaging_timeout(element: CFTypeRef) {
+unsafe fn set_messaging_timeout(element: CFTypeRef) -> Result<()> {
     let err = unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECS) };
     if err != kAXErrorSuccess {
         tracing::warn!(
             error = err,
-            "could not bound AX messaging timeout; calls stay unbounded"
+            "could not bound AX messaging timeout; refusing to use the element unbounded"
         );
+        return Err(Error::Ax(err));
     }
+    Ok(())
 }
 
 /// RAII guard that `CFRelease`s an owned (`Copy`/`Create`-returned) CF object.
@@ -400,7 +405,8 @@ unsafe fn focused_window() -> Result<(CFOwned, CFOwned, CFOwned)> {
     // process-globally (per `AXUIElementSetMessagingTimeout`), so it also covers
     // the focused-application and focused-window reads below — and any fallback
     // application element created afterwards — without a per-element set on each.
-    unsafe { set_messaging_timeout(system.0) };
+    // If it cannot be set, no read below is made (see `set_messaging_timeout`).
+    unsafe { set_messaging_timeout(system.0) }?;
     let app = unsafe { copy_attr(system.0, "AXFocusedApplication") }.map_err(map_attr_err)?;
 
     let own_pid = std::process::id() as pid_t;
@@ -792,7 +798,7 @@ impl DragWindow {
         if !is_external_window_pid(owner_pid, own_pid) {
             return Err(Error::NoFocusedWindow);
         }
-        unsafe { set_messaging_timeout(window.0) };
+        unsafe { set_messaging_timeout(window.0) }?;
         Ok(Self { window })
     }
 }
@@ -907,7 +913,8 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
             return Err(Error::NoFocusedWindow);
         }
         let system = CFOwned(system);
-        set_messaging_timeout(system.0);
+        // No hit-test proceeds unbounded (see `set_messaging_timeout`).
+        set_messaging_timeout(system.0)?;
 
         for owner_pid in owners {
             if !is_external_window_pid(Some(owner_pid), own_pid) {

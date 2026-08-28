@@ -406,9 +406,10 @@ A lost mouse-up (tap disabled by the system) drops the drag and tears down its p
 worker on the tap thread as it shuts down — before `RunningTap::drop`'s own
 thread join returns, so normally no Accessibility call from a torn-down tap is
 still in flight once the next tap is live. That wait is short because an
-in-flight call is bounded by the AX messaging timeout, but the bound is
-best-effort, and `RunningTap` detaches a tap thread that overruns it — so, as
-with drag-to-move, the guarantee is "normally", not "always".
+in-flight call is bounded by the AX messaging timeout (an element whose bound
+cannot be set is refused outright rather than used unbounded), but `RunningTap`
+detaches a tap thread that overruns it — so, as with drag-to-move, the
+guarantee is "normally", not "always".
 The frame read when the press was resolved is retained as the history entry's
 `before` value, so Undo returns to the drag origin rather than the temporary
 screen-edge frame at release.
