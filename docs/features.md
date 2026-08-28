@@ -166,8 +166,8 @@ along with everything else), open Tomari's window with the global shortcut
 
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from
 being interrupted — **even when the display is closed**. You can toggle it
-manually from the menu bar tray, the toggle in the Prevent Sleep section, or a global
-shortcut (the "Toggle Prevent Sleep" action). Settings also lists common
+manually from the menu bar tray, the Start / Stop Preventing Sleep button in the
+Prevent Sleep section, or a global shortcut (the "Toggle Prevent Sleep" action). Settings also lists common
 developer processes such as Codex, Claude, Cargo, Node, and Python once they
 have run for five minutes, so you can see at a glance whether something worth
 protecting is still running. The list is informational only: it never enables
@@ -180,7 +180,7 @@ How it works, in two layers that engage together:
    `pmset disablesleep` to keep working with the lid closed. **This requires your
    administrator password.**
 
-Both layers are part of one switch, and turning it **on or off** needs the
+Both layers are part of one operation, and turning it **on or off** needs the
 password: declining when enabling cancels Prevent Sleep entirely (no display-open
 fallback), and declining when disabling leaves it on (sleep is still prevented
 until the override is cleared).
@@ -207,8 +207,9 @@ stale time from the picker. Pick a new end time to bound the new session.
 Automatic turn-off starts the same verified disable flow as a manual switch,
 so macOS may request administrator approval to clear `disablesleep`. Because you
 can decline it, a guard turns Prevent Sleep off at most once per session rather
-than reopening the password prompt every few seconds; the Settings banner then
-offers a retry. The safety
+than reopening the password prompt every few seconds; the Prevent Sleep page
+then offers Retry next to the main button (which stays disabled until the retry
+settles). The safety
 monitor runs in the backend every ten seconds, including while Settings is
 closed. The System state section separately reports the real kernel
 `SleepDisabled` flag and whether Tomari owns the override, rather than inferring
@@ -236,13 +237,15 @@ returns to the last selected destination (or Windows when no valid selection has
 been saved).
 
 Each feature page starts with one short purpose sentence and, where applicable,
-a master switch as the first row of the page. For Windows, Keyboard, and Menu
-Bar, turning the feature off leaves its settings visible so its scope is still
-understandable, but disables the controls until the feature is turned back on;
-Prevent Sleep keeps its auto-off conditions editable while off. Windows,
+a master control as the first row of the page. For Windows, Keyboard, and Menu
+Bar it is a switch; turning the feature off leaves its settings visible so its
+scope is still understandable, but disables the controls until the feature is
+turned back on. Prevent Sleep is an operation rather than a preference, so its
+first row offers Start Preventing Sleep… / Stop Preventing Sleep buttons instead,
+and its auto-off conditions stay editable while off. Windows,
 Keyboard, and Menu Bar use the focused tabs described above; ordinary options
-use divided rows, while cards are reserved for the master switch and for objects
-such as saved window positions.
+use divided rows, while cards are reserved for the master control and for
+objects such as saved window positions.
 
 On the very first launch the settings window opens automatically (the main
 features need permissions you have not granted yet); after that Tomari starts

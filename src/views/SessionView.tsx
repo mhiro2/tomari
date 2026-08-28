@@ -199,7 +199,13 @@ export function SessionView() {
   }, [status?.active, status?.options.endsAtMs]);
 
   const phasePending = status?.phase === 'enabling' || status?.phase === 'disabling';
+  const failed = status?.phase === 'failed';
   const busy = commandBusy || phasePending;
+  const recoveryRef = useRef<HTMLButtonElement>(null);
+  const recoveryShown = phasePending || failed;
+  useEffect(() => {
+    if (recoveryShown) recoveryRef.current?.focus();
+  }, [recoveryShown]);
 
   // Transitions are driven entirely by "tomari:keep-awake-changed": the backend
   // emits it for every change it makes, so the command's own return value is
@@ -298,29 +304,51 @@ export function SessionView() {
             {phasePending && ` ${t('settings.authorizationPendingHint')}`}
           </output>
         }
-        checked={active}
-        onChange={toggle}
-        disabled={busy || !ready}
-        // A transition trims the trail to Cancel and the (disabled) switch; the
-        // phase text already says which way it is going.
-        stateLabel={phasePending ? undefined : active ? t('common.on') : t('common.off')}
         tone={tone}
         trail={
+          countdown &&
+          !phasePending && (
+            <span className="session-countdown">
+              <span className="sr-only">{t('settings.timeRemaining')}: </span>
+              {countdown}
+            </span>
+          )
+        }
+        // Preventing sleep is an authorized operation, not a stored preference,
+        // so the master control is a verb button rather than a toggle. The
+        // ellipsis on Start warns that the administrator prompt follows. While
+        // a prompt is open, Cancel is the live action and the main button waits
+        // disabled; after a failure Retry sits beside it.
+        control={
           <>
-            {countdown && !phasePending && (
-              <span className="session-countdown">
-                <span className="sr-only">{t('settings.timeRemaining')}: </span>
-                {countdown}
-              </span>
-            )}
-            {phasePending && (
+            <button
+              type="button"
+              className={`btn ${active ? '' : 'btn--primary'}`.trim()}
+              // Locked while failed too: the retry target may differ from what
+              // Start/Stop would send (an unconfirmed lid-close clear has
+              // `active` false yet must be cleared, not re-enabled), so Retry
+              // is the only recovery path until the backend settles.
+              disabled={busy || !ready || failed}
+              onClick={() => toggle(!active)}
+            >
+              {active ? t('settings.keepAwakeStop') : t('settings.keepAwakeStart')}
+            </button>
+            {(phasePending || failed) && (
+              // After the main button in DOM order and focused on arrival, so a
+              // keyboard user whose focus was on the now-disabled main button
+              // lands on the one action that is live.
               <button
+                ref={recoveryRef}
                 type="button"
                 className="btn btn--ghost"
                 disabled={commandBusy}
-                onClick={() => void run(api.cancelKeepAwakeTransition)}
+                onClick={() =>
+                  void run(
+                    phasePending ? api.cancelKeepAwakeTransition : api.retryKeepAwakeTransition,
+                  )
+                }
               >
-                {t('common.cancel')}
+                {phasePending ? t('common.cancel') : t('common.retry')}
               </button>
             )}
           </>
@@ -332,16 +360,6 @@ export function SessionView() {
           <div className="banner__body">
             <strong>{t(NOTICE_LABEL[status.notice])}</strong>
           </div>
-          {status.phase === 'failed' && (
-            <button
-              type="button"
-              className="btn btn--ghost"
-              disabled={busy}
-              onClick={() => void run(api.retryKeepAwakeTransition)}
-            >
-              {t('common.retry')}
-            </button>
-          )}
         </div>
       )}
 

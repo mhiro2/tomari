@@ -1,17 +1,22 @@
 import { useId, type KeyboardEvent, type ReactNode } from 'react';
 
+// Sized by role: the page's master switch is the only regular-size toggle;
+// every subordinate option renders the mini size, so the hierarchy is visible
+// at a glance even though both sit in the same column of row controls.
 export function Toggle({
   checked,
   onChange,
   label,
   describedBy,
   disabled,
+  size = 'mini',
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label?: string;
   describedBy?: string;
   disabled?: boolean;
+  size?: 'regular' | 'mini';
 }) {
   return (
     <button
@@ -21,7 +26,7 @@ export function Toggle({
       aria-label={label}
       aria-describedby={describedBy}
       disabled={disabled}
-      className={`toggle ${checked ? 'toggle--on' : ''}`}
+      className={`toggle ${size === 'regular' ? 'toggle--regular' : ''} ${checked ? 'toggle--on' : ''}`.trim()}
       onClick={() => onChange(!checked)}
     >
       <span className="toggle__knob" />
@@ -46,9 +51,12 @@ export function FeaturePageHeader({
   );
 }
 
-// The page's master switch. It sits first in the content column as its own
+// The page's master control. It sits first in the content column as its own
 // one-row card, so the control lines up with every other row's control and
 // reads as "the thing this page turns on" rather than as window chrome.
+// Persistent features pass `checked`/`onChange` and get the regular-size
+// toggle; a page whose master action is an operation rather than a stored
+// preference passes its own `control` (a verb button) instead.
 export function FeatureSwitch({
   title,
   description,
@@ -58,16 +66,18 @@ export function FeatureSwitch({
   disabled,
   stateLabel,
   trail,
+  control,
   tone = 'neutral',
 }: {
   title: string;
   description?: ReactNode;
-  checked: boolean;
-  onChange: (next: boolean) => void;
+  checked?: boolean;
+  onChange?: (next: boolean) => void;
   toggleLabel?: string;
   disabled?: boolean;
   stateLabel?: string;
   trail?: ReactNode;
+  control?: ReactNode;
   tone?: 'neutral' | 'on' | 'pending' | 'danger';
 }) {
   const descriptionId = useId();
@@ -80,13 +90,17 @@ export function FeatureSwitch({
           <>
             {trail}
             {stateLabel && <span className="feature-switch__state">{stateLabel}</span>}
-            <Toggle
-              checked={checked}
-              onChange={onChange}
-              label={toggleLabel ?? title}
-              describedBy={description ? descriptionId : undefined}
-              disabled={disabled}
-            />
+            {control ??
+              (checked !== undefined && onChange !== undefined && (
+                <Toggle
+                  size="regular"
+                  checked={checked}
+                  onChange={onChange}
+                  label={toggleLabel ?? title}
+                  describedBy={description ? descriptionId : undefined}
+                  disabled={disabled}
+                />
+              ))}
           </>
         }
       />

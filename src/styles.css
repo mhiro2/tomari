@@ -306,10 +306,12 @@ button {
 }
 
 .feature-switch .settings-row {
-  min-height: 52px;
+  min-height: 58px;
+  padding: 10px 15px;
 }
 
 .feature-switch .settings-row__title {
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -526,14 +528,27 @@ button {
 
 .toggle {
   position: relative;
-  width: 42px;
-  height: 24px;
-  flex: 0 0 42px;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 34px;
   padding: 0;
   border: 0;
   border-radius: 999px;
   background: var(--line-strong);
   cursor: pointer;
+}
+
+/* The mini visual keeps a comfortable hit target. */
+.toggle::after {
+  position: absolute;
+  inset: -6px;
+  content: '';
+}
+
+.toggle--regular {
+  width: 42px;
+  height: 24px;
+  flex-basis: 42px;
 }
 
 .toggle--on {
@@ -552,15 +567,24 @@ button {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #fffdf7;
   box-shadow: 0 1px 2px #0006;
   transition: transform 150ms ease;
 }
 
+.toggle--regular .toggle__knob {
+  width: 20px;
+  height: 20px;
+}
+
 .toggle--on .toggle__knob {
+  transform: translateX(14px);
+}
+
+.toggle--regular.toggle--on .toggle__knob {
   transform: translateX(18px);
 }
 

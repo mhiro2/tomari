@@ -616,10 +616,14 @@ and applies none of them.
 - **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
   `WindowView` / `KeyboardView` / `MenuBarView` / `SessionView` /
   `GeneralView` directly; there is no Overview route. Each detail screen pairs
-  a one-sentence purpose with explicit state. The master switch is a
+  a one-sentence purpose with explicit state. The master control is a
   `FeatureSwitch` row placed first in the content column (not in the page
-  header), so it lines up with every other row control; on *Prevent Sleep* that
-  row also carries the live phase, countdown, and prompt cancel. The persistent
+  header), so it lines up with every other row control. Hierarchy is carried by
+  size: the master toggle is the only regular-size `Toggle`; every subordinate
+  option renders the mini size. *Prevent Sleep* is an authorized operation
+  rather than a stored preference, so its master control is a verb button
+  (Start Preventing Sleep… / Stop Preventing Sleep) and the row also carries the
+  live phase, countdown, and the Cancel / Retry actions. The persistent
   features wrap their page controls in `FeatureContent`: turning a feature off
   keeps the configuration visible but disables interaction. *Prevent Sleep*
   deliberately does not — its auto-off conditions stay editable while off so
@@ -631,7 +635,7 @@ and applies none of them.
   as generic cards. Missing permissions appear once in the sidebar footer;
   first-run/update re-grant flows render `SetupView` as a modal dialog over the
   selected page. Sections are named for what they do (`SessionView` is *Prevent
-  Sleep*, matching its tray entry and its own switch). `lib/api.ts` provides
+  Sleep*, matching its tray entry). `lib/api.ts` provides
   typed invoke wrappers whose
   argument keys must match the Rust command parameter names; `lib/types.ts`
   mirrors the domain types. `lib/i18n.tsx` holds the typed English/Japanese
@@ -682,8 +686,8 @@ differently:
   until cleared.
 
 The lid-close veto is a **required** part of keep-awake, not an optional add-on,
-and both directions go through it on the worker thread — which (not the toggle)
-commits the `active` flag. Turning on takes the idle assertion immediately and
+and both directions go through it on the worker thread — which (not the
+command) commits the `active` flag. Turning on takes the idle assertion immediately and
 shows on; if the veto then cannot be engaged (auth declined, or the sleep state
 is unreadable) the whole switch rolls back off. An enable whose read-back fails
 is not written off as "off": the flag was clear before the enable, so the worker
@@ -718,8 +722,8 @@ Keep-awake is **runtime state** in `AppState` (`Mutex<KeepAwake>`), never
 persisted: it always starts off at launch. A toggle reaches it from the tray (a
 `CheckMenuItem`), the panel (`get_keep_awake` / `set_keep_awake` commands), and
 `AppAction::ToggleKeepAwake` (hotkeys / taps). Every change emits
-`tomari:keep-awake-changed` and rebuilds the tray, so the panel toggle and the
-tray checkmark stay in sync regardless of which surface initiated it. Commands,
+`tomari:keep-awake-changed` and rebuilds the tray, so the panel's Start / Stop
+button and the tray checkmark stay in sync regardless of which surface initiated it. Commands,
 reconcile workers, and the safety monitor all emit, and each snapshots under the
 state lock but emits outside it, so the events themselves can arrive out of
 order. Every snapshot the frontend can receive — reads and events alike —

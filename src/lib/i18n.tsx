@@ -305,6 +305,8 @@ const en = {
   'settings.sessionPageDescription':
     'Keep downloads, builds, and other long jobs running—even with the MacBook lid closed. This is temporary and always turns off when Tomari quits.',
   'settings.keepAwakeAction': 'Keep this Mac awake',
+  'settings.keepAwakeStart': 'Start Preventing Sleep…',
+  'settings.keepAwakeStop': 'Stop Preventing Sleep',
   'settings.keepAwakeActive': 'Sleep is being prevented',
   'settings.keepAwakeInactive': 'Your Mac sleeps normally',
   'settings.keepAwakeEnabling': 'Turning on — waiting for administrator approval.',
@@ -704,6 +706,8 @@ const ja: Record<MessageKey, string> = {
   'settings.sessionPageDescription':
     'ダウンロードやビルドなどの長い処理を、MacBook の蓋を閉じても続けます。一時的な設定で、Tomari を終了すると必ず解除されます。',
   'settings.keepAwakeAction': 'この Mac のスリープを防ぐ',
+  'settings.keepAwakeStart': 'スリープ防止を開始…',
+  'settings.keepAwakeStop': 'スリープ防止を停止',
   'settings.keepAwakeActive': 'スリープを防いでいます',
   'settings.keepAwakeInactive': '通常どおりスリープします',
   'settings.keepAwakeEnabling': 'オンにしています。管理者の承認を待っています。',
