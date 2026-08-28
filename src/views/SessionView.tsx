@@ -355,13 +355,7 @@ export function SessionView() {
         onOptionsChange={(overrides) => saveOptions({ ...draftOptions, ...overrides })}
       />
       <SystemState t={t} status={status} />
-      <DetectedJobs
-        t={t}
-        status={status}
-        active={active}
-        busy={busy}
-        onEnable={() => toggle(true)}
-      />
+      <DetectedJobs t={t} status={status} />
     </div>
   );
 }
@@ -500,19 +494,7 @@ function SystemState({ t, status }: { t: Translator; status: KeepAwakeStatus | n
   );
 }
 
-function DetectedJobs({
-  t,
-  status,
-  active,
-  busy,
-  onEnable,
-}: {
-  t: Translator;
-  status: KeepAwakeStatus | null;
-  active: boolean;
-  busy: boolean;
-  onEnable: () => void;
-}) {
+function DetectedJobs({ t, status }: { t: Translator; status: KeepAwakeStatus | null }) {
   return (
     <SettingsList label={t('settings.detectedJobs')} description={t('settings.detectedJobsHint')}>
       {status?.longRunningProcesses.length ? (
@@ -524,13 +506,6 @@ function DetectedJobs({
               pid: process.pid,
               elapsed: formatElapsed(process.elapsedSecs),
             })}
-            trail={
-              !active && (
-                <button type="button" className="btn btn--amber" disabled={busy} onClick={onEnable}>
-                  {t('common.turnOn')}
-                </button>
-              )
-            }
           />
         ))
       ) : (

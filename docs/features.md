@@ -167,10 +167,11 @@ along with everything else), open Tomari's window with the global shortcut
 Keep long-running jobs from AI agents (Codex, Claude Code, and the like) from
 being interrupted — **even when the display is closed**. You can toggle it
 manually from the menu bar tray, the toggle in the Prevent Sleep section, or a global
-shortcut (the "Toggle Prevent Sleep" action). Settings also detects common
-developer processes such as Codex, Claude, Cargo, Node, and Python after they
-have run for five minutes, and offers a direct way to start Prevent Sleep for
-the detected work. Detection never enables the feature without your action.
+shortcut (the "Toggle Prevent Sleep" action). Settings also lists common
+developer processes such as Codex, Claude, Cargo, Node, and Python once they
+have run for five minutes, so you can see at a glance whether something worth
+protecting is still running. The list is informational only: it never enables
+the feature by itself, and the switch above it is the one place to turn it on.
 
 How it works, in two layers that engage together:
 
