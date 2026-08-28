@@ -382,7 +382,11 @@ fn main() {
             // closed — it does not auto-hide when it loses focus.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                // Only a hide that took effect idles the monitor; a panel still
+                // on screen must keep its status fresh.
+                if window.hide().is_ok() {
+                    keepawake::set_panel_visible(false);
+                }
             }
         })
         .build(context)

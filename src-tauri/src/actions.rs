@@ -70,10 +70,13 @@ pub fn toggle_panel(app: &AppHandle) -> Result<(), CmdError> {
     let visible = window.is_visible().unwrap_or(false);
     let focused = window.is_focused().unwrap_or(false);
     if visible && focused {
-        window.hide().map_err(|e| CmdError::other(e.to_string()))
+        window.hide().map_err(|e| CmdError::other(e.to_string()))?;
+        crate::keepawake::set_panel_visible(false);
+        Ok(())
     } else {
         window.show().map_err(|e| CmdError::other(e.to_string()))?;
         let _ = window.set_focus();
+        crate::keepawake::set_panel_visible(true);
         let _ = app.emit("tomari:panel-shown", ());
         Ok(())
     }
@@ -87,6 +90,7 @@ pub fn show_panel(app: &AppHandle) -> Result<(), CmdError> {
     };
     window.show().map_err(|e| CmdError::other(e.to_string()))?;
     let _ = window.set_focus();
+    crate::keepawake::set_panel_visible(true);
     let _ = app.emit("tomari:panel-shown", ());
     Ok(())
 }

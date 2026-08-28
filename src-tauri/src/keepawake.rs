@@ -57,6 +57,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use std::sync::{Condvar, Mutex};
+
 use crate::locks::MutexExt;
 use crate::state::AppState;
 
@@ -84,7 +86,7 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// window a PID-only record leaves open between `wait()` returning and the
 /// record being cleared.
 #[cfg(target_os = "macos")]
-static AUTH_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+static AUTH_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 /// Bumped by every [`kill_authorization`], i.e. every intent to cancel the
 /// dialog. A worker records it before it decides to proceed and re-reads it
@@ -528,25 +530,120 @@ pub fn cancel_transition(app: &AppHandle) -> KeepAwakeStatus {
 
 /// Start the low-frequency system monitor that enforces timers and power guards
 /// even while the settings window is closed.
+/// How often the safety monitor re-reads the system while it has something to
+/// guard or show: keep-awake on (or mid-transition), or the panel visible.
+const MONITOR_INTERVAL_ACTIVE: std::time::Duration = std::time::Duration::from_secs(10);
+/// The fallback cadence while keep-awake is off and the panel hidden. Nothing
+/// is guarded and nothing is shown, so this only keeps the cached power state
+/// from going stale should the IOKit notification ever be missed; a change of
+/// power source wakes the monitor at once regardless.
+const MONITOR_INTERVAL_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wakes the monitor thread out of its wait: a power-source change (IOKit), a
+/// keep-awake state change, or the panel being shown or hidden.
+struct MonitorWake {
+    poked: Mutex<bool>,
+    wake: Condvar,
+}
+
+static MONITOR: MonitorWake = MonitorWake {
+    poked: Mutex::new(false),
+    wake: Condvar::new(),
+};
+
+/// Whether the settings panel is on screen. While it is, the monitor keeps the
+/// status it renders (power, kernel flag, long-running jobs) fresh; while it
+/// is not and keep-awake is off, there is nothing to render and the monitor
+/// idles.
+static PANEL_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the monitor whether the panel is on screen. Called from the show/hide
+/// paths; a change wakes the monitor so the panel opens onto fresh data.
+pub fn set_panel_visible(visible: bool) {
+    let was = PANEL_VISIBLE.swap(visible, std::sync::atomic::Ordering::SeqCst);
+    if was != visible {
+        poke_monitor();
+    }
+}
+
+/// Wake the monitor for an immediate refresh.
+fn poke_monitor() {
+    *MONITOR.poked.lock_safe() = true;
+    MONITOR.wake.notify_all();
+}
+
+/// Wait until the monitor is poked or `interval` passes. Consumes the poke.
+fn await_monitor_tick(interval: std::time::Duration) {
+    let guard = MONITOR.poked.lock_safe();
+    let (mut poked, _) = MONITOR
+        .wake
+        .wait_timeout_while(guard, interval, |poked| !*poked)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *poked = false;
+}
+
+/// Start the safety monitor: the thread that re-reads power, the kernel sleep
+/// flag and long-running jobs, applies the guards, and publishes changes.
+///
+/// It is notification-driven where the system offers a notification — a
+/// power-source change reaches it through IOKit at once — and polls only as a
+/// fallback, at a cadence that follows what there is to do: every
+/// [`MONITOR_INTERVAL_ACTIVE`] while keep-awake is on or the panel is showing
+/// the status, every [`MONITOR_INTERVAL_IDLE`] otherwise, with the process
+/// scan (the most expensive read) skipped in the idle state. Any keep-awake
+/// state change or panel show/hide wakes it immediately, so the switch between
+/// cadences is prompt and the panel never opens onto stale data.
 pub fn start_monitor(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    power_notify::install();
     let handle = app.clone();
     std::thread::spawn(move || {
         loop {
-            refresh_system_status(&handle);
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            let full = monitor_should_run_full(&handle);
+            refresh_system_status(&handle, full);
+            await_monitor_tick(if full {
+                MONITOR_INTERVAL_ACTIVE
+            } else {
+                MONITOR_INTERVAL_IDLE
+            });
         }
     });
 }
 
-fn refresh_system_status(app: &AppHandle) {
+/// Whether the monitor has something to guard or show right now.
+fn monitor_should_run_full(app: &AppHandle) -> bool {
+    if PANEL_VISIBLE.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let state = app.state::<AppState>();
+    let k = state.keep_awake.lock_safe();
+    // `Failed` with `active == false` (AC required, a declined enable, a
+    // leftover override awaiting the user) guards nothing: it idles like off.
+    k.active || k.phase.is_pending()
+}
+
+/// One monitor pass. With `full`, everything is read; without it only the
+/// power source — the one input a guard could ever need while keep-awake is
+/// off (the AC-only guard consults it when the user next turns on) — and the
+/// kernel flag and job list are left as they were, marked stale by being
+/// exactly as old as the last full pass.
+fn refresh_system_status(app: &AppHandle, full: bool) {
     let (power_source, battery_percent) = read_power_status();
+    let state = app.state::<AppState>();
     #[cfg(target_os = "macos")]
-    let kernel_sleep_disabled = read_sleep_disabled();
+    let kernel_sleep_disabled = if full {
+        read_sleep_disabled()
+    } else {
+        state.keep_awake.lock_safe().kernel_sleep_disabled
+    };
     #[cfg(not(target_os = "macos"))]
     let kernel_sleep_disabled = None;
-    let processes = detect_long_running_processes();
+    let processes = if full {
+        detect_long_running_processes()
+    } else {
+        state.keep_awake.lock_safe().long_running_processes.clone()
+    };
     let now = unix_time_ms();
-    let state = app.state::<AppState>();
     // `Some(request_generation)` once a guard has stamped its turn-off; the
     // worker is spawned after the lock is released.
     let mut automatic_off: Option<Option<u64>> = None;
@@ -834,6 +931,9 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
 /// menu APIs require) so the panel and the tray checkmark both follow.
 fn notify(app: &AppHandle) {
     emit_status(app);
+    // A state change may move the monitor between its idle and active
+    // cadences; wake it so the switch is prompt.
+    poke_monitor();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
 }
@@ -1965,6 +2065,61 @@ fn release_assertion(id: u32) {
 }
 
 #[cfg(target_os = "macos")]
+/// IOKit power-source change notifications, delivered on a dedicated run-loop
+/// thread and turned into a monitor wake-up — so plugging in or unplugging is
+/// seen at once, and the monitor need not poll for it.
+#[cfg(target_os = "macos")]
+mod power_notify {
+    use std::os::raw::c_void;
+
+    use core_foundation::base::TCFType;
+    use core_foundation::runloop::{CFRunLoop, CFRunLoopSource, kCFRunLoopDefaultMode};
+    use core_foundation_sys::runloop::CFRunLoopSourceRef;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPSNotificationCreateRunLoopSource(
+            callback: extern "C" fn(*mut c_void),
+            context: *mut c_void,
+        ) -> CFRunLoopSourceRef;
+    }
+
+    extern "C" fn on_power_source_changed(_context: *mut c_void) {
+        super::poke_monitor();
+    }
+
+    /// Start the notification thread. Best-effort: if IOKit hands back no
+    /// source the monitor simply falls back to its polling cadence.
+    pub fn install() {
+        let spawned = std::thread::Builder::new()
+            .name("tomari-power-notify".into())
+            .spawn(|| {
+                // SAFETY: the callback is a plain `extern "C"` fn that touches no
+                // context; a null context is therefore valid. The returned
+                // source follows the Create rule and is owned by the wrapper.
+                let source = unsafe {
+                    IOPSNotificationCreateRunLoopSource(
+                        on_power_source_changed,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if source.is_null() {
+                    tracing::warn!(
+                        "IOKit offered no power-source notification; the keep-awake monitor will                          poll for power changes instead"
+                    );
+                    return;
+                }
+                let source = unsafe { CFRunLoopSource::wrap_under_create_rule(source) };
+                let run_loop = CFRunLoop::get_current();
+                unsafe { run_loop.add_source(&source, kCFRunLoopDefaultMode) };
+                CFRunLoop::run_current();
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the power-source notification thread");
+        }
+    }
+}
+
 mod sys {
     use core_foundation::base::TCFType;
     use core_foundation::string::{CFString, CFStringRef};

@@ -210,8 +210,10 @@ can decline it, a guard turns Prevent Sleep off at most once per session rather
 than reopening the password prompt every few seconds; the Prevent Sleep page
 then offers Retry next to the main button (which stays disabled until the retry
 settles). The safety
-monitor runs in the backend every ten seconds, including while Settings is
-closed. The System state section separately reports the real kernel
+monitor runs in the backend, including while Settings is closed: every ten
+seconds while Prevent Sleep is on or the window is open, reacting at once when
+the Mac is plugged in or unplugged, and only every couple of minutes otherwise so
+an idle Tomari stays quiet. The System state section separately reports the real kernel
 `SleepDisabled` flag and whether Tomari owns the override, rather than inferring
 either value from the switch.
 

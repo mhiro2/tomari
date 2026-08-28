@@ -789,10 +789,18 @@ in that gap would simply be lost) and drops any snapshot older than one it has
 already applied, rather than being stranded on a transition that has since
 finished.
 
-A ten-second backend monitor keeps session-only safety policy independent of the
-settings window. It refreshes AC/battery data, the actual kernel
-`SleepDisabled` flag, and a bounded list of known developer processes running
-for at least five minutes. Absolute auto-off deadlines, AC-only operation, and
+A backend monitor keeps session-only safety policy independent of the settings
+window. It refreshes AC/battery data, the actual kernel `SleepDisabled` flag,
+and a bounded list of known developer processes running for at least five
+minutes. It is notification-driven where the system offers a notification — a
+power-source change reaches it at once through IOKit
+(`IOPSNotificationCreateRunLoopSource`, on its own run-loop thread) — and polls
+only as a fallback, at a cadence that follows what there is to do: every ten
+seconds while keep-awake is on (or mid-transition) or the panel is showing the
+status, every two minutes otherwise, reading only the power source then and
+leaving the kernel flag and the process scan (the expensive read) for the next
+full pass. Any keep-awake state change or panel show/hide wakes it immediately,
+so the panel never opens onto stale data. Absolute auto-off deadlines, AC-only operation, and
 the low-battery warn/turn-off policy are evaluated in that order by the tested
 pure `safety_decision`, which commits its verdict — the notice and the transition
 stamp both, via `begin_disable` — in the same critical section that made it, so
