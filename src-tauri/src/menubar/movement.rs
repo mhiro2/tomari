@@ -246,16 +246,28 @@ fn interrupted_error() -> CommandDragError {
     )
 }
 
-/// Perform the public Command-drag gesture and leave cursor restoration to the
-/// returned guard. The function refuses to interfere with a real mouse press,
-/// and cancels — releasing and restoring through the guard — the moment
-/// physical input is seen while the gesture is in flight.
-pub(super) fn command_drag(
+/// A fully allocated gesture that has not started its input tap or touched the
+/// cursor. Preparing outside the lifecycle effect gate keeps shutdown from
+/// waiting on fallible event allocation.
+pub(super) struct PreparedCommandDrag {
+    source: CGEventSource,
+    start: CGPoint,
+    destination: CGPoint,
+    move_event: CGEvent,
+    down_event: CGEvent,
+    drag_events: Vec<(CGEvent, CGPoint)>,
+    up_event: CGEvent,
+    cleanup_up: CGEvent,
+}
+
+/// Allocate the public Command-drag gesture without starting any synthetic
+/// input ownership. The caller performs one final target validation when it
+/// runs the prepared gesture under the lifecycle effect gate.
+pub(super) fn prepare_command_drag(
     item: &MenuBarItem,
     context: ScanContext,
     target: MenuBarItemZone,
-    validate_before_move: impl FnOnce() -> bool,
-) -> Result<CursorRestore, CommandDragError> {
+) -> Result<PreparedCommandDrag, CommandDragError> {
     let destination = destination(item, context, target).ok_or_else(|| {
         CommandDragError::Unavailable("menu bar item has no safe drop point".into())
     })?;
@@ -285,77 +297,109 @@ pub(super) fn command_drag(
         .collect::<Result<Vec<_>, _>>()?;
     let up_event = mouse_event(&source, CGEventType::LeftMouseUp, destination)?;
     let cleanup_up = mouse_event(&source, CGEventType::LeftMouseUp, destination)?;
-    // Resolve labels and retain the exact AX element before entering this
-    // function. This first frame/state check therefore leaves the person's
-    // cursor untouched even if the target application responds slowly.
-    if !validate_before_move() {
-        return Err(CommandDragError::TargetChanged);
-    }
-    if left_button_pressed() {
-        return Err(CommandDragError::Unavailable(
-            "left mouse button was pressed before the drag could start".into(),
-        ));
-    }
-    // Armed before the cursor position is read and before the pointer is
-    // touched: starting the tap can take a moment, and a mouse moved meanwhile
-    // must both count as interference and define where the cursor goes back.
-    let interference = InterferenceGuard::start();
-    let original = CGEvent::new(source.clone())
-        .map_err(|()| "failed to read cursor position".to_string())?
-        .location();
-    if interference.interrupted() {
-        return Err(interrupted_error());
-    }
-    let mut restore = CursorRestore::new(original, cleanup_up, interference);
+    Ok(PreparedCommandDrag {
+        source,
+        start,
+        destination,
+        move_event,
+        down_event,
+        drag_events,
+        up_event,
+        cleanup_up,
+    })
+}
 
-    // Creating the guard hides but does not move the pointer. Check once more
-    // here so a physical press that began during setup is rejected in place,
-    // before any event can turn it into a drag over the foreign item.
-    if left_button_pressed() {
-        return Err(CommandDragError::Unavailable(
-            "left mouse button was pressed before the drag could start".into(),
-        ));
-    }
-    if restore.interrupted() {
-        return Err(interrupted_error());
-    }
-    restore.post(&move_event, start);
-    // Do not perform Accessibility work while the pointer is parked over a
-    // foreign item. Event locations are explicit, so the synthetic down can
-    // follow the move immediately after this last real-button check.
-    if left_button_pressed() {
-        return Err(CommandDragError::Unavailable(
-            "left mouse button was pressed before the drag could start".into(),
-        ));
-    }
-    if restore.interrupted() {
-        return Err(interrupted_error());
-    }
-    restore.press(&down_event, start);
-    std::thread::sleep(PRESS_SETTLE);
-    for (event, point) in &drag_events {
-        // A cancel here leaves the synthetic press owned by `restore`, whose
-        // drop posts the matching release at the last point and restores the
-        // cursor — the item is left wherever the partial drag put it, which
-        // the caller's verification scan then reports.
+impl PreparedCommandDrag {
+    /// Start the short synthetic input interval and leave cursor restoration
+    /// to the returned guard. The function refuses to interfere with a real
+    /// mouse press, and cancels through the guard when physical input arrives.
+    pub(super) fn run(
+        self,
+        validate_before_move: impl FnOnce() -> bool,
+    ) -> Result<CursorRestore, CommandDragError> {
+        let Self {
+            source,
+            start,
+            destination,
+            move_event,
+            down_event,
+            drag_events,
+            up_event,
+            cleanup_up,
+        } = self;
+
+        // Resolve labels and retain the exact AX element before entering this
+        // function. This first frame/state check therefore leaves the person's
+        // cursor untouched even if the target application responds slowly.
+        if !validate_before_move() {
+            return Err(CommandDragError::TargetChanged);
+        }
+        if left_button_pressed() {
+            return Err(CommandDragError::Unavailable(
+                "left mouse button was pressed before the drag could start".into(),
+            ));
+        }
+        // Armed before the cursor position is read and before the pointer is
+        // touched: starting the tap can take a moment, and a mouse moved meanwhile
+        // must both count as interference and define where the cursor goes back.
+        let interference = InterferenceGuard::start();
+        let original = CGEvent::new(source.clone())
+            .map_err(|()| "failed to read cursor position".to_string())?
+            .location();
+        if interference.interrupted() {
+            return Err(interrupted_error());
+        }
+        let mut restore = CursorRestore::new(original, cleanup_up, interference);
+
+        // Creating the guard hides but does not move the pointer. Check once more
+        // here so a physical press that began during setup is rejected in place,
+        // before any event can turn it into a drag over the foreign item.
+        if left_button_pressed() {
+            return Err(CommandDragError::Unavailable(
+                "left mouse button was pressed before the drag could start".into(),
+            ));
+        }
         if restore.interrupted() {
             return Err(interrupted_error());
         }
-        restore.post(event, *point);
-        std::thread::sleep(DRAG_STEP_DELAY);
+        restore.post(&move_event, start);
+        // Do not perform Accessibility work while the pointer is parked over a
+        // foreign item. Event locations are explicit, so the synthetic down can
+        // follow the move immediately after this last real-button check.
+        if left_button_pressed() {
+            return Err(CommandDragError::Unavailable(
+                "left mouse button was pressed before the drag could start".into(),
+            ));
+        }
+        if restore.interrupted() {
+            return Err(interrupted_error());
+        }
+        restore.press(&down_event, start);
+        std::thread::sleep(PRESS_SETTLE);
+        for (event, point) in &drag_events {
+            // A cancel here leaves the synthetic press owned by `restore`, whose
+            // drop posts the matching release at the last point and restores the
+            // cursor — the item is left wherever the partial drag put it, which
+            // the caller's verification scan then reports.
+            if restore.interrupted() {
+                return Err(interrupted_error());
+            }
+            restore.post(event, *point);
+            std::thread::sleep(DRAG_STEP_DELAY);
+        }
+        if restore.interrupted() {
+            return Err(interrupted_error());
+        }
+        restore.release(&up_event, destination);
+        std::thread::sleep(RELEASE_SETTLE);
+        // Input during the release or its settle (or one the tap had not yet
+        // handled at the last check) still contaminates the result: report it
+        // rather than verify an interrupted gesture as a success.
+        if restore.interrupted() {
+            return Err(interrupted_error());
+        }
+        Ok(restore)
     }
-    if restore.interrupted() {
-        return Err(interrupted_error());
-    }
-    restore.release(&up_event, destination);
-    std::thread::sleep(RELEASE_SETTLE);
-    // Input during the release or its settle (or one the tap had not yet
-    // handled at the last check) still contaminates the result: report it
-    // rather than verify an interrupted gesture as a success.
-    if restore.interrupted() {
-        return Err(interrupted_error());
-    }
-    Ok(restore)
 }
 
 fn left_button_pressed() -> bool {

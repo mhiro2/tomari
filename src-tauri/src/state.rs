@@ -2,7 +2,10 @@
 //! tray, the global-shortcut handler and the keyboard event tap.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -14,6 +17,7 @@ use tomari_keyboard::ModifierEngine;
 use tomari_window::{WindowHandle, WindowManager};
 
 use crate::keepawake::KeepAwake;
+use crate::lifecycle::AppLifecycle;
 use crate::locks::MutexExt;
 use crate::menubar::MenuBarState;
 
@@ -82,6 +86,9 @@ struct ScreenGeometry {
 }
 
 pub struct AppState {
+    /// One-way process lifecycle and gates for work that could recreate an OS
+    /// side effect after shutdown has begun.
+    pub lifecycle: Arc<AppLifecycle>,
     /// Persistent SQLite store.
     pub db: Database,
     /// The tap/hold modifier engine, kept in sync with the stored rules.
@@ -123,6 +130,8 @@ pub struct AppState {
     /// they never interleave. It guards the *sequence* of operations, not a
     /// value, hence `Mutex<()>`.
     config_mutation: Mutex<()>,
+    #[cfg(test)]
+    config_mutation_waiters: AtomicUsize,
     /// Serializes window mutations end to end. A snap, recall, undo or redo
     /// is a sequence — read the history, move the window over Accessibility,
     /// record the result — reachable from the main thread (global shortcuts,
@@ -163,6 +172,7 @@ impl AppState {
     ) -> Self {
         let menu_bar = MenuBarState::new(settings.menu_bar_auto_collapse_secs);
         Self {
+            lifecycle: Arc::new(AppLifecycle::default()),
             db,
             engine: Mutex::new(engine),
             windows,
@@ -175,6 +185,8 @@ impl AppState {
             last_placement: Mutex::new(None),
             screen_geometry: Mutex::new(ScreenGeometry::default()),
             config_mutation: Mutex::new(()),
+            #[cfg(test)]
+            config_mutation_waiters: AtomicUsize::new(0),
             window_mutation: Mutex::new(()),
             keep_awake: Mutex::new(KeepAwake::default()),
             menu_bar: Mutex::new(menu_bar),
@@ -197,15 +209,34 @@ impl AppState {
     /// Acquire the config-mutation lock for the duration of a save or delete.
     /// Hold the returned guard for the whole operation — DB write *and* the
     /// live-state sync that follows — so config mutations stay serialized and
-    /// the in-memory engines never disagree with the database.
+    /// the in-memory engines never disagree with the database. Returns `None`
+    /// after shutdown begins; checking the lifecycle only after acquiring the
+    /// lock closes the race where a command waited behind another save.
     ///
     /// Never wait for this on the main thread. Its holders run off the main
     /// thread and, while holding it, re-register global shortcuts — which the
     /// plugin performs *on* the main thread, waiting for it — so a main-thread
     /// caller blocked here would deadlock the app. Window operations use
     /// [`Self::lock_window_mutation`] instead.
-    pub fn lock_config_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.config_mutation.lock_safe()
+    pub fn lock_config_mutation(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        #[cfg(test)]
+        self.config_mutation_waiters.fetch_add(1, Ordering::SeqCst);
+        let guard = self.config_mutation.lock_safe();
+        #[cfg(test)]
+        self.config_mutation_waiters.fetch_sub(1, Ordering::SeqCst);
+        self.lifecycle.is_running().then_some(guard)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_mutation_waiters_for_test(&self) -> usize {
+        self.config_mutation_waiters.load(Ordering::SeqCst)
+    }
+
+    /// Wait for a config mutation that already crossed the lifecycle gate.
+    /// The shutdown coordinator calls this off the main thread because an
+    /// in-flight shortcut registration may itself be waiting on that thread.
+    pub(crate) fn drain_config_mutations_for_shutdown(&self) {
+        drop(self.config_mutation.lock_safe());
     }
 
     /// Acquire the window-mutation lock for one whole window operation (see

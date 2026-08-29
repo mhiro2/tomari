@@ -57,7 +57,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::locks::MutexExt;
 use crate::state::AppState;
@@ -73,9 +73,9 @@ const CHANGED_EVENT: &str = "tomari:keep-awake-changed";
 #[cfg(target_os = "macos")]
 static LID_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Set once [`cleanup_blocking`] begins (the process is exiting). It makes
-/// [`engage`] refuse, so a toggle that races the shutdown cannot spawn a worker
-/// that re-enables the override after cleanup has already cleared it.
+/// Set once [`prepare_shutdown`] begins (the process is exiting). It makes
+/// every mutating entry point refuse, so a toggle or recovery that races the
+/// shutdown cannot spawn a worker that re-enables the override after cleanup.
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The `osascript` process currently presenting administrator authorization,
@@ -352,11 +352,21 @@ fn status_from(k: &KeepAwake) -> KeepAwakeStatus {
     }
 }
 
+fn accepts_requests(state: &AppState) -> bool {
+    state.lifecycle.is_running() && !SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Turn sleep prevention on or off, returning the resulting status.
 pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return status_from(&k);
+        }
         if k.phase.is_pending() {
             return status_from(&k);
         }
@@ -415,7 +425,13 @@ pub fn toggle(app: &AppHandle) -> KeepAwakeStatus {
 /// switch. Active sessions pick up the new policy on the next monitor tick.
 pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     let mut k = state.keep_awake.lock_safe();
+    if !accepts_requests(state.inner()) {
+        return status_from(&k);
+    }
     k.options = options;
     if !k.active && k.options.duration_secs.is_some() {
         k.options.ends_at_ms = None;
@@ -436,6 +452,9 @@ pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus 
 /// once — so it runs the clear directly, as its own stamped transition.
 pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     let (target, recovery) = {
         let k = state.keep_awake.lock_safe();
         (
@@ -455,9 +474,15 @@ pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
 /// writeback (`Off`, or `RecoveryFailed`) decides what the UI shows.
 fn recover_lid_close(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     #[cfg(target_os = "macos")]
     let request_generation = {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return status_from(&k);
+        }
         if k.phase.is_pending() {
             return status_from(&k);
         }
@@ -484,9 +509,15 @@ fn recover_lid_close(app: &AppHandle) -> KeepAwakeStatus {
 /// changed the kernel flag just before cancellation.
 pub fn cancel_transition(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     #[cfg(target_os = "macos")]
     let (reverse_target, request_generation) = {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return status_from(&k);
+        }
         let reverse_target = match k.phase {
             KeepAwakePhase::Enabling => false,
             // Cancelling the *recovery* clear (`recover_lid_close`: disabling
@@ -594,20 +625,35 @@ fn await_monitor_tick(interval: std::time::Duration) {
 /// state change or panel show/hide wakes it immediately, so the switch between
 /// cadences is prompt and the panel never opens onto stale data.
 pub fn start_monitor(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let lifecycle = Arc::clone(&state.lifecycle);
+    if !lifecycle.is_running() {
+        return;
+    }
     #[cfg(target_os = "macos")]
     power_notify::install();
     let handle = app.clone();
-    std::thread::spawn(move || {
-        loop {
+    match lifecycle.spawn_tracked("tomari-keep-awake-monitor", move |lifecycle| {
+        while lifecycle.is_running() {
             let full = monitor_should_run_full(&handle);
+            if !lifecycle.is_running() {
+                return;
+            }
             refresh_system_status(&handle, full);
+            if !lifecycle.is_running() {
+                return;
+            }
             await_monitor_tick(if full {
                 MONITOR_INTERVAL_ACTIVE
             } else {
                 MONITOR_INTERVAL_IDLE
             });
         }
-    });
+    }) {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("keep-awake monitor not started during shutdown"),
+        Err(error) => tracing::warn!(%error, "could not start the keep-awake monitor"),
+    }
 }
 
 /// Whether the monitor has something to guard or show right now.
@@ -628,6 +674,9 @@ fn monitor_should_run_full(app: &AppHandle) -> bool {
 /// kernel flag and job list are left as they were, marked stale by being
 /// exactly as old as the last full pass.
 fn refresh_system_status(app: &AppHandle, full: bool) {
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     let (power_source, battery_percent) = read_power_status();
     let state = app.state::<AppState>();
     #[cfg(target_os = "macos")]
@@ -649,6 +698,9 @@ fn refresh_system_status(app: &AppHandle, full: bool) {
     let mut automatic_off: Option<Option<u64>> = None;
     let changed = {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return;
+        }
         let before = (
             k.power_source,
             k.battery_percent,
@@ -782,6 +834,9 @@ fn arm_duration(options: &mut KeepAwakeOptions) {
 
 fn engage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    let Some(_runtime_effect) = state.lifecycle.runtime_effect() else {
+        return status(state.inner());
+    };
     // Once shutdown cleanup has begun, refuse to turn on — otherwise a worker
     // spawned here could re-enable the lid-close override after cleanup cleared
     // it (notably during the updater's restart), leaving the Mac unable to sleep.
@@ -805,13 +860,13 @@ fn engage(app: &AppHandle) -> KeepAwakeStatus {
             // to reverse an in-flight operation under a new generation.
             return status_from(&k);
         }
-        // Re-check shutdown *under the lock*. `cleanup_blocking` sets
+        // Re-check shutdown *under the lock*. `prepare_shutdown` sets
         // SHUTTING_DOWN before it takes this lock, so an engage that raced it
         // past the unlocked check above would otherwise still slip through here,
         // create an assertion, and spawn a worker that re-engages the lid-close
         // override after cleanup already cleared it — stranding the Mac awake
         // past exit. Bailing here closes that window.
-        if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+        if !accepts_requests(state.inner()) {
             return status_from(&k);
         }
         // Relative presets begin when the session actually engages, including
@@ -915,8 +970,14 @@ fn finish_disable(app: &AppHandle, request_generation: Option<u64>) {
 
 fn disengage(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     let request_generation = {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return status_from(&k);
+        }
         if !k.active {
             k.phase = KeepAwakePhase::Off;
             return status_from(&k);
@@ -930,16 +991,34 @@ fn disengage(app: &AppHandle) -> KeepAwakeStatus {
 /// Emit the change event and rebuild the tray menu (on the main thread, as the
 /// menu APIs require) so the panel and the tray checkmark both follow.
 fn notify(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if !accepts_requests(state.inner()) {
+        return;
+    }
     emit_status(app);
     // A state change may move the monitor between its idle and active
     // cadences; wake it so the switch is prompt.
     poke_monitor();
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
+    let _ = app.run_on_main_thread(move || {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        if state.lifecycle.is_running() {
+            crate::tray::refresh(&handle);
+        }
+    });
 }
 
 fn emit_status(app: &AppHandle) {
-    let state = app.state::<AppState>();
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if !accepts_requests(state.inner()) {
+        return;
+    }
     let status = {
         let mut k = state.keep_awake.lock_safe();
         // Stamp the snapshot under the lock that produced it, so a higher
@@ -949,7 +1028,9 @@ fn emit_status(app: &AppHandle) {
         k.revision += 1;
         status_from(&k)
     };
-    let _ = app.emit(CHANGED_EVENT, status);
+    if accepts_requests(state.inner()) {
+        let _ = app.emit(CHANGED_EVENT, status);
+    }
 }
 
 /// What [`reconcile_on_launch`] should do given a leftover marker and the
@@ -1330,8 +1411,14 @@ pub fn reconcile_on_launch(app: &AppHandle) {
 /// no-op unless that decision is pending.
 pub fn dismiss_leftover(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return status(state.inner());
+    }
     {
         let mut k = state.keep_awake.lock_safe();
+        if !accepts_requests(state.inner()) {
+            return status_from(&k);
+        }
         if !k.leftover_undecided {
             return status_from(&k);
         }
@@ -1356,15 +1443,33 @@ pub fn dismiss_leftover(app: &AppHandle) -> KeepAwakeStatus {
     status(state.inner())
 }
 
-/// Release everything before the process exits. Runs synchronously from the
-/// `RunEvent::ExitRequested` handler (and from the updater before it relaunches)
-/// so the lid-close override never outlives Tomari. Best-effort: if clearing the
-/// override fails (auth declined) or an op is still in flight, the write-ahead
-/// marker is kept so the next launch's reconcile retries.
+/// Make every keep-awake path terminal and wake work that the shutdown
+/// coordinator must join. This is deliberately separate from
+/// [`cleanup_blocking`]: authorization and monitor workers must be canceled
+/// before the coordinator waits for them.
+pub fn prepare_shutdown(app: &AppHandle) {
+    let first = !SHUTTING_DOWN.swap(true, std::sync::atomic::Ordering::AcqRel);
+    if first {
+        let state = app.state::<AppState>();
+        // Supersede every reconcile request before canceling authorization. A
+        // worker still queued for `LID_OP_LOCK` then exits without side effects,
+        // while a worker already presenting a dialog observes the cancel epoch.
+        let mut k = state.keep_awake.lock_safe();
+        k.generation = k.generation.wrapping_add(1);
+    }
+    #[cfg(target_os = "macos")]
+    kill_authorization();
+    poke_monitor();
+}
+
+/// Release everything before the process exits. The lifecycle coordinator runs
+/// this only after tracked workers have stopped, so the lid-close override never
+/// outlives Tomari. Best-effort: if clearing the override fails (auth declined)
+/// or an op is still in flight, the write-ahead marker is kept so the next
+/// launch's reconcile retries.
 pub fn cleanup_blocking(app: &AppHandle) {
-    // Block any further engages for the rest of the process lifetime, so a
-    // toggle racing the shutdown can't re-strand the override after we clear it.
-    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Release);
+    // Defensive for direct callers and for a partially completed coordinator.
+    prepare_shutdown(app);
     let state = app.state::<AppState>();
     {
         let mut k = state.keep_awake.lock_safe();
@@ -1375,9 +1480,6 @@ pub fn cleanup_blocking(app: &AppHandle) {
             if let Some(id) = k.assertion.take() {
                 release_assertion(id);
             }
-            // Supersede any in-flight engage worker so its writeback cannot
-            // re-assert `active` after we have begun tearing everything down.
-            k.generation = k.generation.wrapping_add(1);
         }
     }
     #[cfg(target_os = "macos")]
@@ -1444,7 +1546,24 @@ pub fn cleanup_blocking(app: &AppHandle) {
 /// used to detect a cancellation superseding this one.
 #[cfg(target_os = "macos")]
 fn spawn_reconcile(app: AppHandle, desired_on: bool, request_generation: u64) {
-    std::thread::spawn(move || reconcile_lid_close(&app, desired_on, request_generation));
+    let lifecycle = {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        if !accepts_requests(state.inner()) {
+            return;
+        }
+        Arc::clone(&state.lifecycle)
+    };
+    match lifecycle.spawn_tracked("tomari-keep-awake-reconcile", move |lifecycle| {
+        if lifecycle.is_running() && !SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+            reconcile_lid_close(&app, desired_on, request_generation);
+        }
+    }) {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("keep-awake reconcile not started during shutdown"),
+        Err(error) => tracing::warn!(%error, "could not start keep-awake reconcile worker"),
+    }
 }
 
 /// Drive `pmset disablesleep` toward `desired_on` and commit the resulting
@@ -1467,6 +1586,9 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state = app.state::<AppState>();
+    if !accepts_requests(state.inner()) {
+        return;
+    }
     // Nothing has been touched yet, so a cycle already superseded here must run
     // no side effects at all. Without this the lock could hand out in the wrong
     // order — a cancellation's reverse worker (or `cleanup_blocking`, which also

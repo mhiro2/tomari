@@ -20,6 +20,7 @@ mod keepawake;
 mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
+mod lifecycle;
 mod locks;
 mod logcap;
 mod mailbox;
@@ -49,6 +50,21 @@ use tomari_window::WindowManager;
 use crate::instance_lock::{AcquireError, InstanceLock, Outcome};
 use crate::locks::MutexExt;
 use crate::state::AppState;
+
+/// Apply a permission transition only while its delayed main-thread callback
+/// still belongs to the running app. The poller samples TCC off-main, so quit
+/// can become terminal before this callback reaches AppKit's queue.
+#[cfg(any(target_os = "macos", test))]
+fn apply_permission_transition_if_running(
+    lifecycle: &lifecycle::AppLifecycle,
+    apply: impl FnOnce(),
+) -> bool {
+    if !lifecycle.is_running() {
+        return false;
+    }
+    apply();
+    true
+}
 
 fn main() {
     // Resolve the data directory before logging so the log file can live
@@ -300,68 +316,88 @@ fn main() {
                 // would read as "always was granted" rather than a transition,
                 // and the dead taps would never be revived.
                 let poll_version = app_version.clone();
-                std::thread::spawn(move || {
-                    // Poll responsively while a permission is still missing, then
-                    // ease off to a slow heartbeat once both are granted and
-                    // stable — there is nothing left to react to but the rare
-                    // revocation, so a 2 s spin would be pure waste.
-                    const FAST: std::time::Duration = std::time::Duration::from_secs(2);
-                    const SLOW: std::time::Duration = std::time::Duration::from_secs(30);
-                    let mut last = Some(initial);
-                    let mut interval = if initial == (true, true) { SLOW } else { FAST };
-                    loop {
-                        std::thread::sleep(interval);
-                        let current = tray::permission_state(&poll_handle);
-                        // The drag-to-move tap reads the Accessibility grant off
-                        // an atomic rather than calling into TCC from its
-                        // callback (which holds up all input), so this poll is
-                        // what keeps that mirror current.
-                        drag_to_move::set_accessibility_granted(current.0);
-                        eventtap::set_accessibility_granted(current.0);
-                        if last == Some(current) {
-                            interval = if current == (true, true) { SLOW } else { FAST };
-                            continue;
+                let poll_lifecycle = std::sync::Arc::clone(&state.lifecycle);
+                let spawned =
+                    poll_lifecycle.spawn_tracked("tomari-permission-poller", move |lifecycle| {
+                        // Poll responsively while a permission is still missing, then
+                        // ease off to a slow heartbeat once both are granted and
+                        // stable — there is nothing left to react to but the rare
+                        // revocation, so a 2 s spin would be pure waste.
+                        const FAST: std::time::Duration = std::time::Duration::from_secs(2);
+                        const SLOW: std::time::Duration = std::time::Duration::from_secs(30);
+                        let mut last = Some(initial);
+                        let mut interval = if initial == (true, true) { SLOW } else { FAST };
+                        loop {
+                            if lifecycle.wait_for_shutdown(interval) {
+                                return;
+                            }
+                            let current = tray::permission_state(&poll_handle);
+                            if !lifecycle.is_running() {
+                                return;
+                            }
+                            // The drag-to-move tap reads the Accessibility grant off
+                            // an atomic rather than calling into TCC from its
+                            // callback (which holds up all input), so this poll is
+                            // what keeps that mirror current.
+                            drag_to_move::set_accessibility_granted(current.0);
+                            eventtap::set_accessibility_granted(current.0);
+                            if last == Some(current) {
+                                interval = if current == (true, true) { SLOW } else { FAST };
+                                continue;
+                            }
+                            // A change (including a revocation): return to responsive
+                            // polling until things settle again.
+                            interval = FAST;
+                            // The event taps created at launch return a null tap
+                            // when Input Monitoring is missing and stay dead until
+                            // restarted, so revive them when it is newly granted.
+                            // A revoke rebuilds them too: the start then fails
+                            // and each tap records `PermissionDenied` — its true
+                            // state — instead of a handle to a tap the system
+                            // will no longer feed, which the settings check would
+                            // otherwise keep reporting as running.
+                            let input_monitoring_changed =
+                                matches!(last, Some((_, was_im)) if was_im != current.1);
+                            last = Some(current);
+                            let refresh_handle = poll_handle.clone();
+                            let refresh_version = poll_version.clone();
+                            let _ = poll_handle.run_on_main_thread(move || {
+                                let Some(state) = refresh_handle.try_state::<AppState>() else {
+                                    return;
+                                };
+                                let _ = apply_permission_transition_if_running(
+                                    &state.lifecycle,
+                                    || {
+                                        if input_monitoring_changed {
+                                            eventtap::restart(&refresh_handle);
+                                            drag_to_snap::restart(&refresh_handle);
+                                            drag_to_move::restart(&refresh_handle);
+                                        }
+                                        tray::refresh(&refresh_handle);
+                                        let _ = refresh_handle.emit(
+                                            "tomari:permissions-changed",
+                                            commands::PermissionsChanged {
+                                                accessibility: current.0,
+                                                input_monitoring: current.1,
+                                                revision: commands::next_permission_revision(),
+                                            },
+                                        );
+                                        // Keep the stored snapshot tracking every observed
+                                        // transition, so the next launch compares against
+                                        // the state this run actually ended with.
+                                        regrant::store_snapshot(
+                                            &state.db,
+                                            current,
+                                            &refresh_version,
+                                        );
+                                    },
+                                );
+                            });
                         }
-                        // A change (including a revocation): return to responsive
-                        // polling until things settle again.
-                        interval = FAST;
-                        // The event taps created at launch return a null tap
-                        // when Input Monitoring is missing and stay dead until
-                        // restarted, so revive them when it is newly granted.
-                        // A revoke rebuilds them too: the start then fails
-                        // and each tap records `PermissionDenied` — its true
-                        // state — instead of a handle to a tap the system
-                        // will no longer feed, which the settings check would
-                        // otherwise keep reporting as running.
-                        let input_monitoring_changed =
-                            matches!(last, Some((_, was_im)) if was_im != current.1);
-                        last = Some(current);
-                        let refresh_handle = poll_handle.clone();
-                        let refresh_version = poll_version.clone();
-                        let _ = poll_handle.run_on_main_thread(move || {
-                            if input_monitoring_changed {
-                                eventtap::restart(&refresh_handle);
-                                drag_to_snap::restart(&refresh_handle);
-                                drag_to_move::restart(&refresh_handle);
-                            }
-                            tray::refresh(&refresh_handle);
-                            let _ = refresh_handle.emit(
-                                "tomari:permissions-changed",
-                                commands::PermissionsChanged {
-                                    accessibility: current.0,
-                                    input_monitoring: current.1,
-                                    revision: commands::next_permission_revision(),
-                                },
-                            );
-                            // Keep the stored snapshot tracking every observed
-                            // transition, so the next launch compares against
-                            // the state this run actually ended with.
-                            if let Some(state) = refresh_handle.try_state::<AppState>() {
-                                regrant::store_snapshot(&state.db, current, &refresh_version);
-                            }
-                        });
-                    }
-                });
+                    });
+                if let Err(error) = spawned {
+                    tracing::warn!(%error, "could not start the permission poller");
+                }
             }
 
             // A true first run (the database was just seeded) auto-opens the
@@ -398,48 +434,9 @@ fn main() {
         // through the same native-alert-and-exit path as every other
         // unrecoverable startup error instead.
         .unwrap_or_else(|e| fatal_startup_error(&format!("Tomari could not start: {e}")))
-        // Release sleep prevention before the process exits — including the
-        // lid-close override, which would otherwise outlive Tomari and keep the
-        // Mac awake. This catches the tray Quit (`app.exit`) and a normal
-        // quit/logout; the updater's `restart` does not guarantee this event,
-        // so it calls `cleanup_blocking` itself. The write-ahead marker is the
-        // backstop for any exit path that slips past both.
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                // Stop the keyboard tap now, releasing any remapped modifier it
-                // still holds downstream — left running into the slow cleanup
-                // below it would keep stamping stale targets, and dying with
-                // the process it would leave the app holding them. This goes
-                // *before* the Caps Lock restore: a Caps reconcile the tap had
-                // put off for a hold runs under the same lock `teardown` takes,
-                // so once it returns no such worker can re-enable the remap
-                // behind the restore (one still to run sees no tap and turns it
-                // off too).
-                #[cfg(target_os = "macos")]
-                eventtap::teardown(app);
-                // Restore Caps Lock's native behavior: the HID remap persists
-                // until reboot or removal, so a quit must take it back down,
-                // and `hidutil` needs no permission and returns quickly. Doing
-                // this *before* `cleanup_blocking` — which can sit behind the
-                // admin-auth dialog for the lid-close veto — means Caps Lock is
-                // never left remapped for however long that dialog is up (or
-                // declined).
-                // The outcome is logged, not dropped: a failed restore leaves
-                // the claim record on disk, so the next launch's reconcile
-                // retries it and the settings panel shows the mismatch until it
-                // heals (`get_apply_warnings`).
-                let outcome = capsmap::reconcile(false);
-                if !outcome.reconciled {
-                    tracing::warn!(
-                        proxy_active = outcome.proxy_active,
-                        "caps-lock HID remap could not be restored on quit; will retry at next launch"
-                    );
-                }
-                // Drop the divider before the slow part below: it is the one
-                // piece of teardown the user can see, and `cleanup_blocking`
-                // can sit behind an admin-auth dialog for a while.
-                menubar::teardown(app);
-                keepawake::cleanup_blocking(app);
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                lifecycle::handle_exit_requested(app, code, &api);
             }
         });
 }
@@ -1077,6 +1074,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::{Arc, mpsc};
 
     /// The database path the quarantine tests work against, plus its sidecars.
     const DB: &str = "/data/tomari.sqlite";
@@ -1087,6 +1085,32 @@ mod tests {
 
     fn aside(suffix: &str) -> PathBuf {
         PathBuf::from(format!("/data/tomari.sqlite.broken-{STAMP}{suffix}"))
+    }
+
+    #[test]
+    fn queued_permission_transition_is_dropped_after_terminal_quit() {
+        let lifecycle = Arc::new(lifecycle::AppLifecycle::default());
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (applied_tx, applied_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let callback_lifecycle = Arc::clone(&lifecycle);
+        let callback = std::thread::spawn(move || {
+            queued_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let applied = apply_permission_transition_if_running(&callback_lifecycle, || {
+                applied_tx.send(()).unwrap();
+            });
+            result_tx.send(applied).unwrap();
+        });
+
+        queued_rx.recv().unwrap();
+        lifecycle.stop_for_test();
+        release_tx.send(()).unwrap();
+
+        callback.join().unwrap();
+        assert!(!result_rx.recv().unwrap());
+        assert!(applied_rx.try_recv().is_err());
     }
 
     /// In-memory [`FileOps`] over a set of present paths, with per-path rename

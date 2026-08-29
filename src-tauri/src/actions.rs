@@ -11,6 +11,9 @@ use crate::state::AppState;
 /// back to the frontend (localized by code) or be logged from the shortcut
 /// handler.
 pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result<(), CmdError> {
+    if !state.lifecycle.is_running() {
+        return Err(CmdError::other("Tomari is shutting down"));
+    }
     let result = match action {
         AppAction::TogglePanel => toggle_panel(app),
         // Window ops funnel through `window_ops`, which honors the

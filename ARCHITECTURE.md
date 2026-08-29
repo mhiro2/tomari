@@ -625,9 +625,11 @@ and applies none of them.
   the window only when it is the active (visible and focused) window and
   otherwise raises it.
 - **Permission polling**: Accessibility / Input Monitoring change in System
-  Settings, outside the app, so a 2-second thread runs only the cheap status
-  checks and rebuilds the tray menu on the main thread only on a change. When
-  Input Monitoring is newly granted, the dead taps are restarted (a tap
+  Settings, outside the app, so a tracked worker runs only the cheap status
+  checks every two seconds while a grant is missing and every 30 seconds once
+  both are stable. It rebuilds the tray menu on the main thread only on a
+  change. When Input Monitoring is newly granted, the dead taps are restarted
+  (a tap
   created without the permission is null and never revives on its own). Every
   transition also emits `tomari:permissions-changed` (`{ accessibility,
   inputMonitoring, revision }`), which updates the centralized sidebar
@@ -711,10 +713,23 @@ and applies none of them.
   modifier tap actions, including optional remembered-position restore. Both
   reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
   shortcuts (`set_hotkeys_suspended`) while capturing a chord.
+- **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way
+  `Running → ShuttingDown → Stopped` lifecycle. Ordinary quit holds the first
+  `ExitRequested` on the main thread, marks the lifecycle terminal there, and
+  runs cleanup on the blocking pool; this leaves the main thread available to
+  finish a shortcut registration already in progress. The updater runs the
+  same coordinator synchronously before asking Tauri to restart. New config
+  mutations, tracked workers, tap/Caps effects, and the Menu Bar synthetic
+  drag are rejected once terminal; work that already crossed a gate is drained
+  before cleanup continues. The fixed order is: cancel and join
+  process-lifetime workers, drain transient OS effects, release global
+  shortcuts, stop the keyboard and both drag taps, restore native Caps Lock,
+  remove menu-bar UI, then release keep-awake state. Concurrent shutdown calls
+  wait for the same completion and never reopen the lifecycle.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
-  consumes it and relaunches. The endpoint is `latest.json` on GitHub
-  Releases.
+  consumes it, completes the terminal shutdown above, and relaunches. The
+  endpoint is `latest.json` on GitHub Releases.
 - **External control / URL scheme** (`tomari-core::external`,
   `dispatch_deep_link` in `main.rs`): launchers like Raycast/Alfred drive
   Tomari through `tomari://v1/...`. `tauri-plugin-deep-link` delivers URLs; the
@@ -868,10 +883,10 @@ keeps the marker so the next launch asks again, and the ordinary on/off paths �
 panel, tray item, hotkey — are refused, since any of them would end in a clear
 justified by the marker alone. An unreadable sleep state at launch with a marker
 present is handled the same way under the `lidCloseUnconfirmed` notice.
-`cleanup_blocking` (from `RunEvent::ExitRequested`, covering tray Quit, updater
-relaunch and logout alike) otherwise releases everything before the process
-exits. The pure `reconcile_decision` is unit-tested; the IOKit / `pmset` layer
-stays thin.
+The terminal lifecycle coordinator invokes `cleanup_blocking` for tray Quit,
+updater relaunch, and logout alike, after it has canceled and joined keep-awake
+workers. It otherwise releases everything before the process exits. The pure
+`reconcile_decision` is unit-tested; the IOKit / `pmset` layer stays thin.
 
 ## 9. Menu bar tidying (`src-tauri/src/menubar/`)
 

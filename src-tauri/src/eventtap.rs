@@ -116,6 +116,14 @@ pub fn restart(app: &AppHandle) {
 /// final live state (not an intermediate reconcile here) decides whether a
 /// `capsLockRemap` warning is raised.
 pub fn restart_result(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return true;
+    };
+    // Runtime effects always precede the tap lock. Shutdown closes this gate,
+    // drains work that already entered it, and only then tears the tap down.
+    let Some(_effect) = state.lifecycle.runtime_effect() else {
+        return true;
+    };
     let mut guard = EVENT_TAP.lock_safe();
     // Published before the old tap goes down, so no reader sees `Healthy` over
     // a tap being torn down; also retires the old callback's generation.
@@ -125,9 +133,6 @@ pub fn restart_result(app: &AppHandle) -> bool {
     // here, so a reconcile put off for a Caps Lock hold has nothing to wait for.
     CAPS_RECONCILE_DEFERRED.store(false, Ordering::SeqCst);
 
-    let Some(state) = app.try_state::<AppState>() else {
-        return true;
-    };
     // The torn-down tap loses the release of any key held across the restart,
     // so drop the engine's transient "key is held" state. Otherwise a held
     // modifier would linger in `held` and the next solo tap would be misread as
@@ -301,6 +306,12 @@ pub fn is_running() -> bool {
 /// applied. The release then runs the same reconcile, and the next save
 /// re-checks it as usual.
 pub fn reconcile_caps_mapping(state: &AppState) -> bool {
+    // Never move the HID mapping toward the configured rule after shutdown has
+    // become terminal. Cleanup drains effects that already crossed this gate
+    // before it performs the final restore to native Caps Lock behavior.
+    let Some(_effect) = state.lifecycle.runtime_effect() else {
+        return crate::capsmap::matches(false);
+    };
     // Hold `EVENT_TAP` for the whole reconcile, as `restart_result` does: the
     // two then serialize, so the "is a tap running" this decides `manage` from
     // cannot go stale under it (a restart stopping the tap, or failing to start
@@ -360,22 +371,27 @@ fn run_deferred_caps_reconcile(app: &AppHandle) {
     if !CAPS_RECONCILE_DEFERRED.swap(false, Ordering::SeqCst) {
         return;
     }
+    let lifecycle = {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        Arc::clone(&state.lifecycle)
+    };
     let handle = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("tomari-caps-reconcile".into())
-        .spawn(move || {
-            let Some(state) = handle.try_state::<AppState>() else {
-                return;
-            };
-            if reconcile_caps_mapping(&state) {
-                tracing::info!("deferred caps-lock HID remap reconcile applied");
-            } else {
-                tracing::warn!("deferred caps-lock HID remap reconcile did not match the rules");
-            }
-        });
+    let spawned = lifecycle.spawn_tracked("tomari-caps-reconcile", move |_| {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        if reconcile_caps_mapping(&state) {
+            tracing::info!("deferred caps-lock HID remap reconcile applied");
+        } else {
+            tracing::warn!("deferred caps-lock HID remap reconcile did not match the rules");
+        }
+    });
     if let Err(e) = spawned {
-        // Leave it pending: the next save's authoritative check retries it.
-        CAPS_RECONCILE_DEFERRED.store(true, Ordering::SeqCst);
+        // The next save's authoritative check retries the reconcile. Do not
+        // republish the callback flag here: shutdown may have become terminal
+        // while thread creation failed, and teardown owns the final state.
         tracing::warn!(error = %e, "could not spawn the deferred caps-lock HID remap reconcile");
     }
 }

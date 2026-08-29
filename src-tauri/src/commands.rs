@@ -92,6 +92,20 @@ pub struct PendingUpdateSlot {
 /// for the rest.
 type CmdResult<T> = Result<T, CmdError>;
 
+fn lock_config_mutation(state: &AppState) -> CmdResult<std::sync::MutexGuard<'_, ()>> {
+    state
+        .lock_config_mutation()
+        .ok_or_else(|| CmdError::other("Tomari is shutting down"))
+}
+
+/// Hold the terminal-aware config gate around one complete persistence and
+/// live-state mutation. Keeping the task injectable lets the queued-save race
+/// be tested without constructing Tauri or OS integrations.
+fn with_config_mutation<T>(state: &AppState, task: impl FnOnce() -> CmdResult<T>) -> CmdResult<T> {
+    let _config = lock_config_mutation(state)?;
+    task()
+}
+
 /// Run `task` on the blocking pool with the app state, off the main thread.
 ///
 /// Tauri dispatches a synchronous command on the main thread, which also
@@ -144,9 +158,16 @@ pub async fn save_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> CmdResult<SaveSettingsOutcome> {
-    // Serialize against other concurrent config mutations, which each write to
-    // the database and then rebuild the engines from it.
-    let _config = state.lock_config_mutation();
+    with_config_mutation(state.inner(), || {
+        save_settings_locked(&app, state.inner(), settings)
+    })
+}
+
+fn save_settings_locked(
+    app: &AppHandle,
+    state: &AppState,
+    settings: AppSettings,
+) -> CmdResult<SaveSettingsOutcome> {
     let previous = state.settings.lock_safe().clone();
 
     // Persisting is the hard requirement: a failure here rejects so the UI knows
@@ -164,10 +185,10 @@ pub async fn save_settings(
     // and re-setting the tray to its current visibility is a no-op. So a warning
     // here reflects the live mismatch, not merely this save's attempt.
     let mut apply_warnings: Vec<&'static str> = Vec::new();
-    if !apply_launch_at_login(&app, settings.launch_at_login) {
+    if !apply_launch_at_login(app, settings.launch_at_login) {
         apply_warnings.push("launchAtLogin");
     }
-    if !crate::tray::set_visible(&app, settings.show_in_menu_bar) {
+    if !crate::tray::set_visible(app, settings.show_in_menu_bar) {
         apply_warnings.push("menuBar");
     }
 
@@ -187,7 +208,7 @@ pub async fn save_settings(
     // immediately when the master switch changes so turning it off releases
     // every system registration and turning it on restores the saved set.
     if keyboard_toggled {
-        let shortcut_result = shortcuts::register_all(&app, state.inner());
+        let shortcut_result = shortcuts::register_all(app, state);
         if let Err(error) = &shortcut_result {
             tracing::warn!(%error, "failed to reconcile global shortcuts after keyboard toggle");
         }
@@ -222,8 +243,8 @@ pub async fn save_settings(
     // inside `reload_engine_rules` callees): the authoritative `capsLockRemap`
     // check runs once below, after every side effect, against the final live
     // state.
-    if (command_ime_changed || !command_ime_rules_live(&state, settings.command_ime_switch_enabled))
-        && let Err(e) = reload_engine_rules(&state)
+    if (command_ime_changed || !command_ime_rules_live(state, settings.command_ime_switch_enabled))
+        && let Err(e) = reload_engine_rules(state)
     {
         tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
     }
@@ -231,7 +252,7 @@ pub async fn save_settings(
     // setting (a reload failed just now, or an earlier one did and this save was
     // unrelated), so the mismatch keeps surfacing until it actually heals rather
     // than the save reporting a clean success the runtime never honored.
-    if !command_ime_rules_live(&state, settings.command_ime_switch_enabled) {
+    if !command_ime_rules_live(state, settings.command_ime_switch_enabled) {
         apply_warnings.push("commandImeRules");
     }
 
@@ -247,7 +268,7 @@ pub async fn save_settings(
     // deadline. Reconciled on every save, not only when the switch changed: the
     // items are cheap to reapply and a previous failure to create them then has
     // a chance to heal, the same reasoning as the taps below.
-    crate::menubar::apply_settings(&app, &previous, &settings);
+    crate::menubar::apply_settings(app, &previous, &settings);
 
     // Only (re)start a tap when its own toggle (or the window-management
     // master switch) actually changed. Flipping unrelated preferences must not
@@ -258,9 +279,9 @@ pub async fn save_settings(
     // comment).
     #[cfg(target_os = "macos")]
     {
-        let keyboard_restart = keyboard_toggled.then(|| crate::eventtap::restart_result(&app));
-        let drag_restart = drag_changed.then(|| crate::drag_to_snap::restart_result(&app));
-        let move_restart = move_changed.then(|| crate::drag_to_move::restart_result(&app));
+        let keyboard_restart = keyboard_toggled.then(|| crate::eventtap::restart_result(app));
+        let drag_restart = drag_changed.then(|| crate::drag_to_snap::restart_result(app));
+        let move_restart = move_changed.then(|| crate::drag_to_move::restart_result(app));
 
         // The one authoritative Caps Lock remap check, after every side effect
         // that can touch it (rule reload, tap restart) has run: reconcile the
@@ -269,7 +290,7 @@ pub async fn save_settings(
         // reconcile fixed raises no warning; a mismatch left over from an
         // *earlier* save keeps warning (and is retried) even when this save
         // touched nothing keyboard-related.
-        let caps_remap_ok = crate::eventtap::reconcile_caps_mapping(&state);
+        let caps_remap_ok = crate::eventtap::reconcile_caps_mapping(state);
 
         apply_warnings.extend(compose_apply_warnings(&ApplyWarningInputs {
             keyboard: TapCheck {
@@ -525,14 +546,11 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
         }
         return Err(CmdError::other(message));
     }
-    // `restart` does not guarantee an `ExitRequested` event, so release sleep
-    // prevention (including the lid-close override) here before relaunching,
-    // and stop the keyboard tap so a remapped modifier it holds downstream is
-    // released rather than left pressed across the relaunch.
-    #[cfg(target_os = "macos")]
-    crate::eventtap::teardown(&app);
-    crate::keepawake::cleanup_blocking(&app);
-    app.restart();
+    // Tauri does not guarantee an `ExitRequested` before restart. Complete the
+    // same terminal cleanup as ordinary quit first, including every tap, Caps
+    // Lock's process-external HID mapping, the menu bar, and keep-awake state.
+    let restart_app = app.clone();
+    crate::lifecycle::shutdown_then(&app, || restart_app.restart())
 }
 
 #[tauri::command]
@@ -556,7 +574,7 @@ fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> Cm
     // overlong ids and labels and bare-letter shortcuts before anything is
     // stored or registered.
     let hotkey = crate::validate::sanitize_hotkey(hotkey)?;
-    let _config = state.lock_config_mutation();
+    let _config = lock_config_mutation(state)?;
     // Registration can fail even for a valid accelerator (e.g. a conflict with
     // another app), so snapshot the stored row and roll back on failure — the
     // DB must not keep a hotkey the UI reported as rejected.
@@ -628,7 +646,7 @@ pub async fn delete_hotkey(app: AppHandle, id: String) -> CmdResult<()> {
 }
 
 fn delete_hotkey_blocking(app: &AppHandle, state: &AppState, id: String) -> CmdResult<()> {
-    let _config = state.lock_config_mutation();
+    let _config = lock_config_mutation(state)?;
     // Snapshot the row before deleting so a systemic re-registration failure can
     // be rolled back: `register_all` returns `Err` only when it left the live
     // set untouched (the DB was unreadable, or the old registrations could not
@@ -696,7 +714,7 @@ pub async fn save_modifier_rule(
     state: State<'_, AppState>,
     rule: ModifierRule,
 ) -> CmdResult<RuleMutationOutcome> {
-    let _config = state.lock_config_mutation();
+    let _config = lock_config_mutation(&state)?;
     // Don't trust the frontend: reject empty / overlong / reserved ids and
     // labels, contradictory hyper+remap rules, unsendable tap keystrokes, and
     // rules that collide with another stored rule (or the reserved left/right ⌘
@@ -745,7 +763,7 @@ pub async fn delete_modifier_rule(
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<RuleMutationOutcome> {
-    let _config = state.lock_config_mutation();
+    let _config = lock_config_mutation(&state)?;
     // Snapshot the row so a failed live reload can restore it — as with save, the
     // DB must not diverge from the live engine on a reload error.
     let previous = state
@@ -1014,7 +1032,7 @@ fn set_hotkeys_suspended_blocking(
     // This mutates the shortcut registration and `state.shortcuts`, so it must
     // not interleave with a hotkey save's `register_all` (which would otherwise
     // leave the OS and the dispatch map disagreeing).
-    let _config = state.lock_config_mutation();
+    let _config = lock_config_mutation(state)?;
     if suspended {
         shortcuts::suspend_all(app).map_err(CmdError::other)
     } else {
@@ -1135,6 +1153,8 @@ pub fn set_menu_bar_collapsed(app: AppHandle, collapsed: bool) -> crate::menubar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
 
     /// A `TapCheck` that was not touched this save: only the live state
     /// matters.
@@ -1181,6 +1201,37 @@ mod tests {
             AppSettings::default(),
             false,
         )
+    }
+
+    #[test]
+    fn settings_save_queued_on_config_lock_is_rejected_after_terminal_quit() {
+        let state = Arc::new(test_state(Vec::new()));
+        let held = state.lock_config_mutation().unwrap();
+        let (persisted_tx, persisted_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let save_state = Arc::clone(&state);
+        let save = std::thread::spawn(move || {
+            let result = with_config_mutation(&save_state, || {
+                persisted_tx.send(()).unwrap();
+                Ok(())
+            });
+            result_tx.send(result.is_err()).unwrap();
+        });
+
+        let contention_deadline = Instant::now() + Duration::from_secs(1);
+        while state.config_mutation_waiters_for_test() == 0 {
+            assert!(
+                Instant::now() < contention_deadline,
+                "settings save did not queue on the held config lock"
+            );
+            std::thread::yield_now();
+        }
+        state.lifecycle.stop_for_test();
+        drop(held);
+
+        assert!(result_rx.recv().unwrap());
+        assert!(persisted_rx.try_recv().is_err());
+        save.join().unwrap();
     }
 
     #[test]

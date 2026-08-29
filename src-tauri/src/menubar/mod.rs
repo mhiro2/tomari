@@ -45,7 +45,7 @@ mod inventory {
 }
 
 use std::sync::{
-    Condvar, Mutex, TryLockError,
+    Arc, Condvar, Mutex, TryLockError,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -62,6 +62,13 @@ pub use state::MenuBarState;
 /// Emitted whenever the menu bar state changes, so the panel toggle and the
 /// tray checkmark stay in step regardless of which surface initiated it.
 const CHANGED_EVENT: &str = "tomari:menu-bar-changed";
+
+fn app_is_running(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return false;
+    };
+    state.lifecycle.is_running()
+}
 
 /// What the panel and the tray render.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -330,13 +337,45 @@ fn move_item_locked(
         };
     }
 
-    let cursor = match movement::command_drag(&current, drag_context, target_zone, || {
-        drag_target_is_current(state, &drag_target, &current)
-            && status::scan_context(app)
-                .is_some_and(|latest| same_scan_context(drag_context, latest))
-            && movement_available(state)
-    }) {
-        Ok(cursor) => cursor,
+    let prepared_drag = match movement::prepare_command_drag(&current, drag_context, target_zone) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(item = %current.name, %error, "menu bar item move was not started");
+            return MenuBarMoveResult {
+                outcome: MenuBarMoveOutcome::NotMovable,
+                inventory: refresh_inventory_locked(app, state, session),
+            };
+        }
+    };
+
+    // AX discovery and fallible event allocation are deliberately outside the
+    // lifecycle effect gate. Only the final target check and short gesture
+    // that owns a private tap, synthetic press, and hidden cursor participate
+    // in shutdown draining.
+    let drag_result = run_menu_bar_gesture(&state.lifecycle, || {
+        let cursor = prepared_drag.run(|| {
+            drag_target_is_current(state, &drag_target, &current)
+                && status::scan_context(app)
+                    .is_some_and(|latest| same_scan_context(drag_context, latest))
+                && movement_available(state)
+        })?;
+        // Drop posts any matching mouse-up, restores the pointer, shows it,
+        // and tears down the interference tap before the effect gate opens.
+        drop(cursor);
+        Ok::<(), movement::CommandDragError>(())
+    });
+    let drag_result = match drag_result {
+        Some(result) => result,
+        None => {
+            tracing::debug!(item = %current.name, "shutdown began before menu bar item move started");
+            return MenuBarMoveResult {
+                outcome: MenuBarMoveOutcome::NotMovable,
+                inventory: refresh_inventory_locked(app, state, session),
+            };
+        }
+    };
+    match drag_result {
+        Ok(()) => {}
         Err(movement::CommandDragError::TargetChanged) => {
             tracing::warn!(item = %current.name, "menu bar changed before item move started");
             let outcome = if movement_available(state) {
@@ -356,11 +395,7 @@ fn move_item_locked(
                 inventory: refresh_inventory_locked(app, state, session),
             };
         }
-    };
-
-    // The gesture itself includes a Window Server settling delay. Restore the
-    // person's pointer before the slower all-process AX verification scan.
-    drop(cursor);
+    }
 
     if let Some(inventory) = unavailable_inventory(state, session) {
         return MenuBarMoveResult {
@@ -412,11 +447,32 @@ fn move_item_locked(
     }
 }
 
+/// Run the synthetic pointer gesture only while restartable OS effects are
+/// accepted. The guard intentionally outlives `gesture`: callers can finish
+/// RAII cleanup inside the closure before shutdown's effect drain continues.
+#[cfg(target_os = "macos")]
+fn run_menu_bar_gesture<R>(
+    lifecycle: &crate::lifecycle::AppLifecycle,
+    gesture: impl FnOnce() -> R,
+) -> Option<R> {
+    let _runtime_effect = lifecycle.runtime_effect()?;
+    Some(gesture())
+}
+
 #[cfg(target_os = "macos")]
 fn unavailable_inventory(
     state: &AppState,
     session: &mut InventorySession,
 ) -> Option<MenuBarInventory> {
+    if !state.lifecycle.is_running() {
+        return Some(publish_inventory(
+            session,
+            true,
+            state.windows.permission_granted(),
+            false,
+            Vec::new(),
+        ));
+    }
     if !state.windows.permission_granted() {
         return Some(publish_inventory(session, true, false, false, Vec::new()));
     }
@@ -640,6 +696,7 @@ pub fn init(app: &AppHandle) {
 /// — it just means the menu bar is tidy the moment Tomari is asked to quit
 /// rather than whenever the process actually goes away.
 pub fn teardown(app: &AppHandle) {
+    prepare_shutdown();
     status::teardown(app);
 }
 
@@ -649,6 +706,9 @@ pub fn toggle(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    if !state.lifecycle.is_running() {
+        return;
+    }
     if !state.settings.lock_safe().menu_bar_tidy_enabled {
         return;
     }
@@ -670,6 +730,9 @@ pub fn set_collapsed(app: &AppHandle, collapsed: bool) -> MenuBarStatus {
             collapsed: true,
         };
     };
+    if !state.lifecycle.is_running() {
+        return status(state.inner());
+    }
     if !state.settings.lock_safe().menu_bar_tidy_enabled {
         return status(state.inner());
     }
@@ -690,6 +753,9 @@ pub fn apply_settings(app: &AppHandle, previous: &AppSettings, next: &AppSetting
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    if !state.lifecycle.is_running() {
+        return;
+    }
     let now = state.now_ms();
     let pending = {
         let mut menu_bar = state.menu_bar.lock_safe();
@@ -713,28 +779,49 @@ fn publish(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    if !state.lifecycle.is_running() {
+        return;
+    }
     let current = status(state.inner());
     apply_physical_status_when_idle(app, current);
-    let _ = app.emit(CHANGED_EVENT, current);
+    if state.lifecycle.is_running() {
+        let _ = app.emit(CHANGED_EVENT, current);
+    }
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || crate::tray::refresh(&handle));
+    let _ = app.run_on_main_thread(move || {
+        if app_is_running(&handle) {
+            crate::tray::refresh(&handle);
+        }
+    });
 }
 
 fn apply_physical_status_when_idle(app: &AppHandle, current: MenuBarStatus) {
+    if !app_is_running(app) {
+        return;
+    }
     match INVENTORY_SESSION.try_lock() {
         // Keep the gate through `run_on_main_thread`'s enqueue. A later scan can
         // enqueue its synchronous geometry task only after this publication, so
         // the event-loop channel applies the state before the scan expands it.
-        Ok(_operation) => status::apply(app, current.enabled, current.collapsed),
+        Ok(_operation) => {
+            if app_is_running(app) {
+                status::apply(app, current.enabled, current.collapsed);
+            }
+        }
         Err(TryLockError::Poisoned(error)) => {
             let _operation = error.into_inner();
-            status::apply(app, current.enabled, current.collapsed);
+            if app_is_running(app) {
+                status::apply(app, current.enabled, current.collapsed);
+            }
         }
         Err(TryLockError::WouldBlock) => schedule_status_reconciliation(app),
     }
 }
 
 fn schedule_status_reconciliation(app: &AppHandle) {
+    if !app_is_running(app) {
+        return;
+    }
     if STATUS_RECONCILE_PENDING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -748,6 +835,9 @@ fn schedule_status_reconciliation(app: &AppHandle) {
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
+        if !state.lifecycle.is_running() {
+            return;
+        }
         let current = status(state.inner());
         status::apply(&app, current.enabled, current.collapsed);
     });
@@ -781,6 +871,14 @@ static COLLAPSE_TIMER: CollapseTimer = CollapseTimer {
     started: Mutex::new(false),
 };
 
+/// Cancel the process-lifetime timer before the lifecycle coordinator joins
+/// it. Clearing the slot prevents a deadline already reached from mutating the
+/// menu-bar state, and notifying wakes both idle and timed waits immediately.
+pub fn prepare_shutdown() {
+    COLLAPSE_TIMER.slot.lock_safe().deadline_ms = None;
+    COLLAPSE_TIMER.wake.notify_all();
+}
+
 /// Hand the timer the state machine's latest request (see
 /// `MenuBarState::timer_request`): arm for the deadline, or clear when `None`.
 ///
@@ -797,9 +895,21 @@ static COLLAPSE_TIMER: CollapseTimer = CollapseTimer {
 /// newer one. The generation check on firing remains the authority on whether
 /// to collapse.
 fn arm_auto_collapse(app: &AppHandle, request: (u64, Option<u64>)) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if !state.lifecycle.is_running() {
+        return;
+    }
     ensure_timer_worker(app);
     let (generation, deadline_ms) = request;
     let mut slot = COLLAPSE_TIMER.slot.lock_safe();
+    // Shutdown may have begun while the worker was being registered. Re-check
+    // under the timer lock so a request cannot re-arm after prepare_shutdown
+    // cleared the slot and woke the worker.
+    if !state.lifecycle.is_running() {
+        return;
+    }
     if !request_supersedes(slot.generation, generation) {
         return;
     }
@@ -821,19 +931,27 @@ fn request_supersedes(current: u64, incoming: u64) -> bool {
 /// Start the timer worker if it is not running. A spawn failure is logged and
 /// left for the next arm to retry.
 fn ensure_timer_worker(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let lifecycle = Arc::clone(&state.lifecycle);
+    if !lifecycle.is_running() {
+        return;
+    }
     let mut started = COLLAPSE_TIMER.started.lock_safe();
     if *started {
         return;
     }
     let app = app.clone();
-    match std::thread::Builder::new()
-        .name("tomari-menubar-collapse".into())
-        .spawn(move || collapse_timer_worker(app))
-    {
-        Ok(_) => *started = true,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not start the menu bar auto-collapse timer")
-        }
+    match lifecycle.spawn_tracked("tomari-menubar-collapse", move |lifecycle| {
+        collapse_timer_worker(app, lifecycle);
+    }) {
+        Ok(true) => *started = true,
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            %error,
+            "could not start the menu bar auto-collapse timer"
+        ),
     }
 }
 
@@ -856,9 +974,12 @@ fn timer_step(pending: Option<(u64, u64)>, now_ms: u64) -> TimerStep {
     }
 }
 
-fn collapse_timer_worker(app: AppHandle) {
+fn collapse_timer_worker(app: AppHandle, lifecycle: Arc<crate::lifecycle::AppLifecycle>) {
     let mut slot = COLLAPSE_TIMER.slot.lock_safe();
     loop {
+        if !lifecycle.is_running() {
+            return;
+        }
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
@@ -883,8 +1004,11 @@ fn collapse_timer_worker(app: AppHandle) {
                 // arrives later is still recognised as stale.
                 slot.deadline_ms = None;
                 drop(slot);
+                if !lifecycle.is_running() {
+                    return;
+                }
                 let fired = state.menu_bar.lock_safe().auto_collapse_elapsed(generation);
-                if fired {
+                if fired && lifecycle.is_running() {
                     // `publish` defers the physical collapse if a scan or move
                     // owns the divider, while still updating the panel and tray
                     // immediately.
@@ -899,6 +1023,20 @@ fn collapse_timer_worker(app: AppHandle) {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, TryRecvError},
+    };
+    use std::time::Instant;
+
+    struct CleanupProbe(Arc<AtomicBool>);
+
+    impl Drop for CleanupProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn item(name: &str) -> MenuBarItem {
         MenuBarItem {
@@ -1040,6 +1178,60 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&outcome).unwrap(), wire);
         }
+    }
+
+    #[test]
+    fn shutdown_waits_for_started_menu_bar_gesture_cleanup() {
+        let lifecycle = Arc::new(crate::lifecycle::AppLifecycle::default());
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gesture_lifecycle = Arc::clone(&lifecycle);
+        let gesture_cleaned = Arc::clone(&cleaned);
+        let gesture = std::thread::spawn(move || {
+            let result = run_menu_bar_gesture(&gesture_lifecycle, || {
+                let _restore = CleanupProbe(gesture_cleaned);
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            assert_eq!(result, Some(()));
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+        let shutdown_lifecycle = Arc::clone(&lifecycle);
+        let shutdown = std::thread::spawn(move || {
+            shutdown_lifecycle.stop_for_test();
+            shutdown_done_tx.send(()).unwrap();
+        });
+        let terminal_deadline = Instant::now() + Duration::from_secs(1);
+        while lifecycle.is_running() {
+            assert!(
+                Instant::now() < terminal_deadline,
+                "shutdown did not enter its terminal phase"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(shutdown_done_rx.try_recv(), Err(TryRecvError::Empty));
+        assert!(!cleaned.load(Ordering::SeqCst));
+
+        release_tx.send(()).unwrap();
+        shutdown_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        gesture.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(cleaned.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn terminal_lifecycle_rejects_menu_bar_gesture_before_it_runs() {
+        let lifecycle = crate::lifecycle::AppLifecycle::default();
+        lifecycle.stop_for_test();
+        let ran = AtomicBool::new(false);
+
+        assert!(run_menu_bar_gesture(&lifecycle, || ran.store(true, Ordering::SeqCst)).is_none());
+        assert!(!ran.load(Ordering::SeqCst));
     }
 }
 

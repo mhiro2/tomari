@@ -9,13 +9,43 @@
 //! app drop every transient assumption about what is held.
 
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use block2::RcBlock;
 use objc2_app_kit::{
     NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
 };
 use objc2_foundation::NSNotification;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
+
+use crate::state::AppState;
+
+/// Run the three wake repairs in order, rechecking the terminal lifecycle
+/// between them. A quit that starts while one restart is in progress must not
+/// let the remaining taps come back behind shutdown cleanup.
+fn apply_reset_if_running<K, S, M>(
+    lifecycle: &crate::lifecycle::AppLifecycle,
+    restart_keyboard: K,
+    restart_drag_to_snap: S,
+    restart_drag_to_move: M,
+) where
+    K: FnOnce(),
+    S: FnOnce(),
+    M: FnOnce(),
+{
+    if !lifecycle.is_running() {
+        return;
+    }
+    restart_keyboard();
+    if !lifecycle.is_running() {
+        return;
+    }
+    restart_drag_to_snap();
+    if !lifecycle.is_running() {
+        return;
+    }
+    restart_drag_to_move();
+}
 
 /// Observe wake / session-active notifications for the app's lifetime.
 pub fn install(app: &AppHandle) {
@@ -53,14 +83,62 @@ fn reset(app: &AppHandle) {
     // never delays it (and, transitively, whatever queue the notification
     // center delivers on). `AppState::config_mutation` is not held here:
     // these restarts do not touch the database or the shortcut map, only the
-    // tap-local caps/hyper tracking, so they cannot race a config save/delete
-    // in a way that matters.
-    let handle = app.clone();
-    let _ = std::thread::Builder::new()
-        .name("tomari-wake-reset".into())
-        .spawn(move || {
-            crate::eventtap::restart(&handle);
-            crate::drag_to_snap::restart(&handle);
-            crate::drag_to_move::restart(&handle);
+    // tap-local caps/hyper tracking. The lifecycle owns this worker and each
+    // restart has its own terminal effect gate, so quit can join a reset that
+    // already started without letting any later tap come back.
+    let lifecycle = {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        Arc::clone(&state.lifecycle)
+    };
+    let keyboard_handle = app.clone();
+    let snap_handle = app.clone();
+    let move_handle = app.clone();
+    match lifecycle.spawn_tracked("tomari-wake-reset", move |lifecycle| {
+        apply_reset_if_running(
+            &lifecycle,
+            || crate::eventtap::restart(&keyboard_handle),
+            || crate::drag_to_snap::restart(&snap_handle),
+            || crate::drag_to_move::restart(&move_handle),
+        );
+    }) {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not spawn the wake reset worker"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, mpsc};
+
+    use super::*;
+
+    #[test]
+    fn terminal_quit_stops_a_wake_reset_between_restart_steps() {
+        let lifecycle = Arc::new(crate::lifecycle::AppLifecycle::default());
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let reset_lifecycle = Arc::clone(&lifecycle);
+        let keyboard_tx = ran_tx.clone();
+        let snap_tx = ran_tx.clone();
+        let reset = std::thread::spawn(move || {
+            apply_reset_if_running(
+                &reset_lifecycle,
+                || {
+                    keyboard_tx.send("keyboard").unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || snap_tx.send("drag-to-snap").unwrap(),
+                || ran_tx.send("drag-to-move").unwrap(),
+            );
         });
+
+        assert_eq!(ran_rx.recv().unwrap(), "keyboard");
+        lifecycle.stop_for_test();
+        release_tx.send(()).unwrap();
+
+        reset.join().unwrap();
+        assert!(ran_rx.try_recv().is_err());
+    }
 }

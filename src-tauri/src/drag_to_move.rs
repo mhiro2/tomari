@@ -134,6 +134,14 @@ pub fn restart(app: &AppHandle) {
 /// started successfully, `false` when it is on but failed to start (typically
 /// a missing Input Monitoring grant).
 pub fn restart_result(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return true;
+    };
+    // Runtime effects always precede the tap lock. Shutdown closes this gate,
+    // drains work that already entered it, and only then tears the tap down.
+    let Some(_effect) = state.lifecycle.runtime_effect() else {
+        return true;
+    };
     let mut guard = MOVE_TAP.lock_safe();
     // Published before the old tap goes down, so no reader sees `Healthy` over
     // a tap being torn down; also retires the old callback's generation.
@@ -165,6 +173,14 @@ pub fn restart_result(app: &AppHandle) -> bool {
             false
         }
     }
+}
+
+/// Stop the tap permanently as part of the shared terminal shutdown.
+pub fn teardown() {
+    let mut guard = MOVE_TAP.lock_safe();
+    HEALTH.stop();
+    ENABLED.store(false, Ordering::SeqCst);
+    *guard = None;
 }
 
 /// Whether the drag-to-move tap is currently running. A cheap state read
