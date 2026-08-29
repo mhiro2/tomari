@@ -63,13 +63,32 @@ const ACCEL_TOKEN_GLYPHS: Record<string, string> = {
 };
 
 /**
+ * Bound persisted user-controlled text before it reaches visible copy or an
+ * accessible name. Invalid legacy rows deliberately remain readable from the
+ * database so they can be repaired or deleted, but control and bidi-format
+ * characters must not be able to spoof or destabilize the surrounding UI.
+ */
+export function safeDisplayText(value: string): string {
+  const withoutControls = value
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const codePoints = Array.from(withoutControls);
+  return codePoints.length > 96 ? `${codePoints.slice(0, 96).join('')}…` : withoutControls;
+}
+
+/**
  * Split a canonical accelerator ("Ctrl+Alt+Left") into display chips, mapping
  * each token to its macOS glyph and leaving plain keys (letters, digits, F-keys)
  * as-is. Returns an empty array for an empty/undefined accelerator.
  */
 export function acceleratorChips(accelerator: string | undefined): string[] {
   if (!accelerator) return [];
-  return accelerator.split('+').map((token) => ACCEL_TOKEN_GLYPHS[token] ?? token);
+  return safeDisplayText(accelerator)
+    .split('+')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => ACCEL_TOKEN_GLYPHS[token] ?? token);
 }
 
 export function presetLabel(preset: WindowPreset, t: Translator): string {

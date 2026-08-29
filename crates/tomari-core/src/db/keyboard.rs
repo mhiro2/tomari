@@ -29,6 +29,12 @@ impl Database {
         self.with_conn(|conn| write_hotkey(conn, hk))
     }
 
+    /// Replace one existing hotkey, allowing validation to canonicalize its
+    /// primary key without leaving the raw-ID row behind.
+    pub fn replace_hotkey(&self, previous_id: &str, hk: &Hotkey) -> Result<()> {
+        self.with_conn(|conn| replace_hotkey(conn, previous_id, hk))
+    }
+
     pub fn delete_hotkey(&self, id: &str) -> Result<()> {
         self.with_conn(|conn| {
             let n = conn.execute("DELETE FROM hotkeys WHERE id = ?1", params![id])?;
@@ -45,6 +51,11 @@ impl Database {
 
     pub fn upsert_modifier_rule(&self, rule: &ModifierRule) -> Result<()> {
         self.with_conn(|conn| write_modifier_rule(conn, rule))
+    }
+
+    /// Replace one existing modifier rule, including an ID canonicalization.
+    pub fn replace_modifier_rule(&self, previous_id: &str, rule: &ModifierRule) -> Result<()> {
+        self.with_conn(|conn| replace_modifier_rule(conn, previous_id, rule))
     }
 
     pub fn delete_modifier_rule(&self, id: &str) -> Result<()> {
@@ -71,6 +82,27 @@ pub(super) fn write_hotkey(conn: &Connection, hk: &Hotkey) -> Result<()> {
             enabled = excluded.enabled",
         params![hk.id, hk.label, hk.accelerator, action, hk.enabled as i64],
     )?;
+    Ok(())
+}
+
+fn replace_hotkey(conn: &Connection, previous_id: &str, hk: &Hotkey) -> Result<()> {
+    let action = serde_json::to_string(&hk.action)?;
+    let changed = conn.execute(
+        "UPDATE hotkeys
+         SET id = ?1, label = ?2, accelerator = ?3, action = ?4, enabled = ?5
+         WHERE id = ?6",
+        params![
+            hk.id,
+            hk.label,
+            hk.accelerator,
+            action,
+            hk.enabled as i64,
+            previous_id
+        ],
+    )?;
+    if changed == 0 {
+        return Err(Error::not_found("hotkey", previous_id));
+    }
     Ok(())
 }
 
@@ -106,6 +138,38 @@ pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Res
             rule.enabled as i64
         ],
     )?;
+    Ok(())
+}
+
+fn replace_modifier_rule(conn: &Connection, previous_id: &str, rule: &ModifierRule) -> Result<()> {
+    let modifier = serde_json::to_string(&rule.modifier)?;
+    let side = serde_json::to_string(&rule.side)?;
+    let remap_to = rule
+        .remap_to
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let tap = serde_json::to_string(&rule.tap)?;
+    let changed = conn.execute(
+        "UPDATE modifier_rules
+         SET id = ?1, label = ?2, modifier = ?3, side = ?4,
+             remap_to = ?5, hyper = ?6, tap = ?7, enabled = ?8
+         WHERE id = ?9",
+        params![
+            rule.id,
+            rule.label,
+            modifier,
+            side,
+            remap_to,
+            rule.hyper as i64,
+            tap,
+            rule.enabled as i64,
+            previous_id
+        ],
+    )?;
+    if changed == 0 {
+        return Err(Error::not_found("modifier_rule", previous_id));
+    }
     Ok(())
 }
 
@@ -224,6 +288,35 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_replacement_canonicalizes_the_primary_key_without_leaving_a_copy() {
+        let db = Database::open_in_memory().unwrap();
+        let raw = Hotkey {
+            id: " row ".into(),
+            label: "Raw".into(),
+            accelerator: "Cmd+1".into(),
+            action: AppAction::NoOp,
+            enabled: false,
+        };
+        db.upsert_hotkey(&raw).unwrap();
+        let canonical = Hotkey {
+            id: "row".into(),
+            label: "Canonical".into(),
+            accelerator: "Cmd+2".into(),
+            action: AppAction::TogglePanel,
+            enabled: true,
+        };
+
+        db.replace_hotkey(&raw.id, &canonical).unwrap();
+
+        assert_eq!(db.list_hotkeys().unwrap(), vec![canonical.clone()]);
+        assert_eq!(db.count_hotkeys().unwrap(), 1);
+
+        db.replace_hotkey(&canonical.id, &raw).unwrap();
+        assert_eq!(db.list_hotkeys().unwrap(), vec![raw]);
+        assert_eq!(db.count_hotkeys().unwrap(), 1);
+    }
+
+    #[test]
     fn modifier_rule_round_trip() {
         let db = Database::open_in_memory().unwrap();
         let rule = ModifierRule {
@@ -240,6 +333,41 @@ mod tests {
         assert_eq!(db.list_modifier_rules().unwrap(), vec![rule]);
         db.delete_modifier_rule("m1").unwrap();
         assert!(db.list_modifier_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn modifier_replacement_canonicalizes_the_primary_key_without_leaving_a_copy() {
+        let db = Database::open_in_memory().unwrap();
+        let raw = ModifierRule {
+            id: " rule ".into(),
+            label: "Raw".into(),
+            modifier: ModifierKey::Control,
+            side: KeySide::Left,
+            remap_to: None,
+            hyper: false,
+            tap: AppAction::NoOp,
+            enabled: false,
+        };
+        db.upsert_modifier_rule(&raw).unwrap();
+        let canonical = ModifierRule {
+            id: "rule".into(),
+            label: "Canonical".into(),
+            modifier: ModifierKey::Option,
+            side: KeySide::Right,
+            remap_to: Some(ModifierKey::Control),
+            hyper: false,
+            tap: AppAction::TogglePanel,
+            enabled: true,
+        };
+
+        db.replace_modifier_rule(&raw.id, &canonical).unwrap();
+
+        assert_eq!(db.list_modifier_rules().unwrap(), vec![canonical.clone()]);
+        assert_eq!(db.count_modifier_rules().unwrap(), 1);
+
+        db.replace_modifier_rule(&canonical.id, &raw).unwrap();
+        assert_eq!(db.list_modifier_rules().unwrap(), vec![raw]);
+        assert_eq!(db.count_modifier_rules().unwrap(), 1);
     }
 
     #[test]

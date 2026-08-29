@@ -7,8 +7,11 @@ use tomari_core::{
     AppPaths, AppSettings, DisplayDirection, Hotkey, ModifierRule, PersistedSettings,
     PlacementSlot, StartupConfigurationReset,
 };
-use tomari_keyboard::accelerator;
+use tomari_keyboard::{accelerator, validation as keyboard_validation};
 
+use crate::configuration_warnings::{
+    ConfigurationWarnings, publish_hotkey_issues, publish_modifier_rule_issues,
+};
 use crate::error::CmdError;
 use crate::locks::MutexExt;
 use crate::shortcuts;
@@ -151,6 +154,11 @@ where
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
     settings_for_frontend(state.inner())
+}
+
+#[tauri::command]
+pub fn get_configuration_warnings(state: State<'_, AppState>) -> ConfigurationWarnings {
+    state.configuration_warnings.snapshot()
 }
 
 fn settings_for_frontend(state: &AppState) -> CmdResult<AppSettings> {
@@ -394,7 +402,7 @@ fn save_settings_locked(
     // check runs once below, after every side effect, against the final live
     // state.
     if (command_ime_changed || !command_ime_rules_live(state, settings.command_ime_switch_enabled))
-        && let Err(e) = reload_engine_rules(state)
+        && let Err(e) = reload_engine_rules(app, state)
     {
         tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
     }
@@ -706,35 +714,43 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
 
 #[tauri::command]
 pub async fn list_hotkeys(app: AppHandle) -> CmdResult<Vec<Hotkey>> {
-    off_main(app, |_, state| {
-        state.db.list_hotkeys().map_err(CmdError::from)
+    off_main(app, |app, state| {
+        let _config = lock_config_mutation(state)?;
+        let hotkeys = state.db.list_hotkeys()?;
+        let report = keyboard_validation::validate_hotkeys(hotkeys.clone());
+        publish_hotkey_issues(app, &state.configuration_warnings, report.invalid);
+        // Return the stored representation, including quarantined rows, so the
+        // panel can identify and edit or delete the record that needs repair.
+        Ok(hotkeys)
     })
     .await
 }
 
 #[tauri::command]
-pub async fn save_hotkey(app: AppHandle, hotkey: Hotkey) -> CmdResult<()> {
+pub async fn save_hotkey(app: AppHandle, hotkey: Hotkey) -> CmdResult<Hotkey> {
     off_main(app, move |app, state| {
         save_hotkey_blocking(app, state, hotkey)
     })
     .await
 }
 
-fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> CmdResult<()> {
-    // Don't trust the frontend: normalize the accelerator and reject empty /
-    // overlong ids and labels and bare-letter shortcuts before anything is
-    // stored or registered.
-    let hotkey = crate::validate::sanitize_hotkey(hotkey)?;
+fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> CmdResult<Hotkey> {
     let _config = lock_config_mutation(state)?;
+    let existing = state.db.list_hotkeys()?;
+    // Validate the complete post-upsert collection before writing. Checking
+    // only the candidate would allow a duplicate chord to save successfully
+    // and then quarantine both the new and previously working hotkey.
+    let ValidatedUpsert {
+        value: hotkey,
+        previous,
+    } = validated_hotkey_upsert(hotkey, &existing)?;
     // Registration can fail even for a valid accelerator (e.g. a conflict with
     // another app), so snapshot the stored row and roll back on failure — the
     // DB must not keep a hotkey the UI reported as rejected.
-    let previous = state
-        .db
-        .list_hotkeys()?
-        .into_iter()
-        .find(|h| h.id == hotkey.id);
-    state.db.upsert_hotkey(&hotkey)?;
+    match &previous {
+        Some(row) => state.db.replace_hotkey(&row.id, &hotkey)?,
+        None => state.db.upsert_hotkey(&hotkey)?,
+    }
 
     // A failure of the hotkey being saved — or of any hotkey sharing its
     // accelerator (registration is first-come, so the saved row can win the
@@ -763,7 +779,7 @@ fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> Cm
         // folding the failure judgment and the restore into the registration
         // closure would tie this command's rollback rules into `shortcuts`.
         let restored = match &previous {
-            Some(prev) => state.db.upsert_hotkey(prev),
+            Some(prev) => state.db.replace_hotkey(&hotkey.id, prev),
             None => state.db.delete_hotkey(&hotkey.id),
         };
         if let Err(rollback) = restored {
@@ -774,7 +790,58 @@ fn save_hotkey_blocking(app: &AppHandle, state: &AppState, hotkey: Hotkey) -> Cm
         }
         return Err(error);
     }
-    Ok(())
+    Ok(hotkey)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedUpsert<T> {
+    value: T,
+    previous: Option<T>,
+}
+
+fn validated_hotkey_upsert(
+    candidate: Hotkey,
+    existing: &[Hotkey],
+) -> CmdResult<ValidatedUpsert<Hotkey>> {
+    let raw_candidate_id = candidate.id.clone();
+    let candidate = keyboard_validation::validate_hotkey(candidate)
+        .map_err(|issue| CmdError::other(issue.to_string()))?;
+    // Prefer the exact stored identity submitted by the panel. A legacy raw
+    // ID such as `" row "` canonicalizes to `"row"`; treating only the latter
+    // as the upsert key would leave the raw row in the collection and invent a
+    // duplicate. Falling back to the canonical ID preserves ordinary upsert
+    // semantics for newly entered whitespace around an existing valid ID.
+    let previous = existing
+        .iter()
+        .find(|hotkey| hotkey.id == raw_candidate_id)
+        .or_else(|| existing.iter().find(|hotkey| hotkey.id == candidate.id))
+        .cloned();
+    let mut post_upsert = existing
+        .iter()
+        .filter(|hotkey| {
+            previous
+                .as_ref()
+                .is_none_or(|previous| hotkey.id != previous.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    post_upsert.push(candidate.clone());
+    let report = keyboard_validation::validate_hotkeys(post_upsert);
+    if report.valid.iter().any(|hotkey| hotkey == &candidate) {
+        return Ok(ValidatedUpsert {
+            value: candidate,
+            previous,
+        });
+    }
+    let issue = report
+        .invalid
+        .into_iter()
+        .find(|issue| issue.id == candidate.id)
+        .map_or_else(
+            || "hotkey is invalid in the resulting configuration".to_string(),
+            |issue| issue.to_string(),
+        );
+    Err(CmdError::other(issue))
 }
 
 /// Whether two accelerator spellings denote the same shortcut (e.g.
@@ -827,8 +894,13 @@ fn delete_hotkey_blocking(app: &AppHandle, state: &AppState, id: String) -> CmdR
 
 #[tauri::command]
 pub async fn list_modifier_rules(app: AppHandle) -> CmdResult<Vec<ModifierRule>> {
-    off_main(app, |_, state| {
-        state.db.list_modifier_rules().map_err(CmdError::from)
+    off_main(app, |app, state| {
+        let _config = lock_config_mutation(state)?;
+        let rules = state.db.list_modifier_rules()?;
+        let report = keyboard_validation::validate_modifier_rules(rules.clone());
+        publish_modifier_rule_issues(app, &state.configuration_warnings, report.invalid);
+        // As with hotkeys, quarantined rows remain visible and untouched.
+        Ok(rules)
     })
     .await
 }
@@ -837,15 +909,32 @@ pub async fn list_modifier_rules(app: AppHandle) -> CmdResult<Vec<ModifierRule>>
 // `hidutil` via `reconcile_caps_mapping`) up to twice on the rollback path,
 // synchronously. Moving it off the main thread keeps a slow `hidutil` from
 // freezing the UI, same rationale as `save_settings` above.
-/// Outcome of a modifier-rule save or delete. The rule itself is stored and
-/// live in the engine whenever this is returned at all; `apply_warnings` names
-/// the out-of-band side effect that did not follow — today only
-/// `capsLockRemap`, the Caps Lock HID remap `hidutil` could not bring into
-/// step — so the panel can show the mismatch instead of a clean success.
+/// Outcome of deleting a modifier rule. The deletion is live in the engine
+/// whenever this is returned; `apply_warnings` names an out-of-band side effect
+/// that did not follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleMutationOutcome {
     apply_warnings: Vec<&'static str>,
+}
+
+/// Outcome of saving a modifier rule. Returning the canonical stored rule is
+/// part of the mutation contract: the UI must adopt a trimmed ID or normalized
+/// tap action before it can safely issue the next edit or delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveModifierRuleOutcome {
+    rule: ModifierRule,
+    apply_warnings: Vec<&'static str>,
+}
+
+impl SaveModifierRuleOutcome {
+    fn from_caps_ok(rule: ModifierRule, caps_ok: bool) -> Self {
+        Self {
+            rule,
+            apply_warnings: RuleMutationOutcome::from_caps_ok(caps_ok).apply_warnings,
+        }
+    }
 }
 
 impl RuleMutationOutcome {
@@ -862,9 +951,10 @@ impl RuleMutationOutcome {
 
 #[tauri::command]
 pub async fn save_modifier_rule(
+    app: AppHandle,
     state: State<'_, AppState>,
     rule: ModifierRule,
-) -> CmdResult<RuleMutationOutcome> {
+) -> CmdResult<SaveModifierRuleOutcome> {
     let _config = lock_config_mutation(&state)?;
     // Don't trust the frontend: reject empty / overlong / reserved ids and
     // labels, contradictory hyper+remap rules, unsendable tap keystrokes, and
@@ -873,13 +963,18 @@ pub async fn save_modifier_rule(
     // stored. The stored set is also the snapshot used for both the collision
     // check and the rollback below.
     let existing = state.db.list_modifier_rules()?;
-    let rule = crate::validate::sanitize_modifier_rule(rule, &existing)?;
+    let ValidatedUpsert {
+        value: rule,
+        previous,
+    } = validated_modifier_rule_upsert(rule, &existing)?;
     // Snapshot the stored row so a failed live reload can be rolled back — the
     // DB must not keep a rule the live engine never picked up, which would
     // "save successfully" yet take no effect until the next launch.
-    let previous = existing.into_iter().find(|r| r.id == rule.id);
-    state.db.upsert_modifier_rule(&rule)?;
-    match reload_engine_rules(&state) {
+    match &previous {
+        Some(row) => state.db.replace_modifier_rule(&row.id, &rule)?,
+        None => state.db.upsert_modifier_rule(&rule)?,
+    }
+    match reload_engine_rules(&app, state.inner()) {
         // The engine reloaded but `hidutil` left the Caps Lock remap out of
         // step — not a reason to roll back the save (the rule *is* live in the
         // engine), but a live mismatch the panel must show rather than a clean
@@ -888,18 +983,18 @@ pub async fn save_modifier_rule(
             if !caps_ok {
                 tracing::warn!("caps-lock HID remap did not match the reloaded rules after save");
             }
-            Ok(RuleMutationOutcome::from_caps_ok(caps_ok))
+            Ok(SaveModifierRuleOutcome::from_caps_ok(rule, caps_ok))
         }
         Err(error) => {
             let restored = match &previous {
-                Some(prev) => state.db.upsert_modifier_rule(prev),
+                Some(prev) => state.db.replace_modifier_rule(&rule.id, prev),
                 None => state.db.delete_modifier_rule(&rule.id),
             };
             if let Err(rollback) = restored {
                 tracing::warn!(error = %rollback, "failed to roll back modifier rule after reload failure");
             }
             // Best-effort: bring the live engine back in step with the restored DB.
-            if let Err(rollback) = reload_engine_rules(&state) {
+            if let Err(rollback) = reload_engine_rules(&app, state.inner()) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
             Err(error)
@@ -907,10 +1002,51 @@ pub async fn save_modifier_rule(
     }
 }
 
+fn validated_modifier_rule_upsert(
+    candidate: ModifierRule,
+    existing: &[ModifierRule],
+) -> CmdResult<ValidatedUpsert<ModifierRule>> {
+    let raw_candidate_id = candidate.id.clone();
+    let candidate = keyboard_validation::validate_modifier_rule(candidate)
+        .map_err(|issue| CmdError::other(issue.to_string()))?;
+    let previous = existing
+        .iter()
+        .find(|rule| rule.id == raw_candidate_id)
+        .or_else(|| existing.iter().find(|rule| rule.id == candidate.id))
+        .cloned();
+    let mut post_upsert = existing
+        .iter()
+        .filter(|rule| {
+            previous
+                .as_ref()
+                .is_none_or(|previous| rule.id != previous.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    post_upsert.push(candidate.clone());
+    let report = keyboard_validation::validate_modifier_rules(post_upsert);
+    if report.valid.iter().any(|rule| rule == &candidate) {
+        return Ok(ValidatedUpsert {
+            value: candidate,
+            previous,
+        });
+    }
+    let issue = report
+        .invalid
+        .into_iter()
+        .find(|issue| issue.id == candidate.id)
+        .map_or_else(
+            || "modifier rule is invalid in the resulting configuration".to_string(),
+            |issue| issue.to_string(),
+        );
+    Err(CmdError::other(issue))
+}
+
 // `async fn`: same rationale as `save_modifier_rule` — a failed reload can
 // shell out to `hidutil` synchronously up to twice on the rollback path.
 #[tauri::command]
 pub async fn delete_modifier_rule(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<RuleMutationOutcome> {
@@ -923,7 +1059,7 @@ pub async fn delete_modifier_rule(
         .into_iter()
         .find(|r| r.id == id);
     state.db.delete_modifier_rule(&id)?;
-    match reload_engine_rules(&state) {
+    match reload_engine_rules(&app, state.inner()) {
         // Same as `save_modifier_rule`: the engine reloaded but the Caps Lock
         // remap did not follow; report it rather than roll back a delete that
         // did take effect in the engine.
@@ -940,7 +1076,7 @@ pub async fn delete_modifier_rule(
                 tracing::warn!(error = %rollback, "failed to restore modifier rule after reload failure");
             }
             // Best-effort: bring the live engine back in step with the restored DB.
-            if let Err(rollback) = reload_engine_rules(&state) {
+            if let Err(rollback) = reload_engine_rules(&app, state.inner()) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
             Err(error)
@@ -948,15 +1084,6 @@ pub async fn delete_modifier_rule(
     }
 }
 
-/// Reload the engine's rule set from the database, returning whether the Caps
-/// Lock HID remap ended up matching it. `Err` is reserved for the DB read
-/// failing outright; a `hidutil` failure while reconciling the remap is instead
-/// reported as `Ok(false)`, since the engine itself did reload successfully —
-/// only the out-of-band remap is left out of step. `save_modifier_rule` /
-/// `delete_modifier_rule` return a `false` as a `capsLockRemap` apply warning;
-/// `save_settings` ignores it outright,
-/// because its `capsLockRemap` warning comes from one authoritative live
-/// check after all of the save's side effects, not from intermediate results.
 /// Whether the live engine's rule set is in step with `want` for the built-in
 /// ⌘ IME-toggle rules: all of them present when the setting is on, none when it
 /// is off. Used by `save_settings` to detect a rule reload that silently failed
@@ -975,10 +1102,21 @@ fn command_ime_rules_live(state: &AppState, want: bool) -> bool {
     }
 }
 
-fn reload_engine_rules(state: &AppState) -> CmdResult<bool> {
+/// Reload the engine's rule set from the database, returning whether the Caps
+/// Lock HID remap ended up matching it. `Err` is reserved for the DB read
+/// failing outright; a `hidutil` failure while reconciling the remap is instead
+/// reported as `Ok(false)`, since the engine itself did reload successfully —
+/// only the out-of-band remap is left out of step. Rule mutations return a
+/// `false` as a `capsLockRemap` apply warning. `save_settings` ignores it here
+/// because its warning comes from one authoritative live check after all side
+/// effects, not from an intermediate result.
+fn reload_engine_rules(app: &AppHandle, state: &AppState) -> CmdResult<bool> {
     // The stored rules plus the built-in left/right ⌘ IME toggle, which lives
-    // behind a setting rather than as an editable row.
-    let mut rules = state.db.list_modifier_rules()?;
+    // behind a setting rather than as an editable row. Validate persisted rows
+    // first so a legacy or hand-edited record can never enter the live engine.
+    let report = keyboard_validation::validate_modifier_rules(state.db.list_modifier_rules()?);
+    publish_modifier_rule_issues(app, &state.configuration_warnings, report.invalid);
+    let mut rules = report.valid;
     if state.settings.lock_safe().command_ime_switch_enabled {
         rules.extend(tomari_core::defaults::command_ime_rules());
     }
@@ -1197,7 +1335,7 @@ fn set_hotkeys_suspended_blocking(
 
 #[tauri::command]
 pub fn validate_accelerator(accelerator: String) -> AcceleratorCheck {
-    match accelerator::normalize(&accelerator) {
+    match accelerator::normalize_global(&accelerator) {
         Ok(normalized) => AcceleratorCheck {
             valid: true,
             normalized: Some(normalized),
@@ -1367,6 +1505,128 @@ mod tests {
             false,
             Some(recovery),
         )
+    }
+
+    fn test_hotkey(id: &str, accelerator: &str) -> Hotkey {
+        Hotkey {
+            id: id.into(),
+            label: format!("Hotkey {id}"),
+            accelerator: accelerator.into(),
+            action: tomari_core::AppAction::NoOp,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn hotkey_save_validates_the_post_upsert_collection() {
+        let existing = vec![
+            test_hotkey("working", "Cmd+K"),
+            test_hotkey("legacy-invalid", "A"),
+        ];
+
+        let duplicate = test_hotkey("candidate", "command+k");
+        assert!(validated_hotkey_upsert(duplicate, &existing).is_err());
+
+        let accepted =
+            validated_hotkey_upsert(test_hotkey("candidate", " command + shift + j "), &existing)
+                .expect("an unrelated quarantined row must not block a valid save");
+        assert_eq!(accepted.value.accelerator, "Shift+Cmd+J");
+        assert!(accepted.previous.is_none());
+    }
+
+    #[test]
+    fn hotkey_upsert_replaces_the_exact_raw_id_before_canonicalizing_it() {
+        let raw = test_hotkey(" row ", "Cmd+K");
+
+        let upsert = validated_hotkey_upsert(raw.clone(), std::slice::from_ref(&raw))
+            .expect("editing the singleton raw-ID row must not invent a duplicate");
+
+        assert_eq!(upsert.value.id, "row");
+        assert_eq!(upsert.previous, Some(raw));
+    }
+
+    #[test]
+    fn hotkey_upsert_does_not_hide_a_real_canonical_id_collision() {
+        let raw = test_hotkey(" row ", "Cmd+K");
+        let canonical = test_hotkey("row", "Cmd+J");
+
+        assert!(validated_hotkey_upsert(raw.clone(), &[raw, canonical]).is_err());
+    }
+
+    fn test_modifier_rule(
+        id: &str,
+        modifier: tomari_core::ModifierKey,
+        side: tomari_core::KeySide,
+    ) -> ModifierRule {
+        ModifierRule {
+            id: id.into(),
+            label: format!("Rule {id}"),
+            modifier,
+            side,
+            remap_to: None,
+            hyper: false,
+            tap: tomari_core::AppAction::NoOp,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn modifier_save_validates_the_post_upsert_collection() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let occupied = test_modifier_rule("working", ModifierKey::Option, KeySide::Left);
+        let mut legacy_invalid =
+            test_modifier_rule("legacy-invalid", ModifierKey::CapsLock, KeySide::Either);
+        legacy_invalid.hyper = true;
+        legacy_invalid.remap_to = Some(ModifierKey::Control);
+        let existing = vec![occupied, legacy_invalid];
+
+        let duplicate = test_modifier_rule("candidate", ModifierKey::Option, KeySide::Left);
+        assert!(validated_modifier_rule_upsert(duplicate, &existing).is_err());
+
+        let accepted = validated_modifier_rule_upsert(
+            test_modifier_rule(" candidate ", ModifierKey::Shift, KeySide::Right),
+            &existing,
+        )
+        .expect("an unrelated quarantined row must not block a valid save");
+        assert_eq!(accepted.value.id, "candidate");
+        assert!(accepted.previous.is_none());
+    }
+
+    #[test]
+    fn modifier_upsert_replaces_the_exact_raw_id_before_canonicalizing_it() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let raw = test_modifier_rule(" rule ", ModifierKey::Shift, KeySide::Right);
+
+        let upsert = validated_modifier_rule_upsert(raw.clone(), std::slice::from_ref(&raw))
+            .expect("editing the singleton raw-ID rule must not invent a duplicate");
+
+        assert_eq!(upsert.value.id, "rule");
+        assert_eq!(upsert.previous, Some(raw));
+    }
+
+    #[test]
+    fn modifier_upsert_does_not_hide_a_real_canonical_id_collision() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let raw = test_modifier_rule(" rule ", ModifierKey::Shift, KeySide::Right);
+        let canonical = test_modifier_rule("rule", ModifierKey::Control, KeySide::Either);
+
+        assert!(validated_modifier_rule_upsert(raw.clone(), &[raw, canonical]).is_err());
+    }
+
+    #[test]
+    fn modifier_save_outcome_serializes_the_canonical_rule_and_warning() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let rule = test_modifier_rule("canonical", ModifierKey::Shift, KeySide::Right);
+        let value =
+            serde_json::to_value(SaveModifierRuleOutcome::from_caps_ok(rule.clone(), false))
+                .unwrap();
+
+        assert_eq!(value["rule"], serde_json::to_value(rule).unwrap());
+        assert_eq!(value["applyWarnings"], serde_json::json!(["capsLockRemap"]));
     }
 
     #[test]

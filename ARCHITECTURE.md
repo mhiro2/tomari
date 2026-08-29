@@ -62,7 +62,7 @@ with the lid closed).
 | Crate                      | Role                                                                                                                                                                                                         |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `tomari-core`              | Domain types (`domain/`), `Error`, `AppPaths`, the SQLite `Database`, and `defaults` for first-run seeding. No OS dependencies                                                                               |
-| `tomari-keyboard`          | `accelerator` (validation/normalization of shortcut strings) and `ModifierEngine` (tap/hold detection). All pure                                                                                             |
+| `tomari-keyboard`          | `accelerator`, persisted hotkey/modifier-rule validation and canonicalization, and `ModifierEngine` (tap/hold detection). All pure                                                                            |
 | `tomari-window`            | `geometry` (pure preset → frame computation), the `WindowManager` / `WindowHandle` traits plus `MockWindowManager` for tests, and `macos` (the Accessibility API implementation, `cfg(target_os = "macos")`) |
 | `src-tauri` (`tomari-app`) | The menu-bar-resident Tauri v2 app. Tray, Tauri commands, global shortcuts, CGEventTap, action dispatch                                                                                                      |
 | `src/`                     | React 19 + TypeScript window UI (pnpm workspace, Vite build)                                                                                                                                                 |
@@ -266,6 +266,20 @@ Global shortcuts are a separate channel registered with Tauri's
 looks the shortcut up in `AppState::shortcuts` (`Shortcut → AppAction`) and
 dispatches. Registration failures (invalid or conflicting accelerators) are
 returned as errors so the UI can surface them.
+
+Both keyboard channels accept persisted rows only through the pure
+`tomari_keyboard::validation` boundary. It runs on the complete collection at
+startup and every hotkey or modifier-rule reload; a save validates the complete
+post-upsert collection before writing. Intrinsic validation trims and bounds ids
+and labels, canonicalizes accelerator and `SendKeystroke` syntax, rejects
+modifier-free global shortcuts other than function keys, and excludes malformed
+keystrokes, built-in rule ids and Command-key slots, and rules that combine
+Hyper with a remap. Collection validation detects canonical-id collisions,
+duplicate accelerators, and duplicate modifier slots. Every member of a
+collision is quarantined, independently of row order, and disabled rows still
+participate so enabling one cannot silently displace another. Only canonical,
+accepted rows reach the shortcut map or modifier engine; the built-in left/right
+Command IME rules are appended after persisted-rule validation.
 
 ## 5. Window management
 
@@ -612,6 +626,12 @@ and applies none of them.
   keyboard/drag taps, Caps Lock remapping, menu-bar automation, login-item
   writes, and permission-triggered tap restarts are not attempted in that
   session.
+- A readable keyboard row that fails semantic validation does not trigger that
+  process-wide recovery state. It stays unchanged in SQLite and remains visible
+  through the list commands so the panel can identify it, but it is quarantined
+  from every live reload. Other valid rows continue operating. This also covers
+  records written by older releases or edited directly in SQLite; runtime safety
+  never depends on the current UI having produced every row.
 - Recovery is an explicit process boundary. `get_settings` identifies
   retryable failures with `settingsRecoveryRequired` and quarantined databases
   with `databaseResetRequired`; ordinary configuration mutations reject, and
@@ -727,7 +747,10 @@ and applies none of them.
   effects only for the toggles that actually changed (so flipping an unrelated
   preference never tears down the event tap and briefly drops key monitoring) —
   flipping the ⌘ IME switch reassembles the engine's rules via
-  `reload_engine_rules`. Tauri runs a synchronous command on the main thread,
+  `reload_engine_rules`. Hotkey and modifier-rule saves return the canonical
+  stored row; the frontend replaces the submitted row with that response so an
+  ID trimmed during validation is used by every subsequent edit or delete.
+  Tauri runs a synchronous command on the main thread,
   so the hotkey and modifier-rule commands — which reach the database (a
   `SQLITE_BUSY` wait of up to five seconds) and orchestrate a global-shortcut
   re-registration — are `async fn`s whose body runs on the blocking pool via
@@ -748,6 +771,21 @@ and applies none of them.
   (`{ code, message }`, `src-tauri/src/error.rs`): the frontend localizes the
   frequent `code`s (missing permission, no focused window, shortcut conflict)
   and falls back to the English `message` for the rest.
+- **Configuration warnings**: `AppState::configuration_warnings` holds the
+  complete hotkey/modifier quarantine snapshot and increments its revision only
+  when visible contents change. The frontend subscribes to
+  `tomari:configuration-warnings-changed` before pulling
+  `get_configuration_warnings`, then accepts only a strictly newer revision;
+  listener failure still leaves the pull as a useful snapshot, and every panel
+  show re-pulls both warning channels so a missed event or transient command
+  failure self-heals. Warning rows retain the exact raw identity for deletion,
+  while all persisted user-controlled display text is stripped of control and
+  bidi-format characters and bounded before reaching visible or accessible UI.
+  This channel is deliberately separate from `apply_warnings`: configuration
+  warnings explain saved records that were not allowed to become live, while
+  apply warnings describe otherwise-valid configuration whose OS side effect
+  did not apply. The recovery interlock mounts neither warning channel until
+  settings are trustworthy.
 - **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
   `WindowView` / `KeyboardView` / `MenuBarView` / `SessionView` /
   `GeneralView` directly; there is no Overview route. Each detail screen pairs
@@ -782,7 +820,11 @@ and applies none of them.
   restoring the old preset palette. `KeyboardView` owns general keyboard and
   modifier tap actions, including optional remembered-position restore. Both
   reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
-  shortcuts (`set_hotkeys_suspended`) while capturing a chord.
+  shortcuts (`set_hotkeys_suspended`) while capturing a chord. Quarantined
+  keyboard records produce a persistent, localized amber shell banner whose
+  action opens and focuses the Keyboard explanation; that view groups the
+  affected records and localizes each stable reason code while retaining the
+  persisted identity needed to repair or remove the underlying row.
 - **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way terminal
   lifecycle with a non-terminal `Recovering` sub-state:
   `Running → Recovering → ShuttingDown → Stopped` on successful repair, or

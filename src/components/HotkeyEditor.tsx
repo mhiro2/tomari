@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel } from '../lib/format';
+import { actionLabel, safeDisplayText } from '../lib/format';
 import { useT } from '../lib/i18n';
 import type { AppAction, Hotkey } from '../lib/types';
 import { ShortcutRecorder } from './ShortcutRecorder';
@@ -29,7 +29,8 @@ export function HotkeyRow({
 }) {
   const t = useT();
   const [confirming, setConfirming] = useState(false);
-  const action = actionLabel(hotkey.action, t);
+  const action = safeDisplayText(actionLabel(hotkey.action, t));
+  const label = safeDisplayText(hotkey.label);
 
   function handleDeleteClick() {
     if (confirming) {
@@ -43,12 +44,12 @@ export function HotkeyRow({
   return (
     <SettingsRow
       title={action}
-      description={hotkey.label !== action ? hotkey.label : undefined}
+      description={label && label !== action ? label : undefined}
       trail={
         <>
           <span inert={saving}>
             <ShortcutRecorder
-              value={hotkey.accelerator}
+              value={safeDisplayText(hotkey.accelerator)}
               onCapture={onAccelerator}
               ariaLabel={t('keyboard.changeShortcut', { label: action })}
             />
@@ -115,8 +116,8 @@ export function AddHotkeyForm({
         action,
         enabled: true,
       };
-      await api.saveHotkey(hotkey);
-      onAdded(hotkey);
+      const saved = await api.saveHotkey(hotkey);
+      onAdded(saved);
       setLabel('');
       setAccelerator('');
     } catch (error) {

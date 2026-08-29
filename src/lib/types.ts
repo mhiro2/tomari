@@ -118,6 +118,44 @@ export interface ModifierRule {
   enabled: boolean;
 }
 
+// Stable validation codes from the persisted keyboard configuration checker.
+// These are deliberately not backend-authored prose: the panel maps every code
+// to copy in the selected UI language.
+export const CONFIGURATION_ISSUE_REASONS = [
+  'emptyId',
+  'idTooLong',
+  'emptyLabel',
+  'labelTooLong',
+  'invalidAccelerator',
+  'unsafeGlobalShortcut',
+  'invalidKeystroke',
+  'reservedRuleId',
+  'hyperWithRemap',
+  'reservedCommandSlot',
+  'duplicateId',
+  'duplicateAccelerator',
+  'duplicateModifierSlot',
+] as const;
+
+export type ConfigurationIssueReason = (typeof CONFIGURATION_ISSUE_REASONS)[number];
+
+export interface ConfigurationIssue {
+  // The persisted row identity. It remains available even when the label or
+  // another editable field is invalid, so reports stay stable across pulls.
+  id: string;
+  label: string;
+  reason: ConfigurationIssueReason;
+}
+
+// Full process snapshot returned by `get_configuration_warnings` and emitted
+// through `tomari:configuration-warnings-changed`. Revisions are monotonic for
+// the current backend process; the UI accepts strictly newer snapshots only.
+export interface ConfigurationWarnings {
+  invalidHotkeys: ConfigurationIssue[];
+  invalidModifierRules: ConfigurationIssue[];
+  revision: number;
+}
+
 export interface AppSettings {
   launchAtLogin: boolean;
   language: Language;
@@ -285,12 +323,16 @@ export interface SaveSettingsOutcome {
   applyWarnings: string[];
 }
 
-// Outcome of `save_modifier_rule` / `delete_modifier_rule`. The rule is stored
-// and live whenever this comes back at all; `applyWarnings` names an
-// out-of-band side effect that did not follow (`capsLockRemap`: the Caps Lock
-// HID remap could not be brought into step), so the panel shows the mismatch
-// instead of a clean success.
+// Outcome of `delete_modifier_rule`. The deletion is live whenever this comes
+// back; `applyWarnings` names an out-of-band side effect that did not follow.
 export interface RuleMutationOutcome {
+  applyWarnings: string[];
+}
+
+// Outcome of `save_modifier_rule`. `rule` is the canonical stored value and
+// must replace the submitted row before the next edit or delete.
+export interface SaveModifierRuleOutcome {
+  rule: ModifierRule;
   applyWarnings: string[];
 }
 

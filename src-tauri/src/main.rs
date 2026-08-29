@@ -5,6 +5,7 @@ mod actions;
 mod capsmap;
 mod childproc;
 mod commands;
+mod configuration_warnings;
 #[cfg(target_os = "macos")]
 mod displays;
 #[cfg(target_os = "macos")]
@@ -45,9 +46,10 @@ use std::path::Path;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 use tomari_core::{AppPaths, AppSettings, Database, PersistedSettings, defaults};
-use tomari_keyboard::ModifierEngine;
+use tomari_keyboard::{ModifierEngine, validation as keyboard_validation};
 use tomari_window::WindowManager;
 
+use crate::configuration_warnings::ConfigurationIssue;
 use crate::instance_lock::{AcquireError, InstanceLock, Outcome};
 use crate::locks::MutexExt;
 use crate::state::AppState;
@@ -156,6 +158,7 @@ fn main() {
         .manage(commands::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::get_configuration_warnings,
             commands::retry_settings_recovery,
             commands::reset_settings_recovery,
             commands::save_settings,
@@ -610,6 +613,8 @@ enum Initialization {
 struct ReadyConfiguration {
     settings: AppSettings,
     rules: Vec<tomari_core::ModifierRule>,
+    invalid_hotkeys: Vec<ConfigurationIssue>,
+    invalid_modifier_rules: Vec<ConfigurationIssue>,
     first_run: bool,
     dropped_rules: usize,
     dropped_hotkeys: usize,
@@ -708,13 +713,17 @@ fn build_state(paths: &AppPaths) -> AppState {
         match load_startup_configuration(&db) {
             Ok(StartupConfiguration::Ready(ready)) => {
                 warn_on_undecodable_rows(ready.dropped_rules, ready.dropped_hotkeys);
-                return AppState::new(
+                let state = AppState::new(
                     db,
                     ModifierEngine::new(ready.rules),
                     make_window_manager(),
                     ready.settings,
                     ready.first_run,
                 );
+                state
+                    .configuration_warnings
+                    .replace_all(ready.invalid_hotkeys, ready.invalid_modifier_rules);
+                return state;
             }
             Ok(StartupConfiguration::RecoveryRequired(recovery)) => {
                 return recovery_state(db, recovery);
@@ -790,7 +799,28 @@ fn load_startup_configuration(db: &Database) -> Result<StartupConfiguration, tom
             ));
         }
     };
-    let mut rules = report.modifier_rules;
+    let hotkey_validation = keyboard_validation::validate_hotkeys(report.hotkeys);
+    let modifier_rule_validation =
+        keyboard_validation::validate_modifier_rules(report.modifier_rules);
+    let invalid_hotkeys = hotkey_validation
+        .invalid
+        .into_iter()
+        .map(ConfigurationIssue::from)
+        .collect::<Vec<_>>();
+    let invalid_modifier_rules = modifier_rule_validation
+        .invalid
+        .into_iter()
+        .map(ConfigurationIssue::from)
+        .collect::<Vec<_>>();
+    if !invalid_hotkeys.is_empty() || !invalid_modifier_rules.is_empty() {
+        tracing::warn!(
+            hotkeys = invalid_hotkeys.len(),
+            modifier_rules = invalid_modifier_rules.len(),
+            "quarantining invalid persisted keyboard configuration"
+        );
+    }
+
+    let mut rules = modifier_rule_validation.valid;
     let dropped_rules = report.modifier_rule_rows.skipped;
     let dropped_hotkeys = report.hotkey_rows.skipped;
 
@@ -800,6 +830,8 @@ fn load_startup_configuration(db: &Database) -> Result<StartupConfiguration, tom
     Ok(StartupConfiguration::Ready(ReadyConfiguration {
         settings,
         rules,
+        invalid_hotkeys,
+        invalid_modifier_rules,
         first_run: initialization == Initialization::FirstRun,
         dropped_rules,
         dropped_hotkeys,
@@ -1707,6 +1739,91 @@ mod tests {
             seed_first_run_defaults(&db).unwrap(),
             Initialization::Existing
         );
+    }
+
+    #[test]
+    fn startup_quarantines_invalid_keyboard_rows_without_rewriting_them() {
+        use crate::configuration_warnings::ConfigurationIssueReason;
+        use tomari_core::{AppAction, Hotkey, KeySide, ModifierKey, ModifierRule};
+
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&AppSettings::default()).unwrap();
+
+        let valid_hotkey = Hotkey {
+            id: "valid-hotkey".into(),
+            label: "Valid hotkey".into(),
+            accelerator: "command+shift+v".into(),
+            action: AppAction::TogglePanel,
+            enabled: true,
+        };
+        let invalid_hotkey = Hotkey {
+            id: "unsafe-hotkey".into(),
+            label: "Unsafe hotkey".into(),
+            accelerator: "A".into(),
+            action: AppAction::TogglePanel,
+            // Disabled rows still have to warn: enabling one later must never
+            // turn a previously unreviewed global binding live.
+            enabled: false,
+        };
+        let valid_rule = ModifierRule {
+            id: "valid-rule".into(),
+            label: "Caps Lock to Control".into(),
+            modifier: ModifierKey::CapsLock,
+            side: KeySide::Either,
+            remap_to: Some(ModifierKey::Control),
+            hyper: false,
+            tap: AppAction::NoOp,
+            enabled: true,
+        };
+        let invalid_rule = ModifierRule {
+            id: "contradictory-rule".into(),
+            label: "Contradictory rule".into(),
+            modifier: ModifierKey::Option,
+            side: KeySide::Left,
+            remap_to: Some(ModifierKey::Control),
+            hyper: true,
+            tap: AppAction::NoOp,
+            enabled: false,
+        };
+        for hotkey in [&valid_hotkey, &invalid_hotkey] {
+            db.upsert_hotkey(hotkey).unwrap();
+        }
+        for rule in [&valid_rule, &invalid_rule] {
+            db.upsert_modifier_rule(rule).unwrap();
+        }
+        let stored_hotkeys = db.list_hotkeys().unwrap();
+        let stored_rules = db.list_modifier_rules().unwrap();
+
+        let ready = match load_startup_configuration(&db).unwrap() {
+            StartupConfiguration::Ready(ready) => ready,
+            StartupConfiguration::RecoveryRequired(_) => {
+                panic!("semantic row defects must not block valid configuration")
+            }
+        };
+
+        assert_eq!(ready.invalid_hotkeys.len(), 1);
+        assert_eq!(ready.invalid_hotkeys[0].id, invalid_hotkey.id);
+        assert_eq!(
+            ready.invalid_hotkeys[0].reason,
+            ConfigurationIssueReason::UnsafeGlobalShortcut
+        );
+        assert_eq!(ready.invalid_modifier_rules.len(), 1);
+        assert_eq!(ready.invalid_modifier_rules[0].id, invalid_rule.id);
+        assert_eq!(
+            ready.invalid_modifier_rules[0].reason,
+            ConfigurationIssueReason::HyperWithRemap
+        );
+        assert!(ready.rules.iter().any(|rule| rule.id == valid_rule.id));
+        assert!(ready.rules.iter().all(|rule| rule.id != invalid_rule.id));
+        for built_in in defaults::command_ime_rules() {
+            assert!(
+                ready.rules.iter().any(|rule| rule.id == built_in.id),
+                "built-in IME rules are appended after persisted validation"
+            );
+        }
+
+        assert_eq!(db.list_hotkeys().unwrap(), stored_hotkeys);
+        assert_eq!(db.list_modifier_rules().unwrap(), stored_rules);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //!
 //! Accelerators are normalized to a canonical form — modifiers in the fixed
 //! order `Ctrl, Alt, Shift, Cmd` followed by a single key — so that the same
-//! chord typed two different ways compares equal and round-trips cleanly into
-//! Tauri's global-shortcut plugin.
+//! chord typed two different ways compares equal. [`normalize_global`] also
+//! adapts that form to Tauri's global-shortcut parser where necessary.
 
 use crate::error::{Error, Result};
 
@@ -62,9 +62,9 @@ const MAX_FUNCTION_KEY: u32 = 20;
 /// Alias → canonical spelling for every named (non-alphanumeric, non-function)
 /// key the parser recognizes. Kept as data — rather than a `match` — so
 /// [`all_canonical_keys`] enumerates the same set the parser accepts and the
-/// two cannot drift. Canonical names match what global-hotkey's accelerator
-/// parser (`global_hotkey::hotkey::parse_key`) accepts, since that is the
-/// crate `shortcuts::register_all` hands the canonical string to.
+/// two cannot drift. Most canonical names also match global-hotkey's parser;
+/// [`parse_global`] translates the one semantic exception (`Plus`) into the
+/// equivalent `Shift+Equal` chord before a value reaches Tauri.
 const NAMED_KEYS: &[(&str, &str)] = &[
     ("left", "Left"),
     ("right", "Right"),
@@ -192,9 +192,32 @@ pub fn parse(input: &str) -> Result<Accelerator> {
     }
 }
 
+/// Parse an accelerator for registration as a system-wide shortcut.
+///
+/// Tauri's global-shortcut parser does not recognize `Plus`, while Tomari's
+/// keystroke sender does. A plus key is physically Shift+Equal, so global
+/// hotkeys use that equivalent spelling. Keeping this conversion separate
+/// lets `SendKeystroke("Plus")` retain its direct key representation while
+/// guaranteeing that every validated global-hotkey string is registrable by
+/// Tauri's parser.
+pub fn parse_global(input: &str) -> Result<Accelerator> {
+    parse(input).map(|mut accelerator| {
+        if accelerator.key == "Plus" {
+            accelerator.key = "Equal".to_owned();
+            accelerator.shift = true;
+        }
+        accelerator
+    })
+}
+
 /// Normalize an accelerator string to its canonical form.
 pub fn normalize(input: &str) -> Result<String> {
     parse(input).map(|a| a.to_canonical())
+}
+
+/// Normalize an accelerator for Tauri global-shortcut registration.
+pub fn normalize_global(input: &str) -> Result<String> {
+    parse_global(input).map(|a| a.to_canonical())
 }
 
 /// Whether the accelerator string is well-formed.
@@ -260,6 +283,16 @@ mod tests {
         assert_eq!(normalize("cmd+bracketright").unwrap(), "Cmd+BracketRight");
         assert_eq!(normalize("cmd+backslash").unwrap(), "Cmd+Backslash");
         assert_eq!(normalize("cmd+backquote").unwrap(), "Cmd+Backquote");
+    }
+
+    #[test]
+    fn global_plus_uses_the_registrable_shift_equal_spelling() {
+        assert_eq!(normalize("cmd+plus").unwrap(), "Cmd+Plus");
+        assert_eq!(normalize_global("cmd+plus").unwrap(), "Shift+Cmd+Equal");
+        assert_eq!(
+            normalize_global("cmd+shift+plus").unwrap(),
+            "Shift+Cmd+Equal"
+        );
     }
 
     #[test]

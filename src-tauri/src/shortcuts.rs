@@ -7,7 +7,9 @@ use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tomari_core::{AppAction, Hotkey};
+use tomari_keyboard::validation::{self, InvalidRecord};
 
+use crate::configuration_warnings::publish_hotkey_issues;
 use crate::locks::MutexExt;
 use crate::state::AppState;
 
@@ -43,20 +45,24 @@ pub(crate) fn action_for_shortcut(state: &AppState, shortcut: &Shortcut) -> Opti
     state.shortcuts.lock_safe().get(shortcut).cloned()
 }
 
-fn hotkeys_for_registration(state: &AppState) -> Result<Vec<Hotkey>, String> {
-    if !state.keyboard_enabled() {
-        return Ok(Vec::new());
+struct PreparedHotkeys {
+    live: Vec<Hotkey>,
+    invalid: Vec<InvalidRecord>,
+}
+
+/// Validate a complete persisted collection before selecting enabled rows.
+/// Disabled rows remain part of collision detection and the warning report,
+/// but no disabled or invalid row can reach the OS registration boundary.
+fn prepare_hotkeys_for_registration(hotkeys: Vec<Hotkey>) -> PreparedHotkeys {
+    let report = validation::validate_hotkeys(hotkeys);
+    PreparedHotkeys {
+        live: report
+            .valid
+            .into_iter()
+            .filter(|hotkey| hotkey.enabled)
+            .collect(),
+        invalid: report.invalid,
     }
-    state
-        .db
-        .list_hotkeys()
-        .map(|hotkeys| {
-            hotkeys
-                .into_iter()
-                .filter(|hotkey| hotkey.enabled)
-                .collect()
-        })
-        .map_err(|error| error.to_string())
 }
 
 /// Re-register every enabled hotkey from the database, replacing the previous
@@ -66,20 +72,51 @@ fn hotkeys_for_registration(state: &AppState) -> Result<Vec<Hotkey>, String> {
 /// toggling every other hotkey. `Err` is reserved for not being able to read
 /// the hotkey list at all, or for the main thread not answering.
 ///
-/// The database read happens on the caller's thread; everything that touches
-/// the global-shortcut plugin, and the dispatch map with it, runs on the main
-/// thread (see [`on_main_thread`]). Callable from any thread.
+/// Persisted rows are validated as a complete collection before anything is
+/// unregistered. Semantically invalid rows remain stored for repair but are
+/// quarantined from the live runtime and surfaced through configuration
+/// warnings. The database read happens on the caller's thread; everything that
+/// touches the global-shortcut plugin, and the dispatch map with it, runs on
+/// the main thread (see [`on_main_thread`]). Callable from any thread.
 pub fn register_all(app: &AppHandle, state: &AppState) -> Result<Vec<RegistrationFailure>, String> {
-    // Read the hotkey list *before* unregistering anything: if the DB cannot be
-    // read, bailing out leaves the current, working set untouched. When the
-    // master switch is off, `hotkeys_for_registration` deliberately skips the
-    // DB read; releasing live shortcuts must not be blocked by an unrelated
-    // persistence failure.
-    let result = match hotkeys_for_registration(state) {
-        Ok(hotkeys) => on_main_thread(app, move |app, state| {
-            apply_registrations(app, state, hotkeys)
-        }),
-        Err(e) => Err(e),
+    let result = if state.keyboard_enabled() {
+        // Read and validate *before* unregistering anything: a hard read error
+        // leaves the current, working set untouched. Warning event delivery is
+        // advisory and cannot prevent the accepted rows from becoming live.
+        match state.db.list_hotkeys() {
+            Ok(hotkeys) => {
+                let prepared = prepare_hotkeys_for_registration(hotkeys);
+                publish_hotkey_issues(app, &state.configuration_warnings, prepared.invalid);
+                on_main_thread(app, move |app, state| {
+                    apply_registrations(app, state, prepared.live)
+                })
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    } else {
+        // Release first. A damaged or temporarily unreadable database must
+        // never keep a shortcut live after the master switch is turned off.
+        let result = on_main_thread(app, |app, state| {
+            apply_registrations(app, state, Vec::new())
+        });
+
+        // Refresh warnings only after release, and only on a successful read.
+        // A failure leaves the last coherent, pullable snapshot intact and is
+        // deliberately not promoted to the runtime-apply result above.
+        match state.db.list_hotkeys() {
+            Ok(hotkeys) => {
+                let prepared = prepare_hotkeys_for_registration(hotkeys);
+                publish_hotkey_issues(app, &state.configuration_warnings, prepared.invalid);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not refresh configuration warnings after disabling shortcuts"
+                );
+            }
+        }
+
+        result
     };
     record_registration_result(state, &result);
     result
@@ -216,74 +253,108 @@ mod tests {
         )
     }
 
-    /// `accelerator::normalize` accepts these symbol-key names (see
-    /// `tomari_keyboard::accelerator`), and the whole point of matching
-    /// global-hotkey's own spelling is that its accelerator parser
-    /// (`Shortcut::from_str`, the same one `register_all` hands the
-    /// canonical string to) accepts them too — otherwise a hotkey would pass
-    /// `validate_accelerator` at save time yet fail to register.
+    /// Every canonical global hotkey accepted by Tomari must also be accepted
+    /// by the parser used by `register_all`. Enumerating the shared key
+    /// vocabulary here turns additions — including semantic translations such
+    /// as `Plus` to `Shift+Equal` — into an explicit cross-crate contract.
     #[test]
-    fn symbol_key_accelerators_are_accepted_by_global_hotkey() {
-        for input in [
-            "Cmd+Semicolon",
-            "Cmd+Quote",
-            "Cmd+BracketLeft",
-            "Cmd+BracketRight",
-            "Cmd+Backslash",
-            "Cmd+Backquote",
-        ] {
-            let normalized = accelerator::normalize(input).unwrap_or_else(|e| {
-                panic!("tomari accelerator parser rejected `{input}`: {e}");
-            });
-            Shortcut::from_str(&normalized).unwrap_or_else(|e| {
-                panic!("global-hotkey rejected normalized accelerator `{normalized}`: {e}");
+    fn validated_hotkey_keys_are_accepted_by_global_shortcut() {
+        for key in accelerator::all_canonical_keys() {
+            let input = hotkey("parity", &format!("Cmd+{key}"), true);
+            let validated = tomari_keyboard::validation::validate_hotkey(input)
+                .unwrap_or_else(|issue| panic!("Tomari rejected `Cmd+{key}`: {issue}"));
+            Shortcut::from_str(&validated.accelerator).unwrap_or_else(|error| {
+                panic!(
+                    "global-shortcut rejected `{}` canonicalized from `Cmd+{key}`: {error}",
+                    validated.accelerator
+                );
             });
         }
     }
 
     #[test]
-    fn keyboard_master_switch_filters_registration_and_dispatch() {
+    fn command_plus_is_canonicalized_to_a_registrable_shortcut() {
+        let validated =
+            tomari_keyboard::validation::validate_hotkey(hotkey("zoom", "Cmd+Plus", true)).unwrap();
+
+        assert_eq!(validated.accelerator, "Shift+Cmd+Equal");
+        Shortcut::from_str(&validated.accelerator).unwrap();
+    }
+
+    #[test]
+    fn keyboard_master_switch_blocks_dispatch() {
         let disabled = state(false);
-        disabled
-            .db
-            .upsert_hotkey(&Hotkey {
-                id: "window-left".into(),
-                label: "Window left".into(),
-                accelerator: "Cmd+Left".into(),
-                action: AppAction::NoOp,
-                enabled: true,
-            })
-            .unwrap();
         let shortcut = Shortcut::from_str("Cmd+Left").unwrap();
         disabled
             .shortcuts
             .lock_safe()
             .insert(shortcut, AppAction::NoOp);
 
-        assert!(hotkeys_for_registration(&disabled).unwrap().is_empty());
         assert!(action_for_shortcut(&disabled, &shortcut).is_none());
 
         let enabled = state(true);
-        enabled
-            .db
-            .upsert_hotkey(&Hotkey {
-                id: "window-left".into(),
-                label: "Window left".into(),
-                accelerator: "Cmd+Left".into(),
-                action: AppAction::NoOp,
-                enabled: true,
-            })
-            .unwrap();
         enabled
             .shortcuts
             .lock_safe()
             .insert(shortcut, AppAction::NoOp);
 
-        assert_eq!(hotkeys_for_registration(&enabled).unwrap().len(), 1);
         assert_eq!(
             action_for_shortcut(&enabled, &shortcut),
             Some(AppAction::NoOp)
         );
+    }
+
+    fn hotkey(id: &str, accelerator: &str, enabled: bool) -> Hotkey {
+        Hotkey {
+            id: id.into(),
+            label: format!("Hotkey {id}"),
+            accelerator: accelerator.into(),
+            action: AppAction::NoOp,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn preparation_quarantines_unsafe_rows_but_keeps_valid_enabled_rows() {
+        let prepared = prepare_hotkeys_for_registration(vec![
+            hotkey("unsafe-enabled", "A", true),
+            hotkey("unsafe-disabled", "B", false),
+            hotkey("valid-enabled", " command + shift + 1 ", true),
+            hotkey("valid-disabled", "Cmd+Shift+2", false),
+        ]);
+
+        assert_eq!(prepared.live.len(), 1);
+        assert_eq!(prepared.live[0].id, "valid-enabled");
+        assert_eq!(prepared.live[0].accelerator, "Shift+Cmd+1");
+        assert_eq!(prepared.invalid.len(), 2);
+        assert!(prepared.invalid.iter().any(|issue| {
+            issue.id == "unsafe-enabled" && issue.reason.code() == "unsafeGlobalShortcut"
+        }));
+        assert!(prepared.invalid.iter().any(|issue| {
+            issue.id == "unsafe-disabled" && issue.reason.code() == "unsafeGlobalShortcut"
+        }));
+    }
+
+    #[test]
+    fn preparation_quarantines_every_duplicate_even_when_one_is_disabled() {
+        let prepared = prepare_hotkeys_for_registration(vec![
+            hotkey("duplicate-enabled", "Cmd+1", true),
+            hotkey("duplicate-disabled", " command + 1 ", false),
+            hotkey("valid", "Cmd+2", true),
+        ]);
+
+        assert_eq!(prepared.live.len(), 1);
+        assert_eq!(prepared.live[0].id, "valid");
+        assert_eq!(prepared.invalid.len(), 2);
+        assert!(
+            prepared
+                .invalid
+                .iter()
+                .all(|issue| issue.reason.code() == "duplicateAccelerator")
+        );
+        let mut ids: Vec<_> = prepared.invalid.into_iter().map(|issue| issue.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["duplicate-disabled", "duplicate-enabled"]);
     }
 
     #[test]

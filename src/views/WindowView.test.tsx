@@ -111,7 +111,7 @@ async function openTab(name: string) {
 }
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
-  mockInvoke.mockImplementation((cmd: string) => {
+  mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
     if (cmd in overrides) {
       const value = overrides[cmd];
       return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
@@ -125,6 +125,10 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(HISTORY);
       case 'list_hotkeys':
         return Promise.resolve([]);
+      case 'save_hotkey':
+        return Promise.resolve((args as { hotkey: Hotkey }).hotkey);
+      case 'delete_hotkey':
+        return Promise.resolve(undefined);
       case 'capture_window_placement':
       case 'forget_window_placement':
         return Promise.resolve({ changed: true, undoable: true });
@@ -530,6 +534,62 @@ describe('WindowView', () => {
         name: 'Change shortcut for Reference left — Snap: Left Half',
       }),
     ).toBeInTheDocument();
+  });
+
+  it('sanitizes quarantined window-shortcut text in visible and accessible labels', async () => {
+    const left = WINDOW_HOTKEYS[0];
+    if (!left) throw new Error('Left shortcut fixture is missing');
+    mockCommands({
+      list_hotkeys: [
+        {
+          ...left,
+          label: `Safe\u0000\u202e${'界'.repeat(120)}`,
+          accelerator: 'Cmd+\u202eK\u0000',
+        },
+      ],
+    });
+    const { container } = renderView(<WindowView />);
+    await openTab('Shortcuts');
+
+    const title = await screen.findByText(/^Safe 界+… — Snap: Left Half$/u);
+    expect(container.textContent).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(Array.from(title.textContent?.split(' — ')[0] ?? '')).toHaveLength(97);
+    expect(
+      screen.getByRole('button', { name: /^Change shortcut for Safe 界+… — Snap: Left Half$/u }),
+    ).toHaveTextContent('⌘K');
+  });
+
+  it('uses the canonical hotkey returned by save for the next window-shortcut mutation', async () => {
+    const left = WINDOW_HOTKEYS[0];
+    if (!left) throw new Error('Left shortcut fixture is missing');
+    const raw = { ...left, id: ' left ', accelerator: 'command+plus', enabled: false };
+    const savedHotkeys: Hotkey[] = [];
+    mockCommands();
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd === 'list_hotkeys') return Promise.resolve([raw]);
+      if (cmd === 'save_hotkey') {
+        const submitted = (args as { hotkey: Hotkey }).hotkey;
+        savedHotkeys.push(submitted);
+        return Promise.resolve({
+          ...submitted,
+          id: 'left',
+          accelerator: 'Shift+Cmd+Equal',
+        });
+      }
+      return base?.(cmd, args) ?? Promise.resolve(null);
+    });
+    renderView(<WindowView />);
+    await openTab('Shortcuts');
+
+    const label = 'Enable Left — Snap: Left Half';
+    fireEvent.click(await screen.findByRole('switch', { name: label }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: label })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('switch', { name: label }));
+
+    await waitFor(() => expect(savedHotkeys).toHaveLength(2));
+    expect(savedHotkeys[0]).toMatchObject({ id: ' left ', accelerator: 'command+plus' });
+    expect(savedHotkeys[1]).toMatchObject({ id: 'left', accelerator: 'Shift+Cmd+Equal' });
   });
 
   it('disables window shortcut editing while Keyboard customization is off', async () => {

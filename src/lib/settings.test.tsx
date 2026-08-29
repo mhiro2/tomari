@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { errorText } from './errors';
 import { SettingsProvider, useSettings } from './settings';
-import type { LiveApplyWarnings, AppSettings, SaveSettingsOutcome } from './types';
+import type {
+  AppSettings,
+  ConfigurationWarnings,
+  LiveApplyWarnings,
+  SaveSettingsOutcome,
+} from './types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
@@ -56,6 +61,7 @@ function StatusConsumer() {
     retryLoad,
     saveError,
     applyWarnings,
+    configurationWarnings,
     update,
   } = useSettings();
   return (
@@ -85,6 +91,17 @@ function StatusConsumer() {
       )}
       {saveError !== null && <span data-testid="save-error">{errorText(saveError)}</span>}
       <span data-testid="apply-warnings">{applyWarnings.join(',')}</span>
+      <span data-testid="configuration-warnings-revision">
+        {configurationWarnings?.revision ?? 'none'}
+      </span>
+      <span data-testid="configuration-warning-ids">
+        {[
+          ...(configurationWarnings?.invalidHotkeys ?? []),
+          ...(configurationWarnings?.invalidModifierRules ?? []),
+        ]
+          .map((issue) => issue.id)
+          .join(',')}
+      </span>
       {settings && (
         <button
           type="button"
@@ -117,6 +134,274 @@ describe('SettingsProvider', () => {
     // Default: no-op listener, matching real usage where events rarely fire.
     mockListen.mockReset();
     mockListen.mockImplementation(() => Promise.resolve(() => {}));
+  });
+
+  it('installs the configuration-warning listener before pulling its snapshot', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        return Promise.resolve({ invalidHotkeys: [], invalidModifierRules: [], revision: 0 });
+      }
+      return Promise.resolve(null);
+    });
+    let finishListener: (() => void) | undefined;
+    mockListen.mockImplementation((event: string) => {
+      if (event === 'tomari:configuration-warnings-changed') {
+        return new Promise<() => void>((resolve) => {
+          finishListener = () => resolve(() => {});
+        });
+      }
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    await screen.findByTestId('toggle');
+    await waitFor(() => expect(finishListener).toBeDefined());
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_configuration_warnings')).toBe(false);
+
+    await act(async () => finishListener?.());
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_configuration_warnings')).toBe(
+        true,
+      ),
+    );
+  });
+
+  it('keeps an event snapshot when the pull returns the same or an older revision', async () => {
+    mockInvoke.mockReset();
+    let resolvePull: ((warnings: ConfigurationWarnings) => void) | undefined;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        return new Promise<ConfigurationWarnings>((resolve) => {
+          resolvePull = resolve;
+        });
+      }
+      return Promise.resolve(null);
+    });
+    let configurationChanged: ((event: { payload: ConfigurationWarnings }) => void) | undefined;
+    mockListen.mockImplementation(
+      (event: string, handler: (event: { payload: ConfigurationWarnings }) => void) => {
+        if (event === 'tomari:configuration-warnings-changed') configurationChanged = handler;
+        return Promise.resolve(() => {});
+      },
+    );
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await waitFor(() => expect(resolvePull).toBeDefined());
+
+    const fromEvent: ConfigurationWarnings = {
+      invalidHotkeys: [
+        { id: 'event-winner', label: 'Event winner', reason: 'unsafeGlobalShortcut' },
+      ],
+      invalidModifierRules: [],
+      revision: 4,
+    };
+    await act(async () => configurationChanged?.({ payload: fromEvent }));
+    expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('event-winner');
+
+    await act(async () => {
+      resolvePull?.({
+        invalidHotkeys: [{ id: 'equal-pull', label: 'Equal pull', reason: 'invalidAccelerator' }],
+        invalidModifierRules: [],
+        revision: 4,
+      });
+    });
+    expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('event-winner');
+    expect(screen.getByTestId('configuration-warning-ids')).not.toHaveTextContent('equal-pull');
+
+    await act(async () =>
+      configurationChanged?.({
+        payload: {
+          invalidHotkeys: [],
+          invalidModifierRules: [
+            { id: 'older-event', label: 'Older event', reason: 'hyperWithRemap' },
+          ],
+          revision: 3,
+        },
+      }),
+    );
+    expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('event-winner');
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('4');
+  });
+
+  it('still pulls configuration warnings when listener registration fails', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        return Promise.resolve({
+          invalidHotkeys: [],
+          invalidModifierRules: [
+            { id: 'legacy-caps', label: 'Caps Lock', reason: 'hyperWithRemap' },
+          ],
+          revision: 7,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    mockListen.mockImplementation((event: string) =>
+      event === 'tomari:configuration-warnings-changed'
+        ? Promise.reject(new Error('event bridge unavailable'))
+        : Promise.resolve(() => {}),
+    );
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('legacy-caps'),
+    );
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('7');
+  });
+
+  it('retries a failed configuration-warning pull when the panel is shown again', async () => {
+    mockInvoke.mockReset();
+    let warningReads = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        warningReads += 1;
+        return warningReads === 1
+          ? Promise.reject(new Error('temporary bridge failure'))
+          : Promise.resolve({
+              invalidHotkeys: [
+                { id: 'recovered-hotkey', label: 'Recovered', reason: 'invalidAccelerator' },
+              ],
+              invalidModifierRules: [],
+              revision: 3,
+            });
+      }
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    await screen.findByTestId('toggle');
+    await waitFor(() => expect(warningReads).toBe(1));
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('none');
+
+    await act(async () => handlers.get('tomari:panel-shown')?.());
+
+    await waitFor(() =>
+      expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('recovered-hotkey'),
+    );
+    expect(warningReads).toBe(2);
+  });
+
+  it('clears stale configuration warnings on a panel pull when live events are unavailable', async () => {
+    mockInvoke.mockReset();
+    let warningReads = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        warningReads += 1;
+        return Promise.resolve(
+          warningReads === 1
+            ? {
+                invalidHotkeys: [
+                  { id: 'stale-hotkey', label: 'Stale', reason: 'unsafeGlobalShortcut' },
+                ],
+                invalidModifierRules: [],
+                revision: 8,
+              }
+            : { invalidHotkeys: [], invalidModifierRules: [], revision: 9 },
+        );
+      }
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      if (event === 'tomari:configuration-warnings-changed') {
+        return Promise.reject(new Error('event bridge unavailable'));
+      }
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('stale-hotkey'),
+    );
+    await act(async () => handlers.get('tomari:panel-shown')?.());
+
+    await waitFor(() =>
+      expect(screen.getByTestId('configuration-warning-ids')).toBeEmptyDOMElement(),
+    );
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('9');
+  });
+
+  it('drops an older configuration-warning pull that resolves after a panel refresh', async () => {
+    mockInvoke.mockReset();
+    const pending: Array<(warnings: ConfigurationWarnings) => void> = [];
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        return new Promise<ConfigurationWarnings>((resolve) => pending.push(resolve));
+      }
+      return Promise.resolve(null);
+    });
+    const handlers = new Map<string, () => void>();
+    mockListen.mockImplementation((event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => handlers.get('tomari:panel-shown')?.());
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1]?.({ invalidHotkeys: [], invalidModifierRules: [], revision: 6 });
+    });
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('6');
+
+    await act(async () => {
+      pending[0]?.({
+        invalidHotkeys: [
+          { id: 'late-stale-hotkey', label: 'Late stale', reason: 'invalidAccelerator' },
+        ],
+        invalidModifierRules: [],
+        revision: 5,
+      });
+    });
+    expect(screen.getByTestId('configuration-warning-ids')).not.toHaveTextContent(
+      'late-stale-hotkey',
+    );
+    expect(screen.getByTestId('configuration-warnings-revision')).toHaveTextContent('6');
   });
 
   it('optimistically updates the UI and persists the new value', async () => {
@@ -655,6 +940,66 @@ describe('SettingsProvider', () => {
     expect(screen.queryByTestId('load-error')).not.toBeInTheDocument();
     expect(screen.queryByTestId('toggle')).not.toBeInTheDocument();
     expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_apply_warnings')).toBe(false);
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_configuration_warnings')).toBe(false);
+    expect(
+      mockListen.mock.calls.some(([event]) => event === 'tomari:configuration-warnings-changed'),
+    ).toBe(false);
+  });
+
+  it('drops configuration warnings and ignores late events after recovery becomes required', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') return Promise.resolve(SETTINGS);
+      if (cmd === 'get_configuration_warnings') {
+        return Promise.resolve({
+          invalidHotkeys: [
+            { id: 'legacy-hotkey', label: 'Legacy hotkey', reason: 'invalidAccelerator' },
+          ],
+          invalidModifierRules: [],
+          revision: 1,
+        });
+      }
+      if (cmd === 'save_settings') {
+        return Promise.reject({
+          code: 'settingsRecoveryRequired',
+          message: 'settings row no longer decodes',
+        });
+      }
+      return Promise.resolve(null);
+    });
+    let configurationChanged: ((event: { payload: ConfigurationWarnings }) => void) | undefined;
+    mockListen.mockImplementation(
+      (event: string, handler: (event: { payload: ConfigurationWarnings }) => void) => {
+        if (event === 'tomari:configuration-warnings-changed') configurationChanged = handler;
+        return Promise.resolve(() => {});
+      },
+    );
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('legacy-hotkey'),
+    );
+
+    fireEvent.click(screen.getByTestId('toggle'));
+    expect(await screen.findByTestId('recovery-phase')).toHaveTextContent('required');
+    expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('');
+
+    await act(async () =>
+      configurationChanged?.({
+        payload: {
+          invalidHotkeys: [],
+          invalidModifierRules: [
+            { id: 'late-event', label: 'Late event', reason: 'duplicateModifierSlot' },
+          ],
+          revision: 2,
+        },
+      }),
+    );
+    expect(screen.getByTestId('configuration-warning-ids')).toHaveTextContent('');
   });
 
   it('marks a quarantined database as reset-only and refuses a retry dispatch', async () => {

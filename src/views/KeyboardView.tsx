@@ -11,10 +11,33 @@ import {
 } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel, modifierLabel, modifierWithSide } from '../lib/format';
-import { useT, type Translator } from '../lib/i18n';
+import { actionLabel, modifierLabel, modifierWithSide, safeDisplayText } from '../lib/format';
+import { useT, type MessageKey, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { AppAction, Hotkey, ModifierRule } from '../lib/types';
+import type {
+  AppAction,
+  ConfigurationIssue,
+  ConfigurationIssueReason,
+  ConfigurationWarnings,
+  Hotkey,
+  ModifierRule,
+} from '../lib/types';
+
+const CONFIGURATION_REASON_KEYS = {
+  emptyId: 'keyboard.configurationIssueReason.emptyId',
+  idTooLong: 'keyboard.configurationIssueReason.idTooLong',
+  emptyLabel: 'keyboard.configurationIssueReason.emptyLabel',
+  labelTooLong: 'keyboard.configurationIssueReason.labelTooLong',
+  invalidAccelerator: 'keyboard.configurationIssueReason.invalidAccelerator',
+  unsafeGlobalShortcut: 'keyboard.configurationIssueReason.unsafeGlobalShortcut',
+  invalidKeystroke: 'keyboard.configurationIssueReason.invalidKeystroke',
+  reservedRuleId: 'keyboard.configurationIssueReason.reservedRuleId',
+  hyperWithRemap: 'keyboard.configurationIssueReason.hyperWithRemap',
+  reservedCommandSlot: 'keyboard.configurationIssueReason.reservedCommandSlot',
+  duplicateId: 'keyboard.configurationIssueReason.duplicateId',
+  duplicateAccelerator: 'keyboard.configurationIssueReason.duplicateAccelerator',
+  duplicateModifierSlot: 'keyboard.configurationIssueReason.duplicateModifierSlot',
+} as const satisfies Record<ConfigurationIssueReason, MessageKey>;
 
 function isWindowAction(action: AppAction): boolean {
   return [
@@ -87,19 +110,20 @@ function clearSaving(
   });
 }
 
-// The apply-warning codes a modifier-rule save or delete reports on (see
-// `RuleMutationOutcome`); the shared warning state replaces exactly these.
+// The apply-warning codes a modifier-rule save or delete reports on; the
+// shared warning state replaces exactly these.
 const RULE_MUTATION_PROBES = ['capsLockRemap'] as const;
 
 export function KeyboardView() {
   const t = useT();
-  const { settings, update, reportApplyOutcome } = useSettings();
+  const { settings, configurationWarnings, update, reportApplyOutcome } = useSettings();
   const [rules, setRules] = useState<ModifierRule[]>([]);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
   const [rulesLoaded, setRulesLoaded] = useState(false);
   const [hotkeysLoaded, setHotkeysLoaded] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [modifierError, setModifierError] = useState<string | null>(null);
+  const [configurationError, setConfigurationError] = useState<string | null>(null);
   const [tab, setTab] = useState<KeyboardTab>('modifiers');
   const [addingShortcut, setAddingShortcut] = useState(false);
   // Ids with a save in flight, so their row's controls can be disabled — this
@@ -157,7 +181,7 @@ export function KeyboardView() {
     // row showing a state the runtime never adopted.
     try {
       const outcome = await api.saveModifierRule(next);
-      setRules((rs) => rs.map((r) => (r.id === id ? next : r)));
+      setRules((rs) => rs.map((r) => (r.id === id ? outcome.rule : r)));
       setModifierError(null);
       // The rule is stored and live; whether the Caps Lock HID remap followed
       // is what the outcome reports. It goes into the shared warning state
@@ -184,8 +208,8 @@ export function KeyboardView() {
     }
     const next = { ...current, ...patch };
     try {
-      await api.saveHotkey(next);
-      setHotkeys((hs) => hs.map((h) => (h.id === id ? next : h)));
+      const saved = await api.saveHotkey(next);
+      setHotkeys((hs) => hs.map((h) => (h.id === id ? saved : h)));
       setShortcutError(null);
     } catch (e) {
       setShortcutError(formatCmdError(e, t));
@@ -194,13 +218,39 @@ export function KeyboardView() {
     }
   }
 
-  async function removeHotkey(id: string) {
+  async function removeHotkey(id: string, fromConfigurationWarning = false) {
+    if (savingHotkeyIds.has(id)) return;
+    setSavingHotkeyIds((ids) => new Set(ids).add(id));
     try {
       await api.deleteHotkey(id);
       setHotkeys((hs) => hs.filter((h) => h.id !== id));
       setShortcutError(null);
+      setConfigurationError(null);
     } catch (e) {
-      setShortcutError(formatCmdError(e, t));
+      const message = formatCmdError(e, t);
+      if (fromConfigurationWarning) {
+        setConfigurationError(message);
+      } else {
+        setShortcutError(message);
+      }
+    } finally {
+      clearSaving(setSavingHotkeyIds, id);
+    }
+  }
+
+  async function removeInvalidModifierRule(id: string) {
+    if (savingRuleIds.has(id)) return;
+    setSavingRuleIds((ids) => new Set(ids).add(id));
+    try {
+      const outcome = await api.deleteModifierRule(id);
+      setRules((items) => items.filter((rule) => rule.id !== id));
+      setConfigurationError(null);
+      setModifierError(null);
+      reportApplyOutcome(outcome, RULE_MUTATION_PROBES);
+    } catch (error) {
+      setConfigurationError(formatCmdError(error, t));
+    } finally {
+      clearSaving(setSavingRuleIds, id);
     }
   }
 
@@ -234,6 +284,20 @@ export function KeyboardView() {
         title={t('app.nav.keyboard')}
         description={t('keyboard.pageDescription')}
       />
+
+      {configurationWarnings !== null &&
+        configurationWarnings.invalidHotkeys.length +
+          configurationWarnings.invalidModifierRules.length >
+          0 && (
+          <ConfigurationIssues
+            warnings={configurationWarnings}
+            deletingHotkeyIds={savingHotkeyIds}
+            deletingModifierRuleIds={savingRuleIds}
+            error={configurationError}
+            onDeleteHotkey={(id) => void removeHotkey(id, true)}
+            onDeleteModifierRule={(id) => void removeInvalidModifierRule(id)}
+          />
+        )}
 
       <FeatureSwitch
         title={t('common.enable', { label: t('settings.keyboardCustomization') })}
@@ -284,6 +348,148 @@ export function KeyboardView() {
         )}
       </FeatureContent>
     </div>
+  );
+}
+
+function configurationIssueLabel(issue: ConfigurationIssue, t: Translator): string {
+  const label = safeDisplayText(issue.label);
+  if (label) return label;
+  const id = safeDisplayText(issue.id);
+  return id
+    ? t('keyboard.configurationIssueUnnamed', { id })
+    : t('keyboard.configurationIssueUnknown');
+}
+
+function ConfigurationIssueGroup({
+  title,
+  issues,
+  deletingIds,
+  onDelete,
+}: {
+  title: string;
+  issues: ConfigurationIssue[];
+  deletingIds: ReadonlySet<string>;
+  onDelete: (id: string) => void;
+}) {
+  const t = useT();
+  if (issues.length === 0) return null;
+  return (
+    <section className="configuration-issues__group">
+      <h3>{title}</h3>
+      <ul>
+        {issues.map((issue) => {
+          const label = configurationIssueLabel(issue, t);
+          return (
+            <li key={`${issue.id}:${issue.reason}`}>
+              <span className="configuration-issues__item-copy">
+                <strong>{label}</strong>
+                <span>{t(CONFIGURATION_REASON_KEYS[issue.reason])}</span>
+              </span>
+              <ConfigurationIssueDeleteButton
+                label={label}
+                deleting={deletingIds.has(issue.id)}
+                onDelete={() => onDelete(issue.id)}
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function ConfigurationIssueDeleteButton({
+  label,
+  deleting,
+  onDelete,
+}: {
+  label: string;
+  deleting: boolean;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <button
+      type="button"
+      className={`btn btn--ghost ${confirming ? 'btn--warn' : ''}`}
+      onClick={(event) => {
+        if (confirming) {
+          setConfirming(false);
+          onDelete();
+          return;
+        }
+        setConfirming(true);
+        // macOS WebKit does not focus a button on click. Explicit focus makes
+        // the blur/Escape cancellation contract work for mouse users too.
+        event.currentTarget.focus();
+      }}
+      onBlur={() => setConfirming(false)}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setConfirming(false);
+      }}
+      disabled={deleting}
+      aria-label={
+        confirming
+          ? t('common.deleteConfirm', { label })
+          : t('keyboard.deleteInvalidItem', { label })
+      }
+    >
+      {confirming ? t('common.deleteConfirmShort') : t('common.delete')}
+    </button>
+  );
+}
+
+function ConfigurationIssues({
+  warnings,
+  deletingHotkeyIds,
+  deletingModifierRuleIds,
+  error,
+  onDeleteHotkey,
+  onDeleteModifierRule,
+}: {
+  warnings: ConfigurationWarnings;
+  deletingHotkeyIds: ReadonlySet<string>;
+  deletingModifierRuleIds: ReadonlySet<string>;
+  error: string | null;
+  onDeleteHotkey: (id: string) => void;
+  onDeleteModifierRule: (id: string) => void;
+}) {
+  const t = useT();
+  return (
+    <section
+      className="configuration-issues"
+      aria-labelledby="keyboard-configuration-issues-title"
+      aria-describedby="keyboard-configuration-issues-description"
+    >
+      <header className="configuration-issues__header">
+        <h2 id="keyboard-configuration-issues-title" tabIndex={-1}>
+          {t('keyboard.configurationIssuesTitle')}
+        </h2>
+        <p id="keyboard-configuration-issues-description">
+          {t('keyboard.configurationIssuesBody')}
+        </p>
+      </header>
+      <div className="configuration-issues__groups">
+        <ConfigurationIssueGroup
+          title={t('keyboard.configurationIssuesModifierRules')}
+          issues={warnings.invalidModifierRules}
+          deletingIds={deletingModifierRuleIds}
+          onDelete={onDeleteModifierRule}
+        />
+        <ConfigurationIssueGroup
+          title={t('keyboard.configurationIssuesHotkeys')}
+          issues={warnings.invalidHotkeys}
+          deletingIds={deletingHotkeyIds}
+          onDelete={onDeleteHotkey}
+        />
+      </div>
+      {error && (
+        <p className="hint hint--err" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -496,7 +702,7 @@ function ModifierRow({
         >
           {selected === 'custom' && (
             <option value="custom" disabled>
-              {actionLabel(rule.tap, t)}
+              {safeDisplayText(actionLabel(rule.tap, t))}
             </option>
           )}
           <option value="none">{t('action.noOp')}</option>

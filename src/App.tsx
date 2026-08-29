@@ -96,8 +96,9 @@ function SettingsRoot() {
 
 function OperationalShell() {
   const t = useT();
-  const { saveError, applyWarnings } = useSettings();
+  const { saveError, applyWarnings, configurationWarnings } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
+  const [configurationFocusRequest, setConfigurationFocusRequest] = useState(0);
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
   const [setupLoaded, setSetupLoaded] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -221,6 +222,11 @@ function OperationalShell() {
     if (mainRef.current) mainRef.current.scrollTop = 0;
   }, [section]);
 
+  useEffect(() => {
+    if (section !== 'keyboard' || configurationFocusRequest === 0) return;
+    mainRef.current?.querySelector<HTMLElement>('#keyboard-configuration-issues-title')?.focus();
+  }, [configurationFocusRequest, section]);
+
   const onAutoCheckHandled = useCallback(() => setAutoCheckUpdate(false), []);
   const openSetup = useCallback(() => setSetupOpen(true), []);
   const closeSetup = useCallback(() => {
@@ -238,6 +244,13 @@ function OperationalShell() {
       ? 'ready'
       : 'attention';
   const retrySetupStatus = useCallback(() => setSetupAttempt((n) => n + 1), []);
+  const reviewConfigurationWarnings = useCallback(() => {
+    setSection('keyboard');
+    setConfigurationFocusRequest((request) => request + 1);
+  }, []);
+  const configurationWarningCount =
+    (configurationWarnings?.invalidHotkeys.length ?? 0) +
+    (configurationWarnings?.invalidModifierRules.length ?? 0);
 
   if (!setupLoaded) {
     return (
@@ -285,6 +298,26 @@ function OperationalShell() {
           <p className="alert" role="alert">
             {t('settings.saveFailed', { error: formatCmdError(saveError, t) })}
           </p>
+        )}
+
+        {configurationWarningCount > 0 && (
+          <aside className="configuration-warning-banner">
+            <output
+              className="configuration-warning-banner__copy"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <strong>
+                {t('keyboard.configurationWarningTitle', {
+                  count: configurationWarningCount,
+                })}
+              </strong>
+              <small>{t('keyboard.configurationWarningBody')}</small>
+            </output>
+            <button type="button" className="btn btn--ghost" onClick={reviewConfigurationWarnings}>
+              {t('keyboard.configurationWarningAction')}
+            </button>
+          </aside>
         )}
 
         {applyWarnings.length > 0 && section !== 'general' && (

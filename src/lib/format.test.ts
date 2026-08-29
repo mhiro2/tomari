@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { acceleratorChips, actionLabel, modifierWithSide, presetLabel } from './format';
+import {
+  acceleratorChips,
+  actionLabel,
+  modifierWithSide,
+  presetLabel,
+  safeDisplayText,
+} from './format';
 import { translate, type Translator } from './i18n';
 
 const t: Translator = (key, params) => translate('en', key, params);
@@ -82,5 +88,18 @@ describe('acceleratorChips', () => {
   it('returns an empty array for an empty or missing accelerator', () => {
     expect(acceleratorChips(undefined)).toEqual([]);
     expect(acceleratorChips('')).toEqual([]);
+  });
+
+  it('sanitizes invalid persisted accelerators before display', () => {
+    expect(acceleratorChips('Cmd+\u202eK\u0000')).toEqual(['⌘', 'K']);
+  });
+});
+
+describe('safeDisplayText', () => {
+  it('strips control and format characters and bounds Unicode code points', () => {
+    const result = safeDisplayText(`Safe\u0000\u202e${'界'.repeat(120)}`);
+    expect(result).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(result).toMatch(/^Safe 界+…$/u);
+    expect(Array.from(result)).toHaveLength(97);
   });
 });

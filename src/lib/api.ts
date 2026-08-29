@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AcceleratorCheck,
   AppSettings,
+  ConfigurationWarnings,
   DisplayDirection,
   Hotkey,
   KeepAwakeOptions,
@@ -17,6 +18,7 @@ import type {
   MenuBarStatus,
   ModifierRule,
   RuleMutationOutcome,
+  SaveModifierRuleOutcome,
   SaveSettingsOutcome,
   SetupStatus,
   UpdateInfo,
@@ -30,6 +32,12 @@ import type {
 } from './types';
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
+
+// Read-only snapshot of persisted hotkeys and modifier rules that were
+// quarantined by validation. Live updates arrive through the matching Tauri
+// event; its monotonic revision arbitrates event/pull races in SettingsProvider.
+export const getConfigurationWarnings = (): Promise<ConfigurationWarnings> =>
+  invoke('get_configuration_warnings');
 
 // Retry the unreadable persisted snapshot without changing it, or replace the
 // affected settings and automation rows with the backend's fixed fail-closed
@@ -50,13 +58,13 @@ export const saveSettings = (settings: AppSettings): Promise<SaveSettingsOutcome
 
 export const listHotkeys = (): Promise<Hotkey[]> => invoke('list_hotkeys');
 
-export const saveHotkey = (hotkey: Hotkey): Promise<void> => invoke('save_hotkey', { hotkey });
+export const saveHotkey = (hotkey: Hotkey): Promise<Hotkey> => invoke('save_hotkey', { hotkey });
 
 export const deleteHotkey = (id: string): Promise<void> => invoke('delete_hotkey', { id });
 
 export const listModifierRules = (): Promise<ModifierRule[]> => invoke('list_modifier_rules');
 
-export const saveModifierRule = (rule: ModifierRule): Promise<RuleMutationOutcome> =>
+export const saveModifierRule = (rule: ModifierRule): Promise<SaveModifierRuleOutcome> =>
   invoke('save_modifier_rule', { rule });
 
 export const deleteModifierRule = (id: string): Promise<RuleMutationOutcome> =>

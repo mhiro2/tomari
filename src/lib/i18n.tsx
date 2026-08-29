@@ -113,6 +113,37 @@ const en = {
   'keyboard.imBody': 'Needed to detect taps, holds, and the hyper key.',
   'keyboard.noModifierRules': 'No modifier keys to configure.',
   'keyboard.noHotkeys': 'No global shortcuts yet. Use Add Shortcut to create one.',
+  'keyboard.configurationWarningTitle': 'Saved keyboard items need attention ({count})',
+  'keyboard.configurationWarningBody':
+    'Invalid saved items were not deleted. Keyboard items without problems continue to work.',
+  'keyboard.configurationWarningAction': 'Review in Keyboard',
+  'keyboard.configurationIssuesTitle': 'Some saved keyboard items are not running',
+  'keyboard.configurationIssuesBody':
+    'Tomari skipped the items below to keep keyboard input safe. They remain saved, and items without problems continue to work.',
+  'keyboard.configurationIssuesHotkeys': 'Shortcuts',
+  'keyboard.configurationIssuesModifierRules': 'Modifier keys',
+  'keyboard.deleteInvalidItem': 'Delete invalid item {label}',
+  'keyboard.configurationIssueUnnamed': 'Unnamed item ({id})',
+  'keyboard.configurationIssueUnknown': 'Saved item with no ID',
+  'keyboard.configurationIssueReason.emptyId': 'This item has no ID.',
+  'keyboard.configurationIssueReason.idTooLong': 'The item ID is too long.',
+  'keyboard.configurationIssueReason.emptyLabel': 'The item has no label.',
+  'keyboard.configurationIssueReason.labelTooLong': 'The label is too long.',
+  'keyboard.configurationIssueReason.invalidAccelerator': 'The shortcut format is invalid.',
+  'keyboard.configurationIssueReason.unsafeGlobalShortcut':
+    'The shortcut could intercept ordinary typing.',
+  'keyboard.configurationIssueReason.invalidKeystroke': 'The keystroke action is invalid.',
+  'keyboard.configurationIssueReason.reservedRuleId': 'The rule ID is reserved by Tomari.',
+  'keyboard.configurationIssueReason.hyperWithRemap':
+    'Hyper and a different hold key cannot be used together.',
+  'keyboard.configurationIssueReason.reservedCommandSlot':
+    'This Command-key slot is reserved by the built-in input switch.',
+  'keyboard.configurationIssueReason.duplicateId':
+    'More than one saved item has this ID after normalization.',
+  'keyboard.configurationIssueReason.duplicateAccelerator':
+    'More than one saved item uses this shortcut.',
+  'keyboard.configurationIssueReason.duplicateModifierSlot':
+    'More than one saved rule uses this modifier-key slot.',
 
   'recorder.click': 'Click to record',
   'recorder.typing': 'Type shortcut…',
@@ -550,6 +581,38 @@ const ja: Record<MessageKey, string> = {
   'keyboard.noModifierRules': '設定できる修飾キーがありません。',
   'keyboard.noHotkeys':
     'ショートカットはまだありません。「ショートカットを追加」から作成できます。',
+  'keyboard.configurationWarningTitle': '確認が必要なキーボード項目があります（{count} 件）',
+  'keyboard.configurationWarningBody':
+    '無効な保存済み項目は削除されていません。問題のないキーボード項目は引き続き動作します。',
+  'keyboard.configurationWarningAction': 'キーボードで確認',
+  'keyboard.configurationIssuesTitle': '一部の保存済みキーボード項目は動作していません',
+  'keyboard.configurationIssuesBody':
+    'キー入力を安全に保つため、以下の項目を読み飛ばしました。項目は保存されたままで、問題のない項目は引き続き動作します。',
+  'keyboard.configurationIssuesHotkeys': 'ショートカット',
+  'keyboard.configurationIssuesModifierRules': '修飾キー',
+  'keyboard.deleteInvalidItem': '無効な項目「{label}」を削除',
+  'keyboard.configurationIssueUnnamed': '名前のない項目（{id}）',
+  'keyboard.configurationIssueUnknown': 'ID のない保存済み項目',
+  'keyboard.configurationIssueReason.emptyId': '項目に ID がありません。',
+  'keyboard.configurationIssueReason.idTooLong': '項目の ID が長すぎます。',
+  'keyboard.configurationIssueReason.emptyLabel': '項目に名前がありません。',
+  'keyboard.configurationIssueReason.labelTooLong': '項目の名前が長すぎます。',
+  'keyboard.configurationIssueReason.invalidAccelerator':
+    'ショートカットの形式が正しくありません。',
+  'keyboard.configurationIssueReason.unsafeGlobalShortcut':
+    '通常の文字入力を奪う可能性があるショートカットです。',
+  'keyboard.configurationIssueReason.invalidKeystroke': 'キー送信アクションが正しくありません。',
+  'keyboard.configurationIssueReason.reservedRuleId': 'Tomari が予約しているルール ID です。',
+  'keyboard.configurationIssueReason.hyperWithRemap':
+    'Hyper と別の長押しキーは同時に設定できません。',
+  'keyboard.configurationIssueReason.reservedCommandSlot':
+    '組み込みの入力切り替えが使用する Command キーです。',
+  'keyboard.configurationIssueReason.duplicateId':
+    '表記を正規化すると同じ ID になる保存済み項目が複数あります。',
+  'keyboard.configurationIssueReason.duplicateAccelerator':
+    '同じショートカットを使う保存済み項目が複数あります。',
+  'keyboard.configurationIssueReason.duplicateModifierSlot':
+    '同じ修飾キースロットを使う保存済みルールが複数あります。',
 
   'recorder.click': 'クリックして記録',
   'recorder.typing': 'ショートカットを入力…',

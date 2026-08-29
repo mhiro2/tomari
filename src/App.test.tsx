@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
-import type { AppSettings, PermissionsChanged, SetupStatus } from './lib/types';
+import type {
+  AppSettings,
+  ConfigurationWarnings,
+  PermissionsChanged,
+  SetupStatus,
+} from './lib/types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(() => Promise.resolve('1.2.3')) }));
@@ -36,6 +41,24 @@ const ALL_GRANTED: SetupStatus = {
   revision: 0,
 };
 
+const CONFIGURATION_WARNINGS: ConfigurationWarnings = {
+  invalidHotkeys: [
+    {
+      id: 'legacy-plain-key',
+      label: 'Legacy quick panel',
+      reason: 'unsafeGlobalShortcut',
+    },
+  ],
+  invalidModifierRules: [
+    {
+      id: 'legacy-command',
+      label: 'Left Command override',
+      reason: 'reservedCommandSlot',
+    },
+  ],
+  revision: 3,
+};
+
 const RECOVERY_ERROR = {
   code: 'settingsRecoveryRequired',
   message: 'settings row does not decode',
@@ -54,6 +77,8 @@ function defaultCommand(cmd: string): Promise<unknown> {
       return Promise.resolve(ALL_GRANTED);
     case 'save_settings':
       return Promise.resolve({ applyWarnings: [] });
+    case 'get_configuration_warnings':
+      return Promise.resolve({ invalidHotkeys: [], invalidModifierRules: [], revision: 0 });
     case 'list_modifier_rules':
     case 'list_hotkeys':
       return Promise.resolve([]);
@@ -669,5 +694,85 @@ describe('App sidebar and page persistence', () => {
     expect(await screen.findByText(/macOS could not apply part/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     expect(await screen.findByRole('heading', { name: 'General', level: 1 })).toBeInTheDocument();
+  });
+
+  it('keeps configuration warnings in the shell and moves focus to Keyboard details', async () => {
+    mockCommands({ get_configuration_warnings: CONFIGURATION_WARNINGS });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Saved keyboard items need attention (2)',
+    );
+    expect(
+      screen.getByText(
+        'Invalid saved items were not deleted. Keyboard items without problems continue to work.',
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(nav('General'));
+    await screen.findByRole('heading', { name: 'General', level: 1 });
+    expect(screen.getByText('Saved keyboard items need attention (2)')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review in Keyboard' }));
+    const issueHeading = await screen.findByRole('heading', {
+      name: 'Some saved keyboard items are not running',
+      level: 2,
+    });
+    expect(nav('Keyboard')).toHaveAttribute('aria-current', 'page');
+    expect(issueHeading).toHaveFocus();
+    expect(screen.getByText('Legacy quick panel')).toBeInTheDocument();
+    expect(screen.getByText('The shortcut could intercept ordinary typing.')).toBeInTheDocument();
+    expect(screen.getByText('Left Command override')).toBeInTheDocument();
+    expect(
+      screen.getByText('This Command-key slot is reserved by the built-in input switch.'),
+    ).toBeInTheDocument();
+  });
+
+  it('localizes configuration warning safety copy and reasons in Japanese', async () => {
+    mockCommands({
+      get_settings: { ...SETTINGS, language: 'ja' },
+      get_configuration_warnings: CONFIGURATION_WARNINGS,
+    });
+    render(<App />);
+
+    expect(
+      await screen.findByText('確認が必要なキーボード項目があります（2 件）'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '無効な保存済み項目は削除されていません。問題のないキーボード項目は引き続き動作します。',
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'キーボードで確認' }));
+    expect(
+      await screen.findByText('通常の文字入力を奪う可能性があるショートカットです。'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('組み込みの入力切り替えが使用する Command キーです。'),
+    ).toBeInTheDocument();
+  });
+
+  it('bounds warning labels and strips control and bidirectional format characters', async () => {
+    mockCommands({
+      get_configuration_warnings: {
+        invalidHotkeys: [
+          {
+            id: 'unsafe-label',
+            label: `Safe\u0000\u202e${'x'.repeat(120)}`,
+            reason: 'unsafeGlobalShortcut',
+          },
+        ],
+        invalidModifierRules: [],
+        revision: 1,
+      } satisfies ConfigurationWarnings,
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Review in Keyboard' }));
+    const label = await screen.findByText(/^Safe x+…$/u);
+    expect(label.textContent).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(Array.from(label.textContent ?? '')).toHaveLength(97);
   });
 });

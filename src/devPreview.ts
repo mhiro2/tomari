@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  ConfigurationWarnings,
   Hotkey,
   KeepAwakeStatus,
   MenuBarInventory,
@@ -17,6 +18,7 @@ export async function installDevPreview() {
   const language = params.get('lang') === 'ja' ? 'ja' : 'en';
   const permissionsMissing = params.has('missing');
   const setupPending = params.has('setupPending');
+  const showConfigurationWarnings = params.has('invalidConfig');
   let recoveryKind: 'retryable' | 'databaseReset' | null = params.has('databaseReset')
     ? 'databaseReset'
     : params.has('recovery')
@@ -34,6 +36,27 @@ export async function installDevPreview() {
     dragToMoveEnabled: false,
     menuBarTidyEnabled: true,
     menuBarAutoCollapseSecs: 15,
+  };
+  const configurationWarnings: ConfigurationWarnings = {
+    invalidHotkeys: showConfigurationWarnings
+      ? [
+          {
+            id: 'legacy-quick-panel',
+            label: 'Quick panel',
+            reason: 'unsafeGlobalShortcut',
+          },
+        ]
+      : [],
+    invalidModifierRules: showConfigurationWarnings
+      ? [
+          {
+            id: 'legacy-command-left',
+            label: 'Left Command',
+            reason: 'reservedCommandSlot',
+          },
+        ]
+      : [],
+    revision: showConfigurationWarnings ? 1 : 0,
   };
   const setup: SetupStatus = {
     firstRun: false,
@@ -225,6 +248,8 @@ export async function installDevPreview() {
         }
         return settings;
       }
+      case 'get_configuration_warnings':
+        return configurationWarnings;
       case 'retry_settings_recovery':
         recoveryKind = null;
         return null;
@@ -261,13 +286,42 @@ export async function installDevPreview() {
         return { enabled: true, collapsed: true };
       case 'list_modifier_rules':
         return modifierRules;
-      case 'save_modifier_rule':
-      case 'delete_modifier_rule':
+      case 'save_modifier_rule': {
+        const { rule } = payload as { rule: ModifierRule };
+        const saved = { ...rule, id: rule.id.trim(), label: rule.label.trim() };
+        const index = modifierRules.findIndex(
+          (candidate) => candidate.id === rule.id || candidate.id === saved.id,
+        );
+        if (index === -1) modifierRules.push(saved);
+        else modifierRules.splice(index, 1, saved);
+        return { rule: saved, applyWarnings: [] };
+      }
+      case 'delete_modifier_rule': {
+        const { id } = payload as { id: string };
+        const index = modifierRules.findIndex((rule) => rule.id === id);
+        if (index !== -1) modifierRules.splice(index, 1);
         return { applyWarnings: [] };
+      }
       case 'dismiss_keep_awake_recovery':
         return keepAwake;
       case 'list_hotkeys':
         return hotkeys;
+      case 'save_hotkey': {
+        const { hotkey } = payload as { hotkey: Hotkey };
+        const saved = { ...hotkey, id: hotkey.id.trim(), label: hotkey.label.trim() };
+        const index = hotkeys.findIndex(
+          (candidate) => candidate.id === hotkey.id || candidate.id === saved.id,
+        );
+        if (index === -1) hotkeys.push(saved);
+        else hotkeys.splice(index, 1, saved);
+        return saved;
+      }
+      case 'delete_hotkey': {
+        const { id } = payload as { id: string };
+        const index = hotkeys.findIndex((hotkey) => hotkey.id === id);
+        if (index !== -1) hotkeys.splice(index, 1);
+        return null;
+      }
       case 'get_placement_context':
         return placement;
       case 'get_window_history_status':

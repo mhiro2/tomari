@@ -28,6 +28,34 @@ modifier table.
   simply pressing the keys you want; recorded chords are shown with the native
   macOS glyphs (⌃ ⌥ ⇧ ⌘ and ← ↑ → ↓), not `Ctrl`/`Alt` legends.
 
+### Invalid saved keyboard items
+
+Tomari checks every saved shortcut and modifier rule at launch, whenever the
+keyboard configuration is reloaded, and before a changed item is saved. This
+also protects against rows created by an older Tomari release or by editing the
+database directly. Invalid items never become active, but they are not deleted:
+the Keyboard page identifies them, Tomari leaves their stored values untouched,
+and all valid items keep working.
+
+The checks reject malformed key combinations and keystroke actions, ordinary
+typing keys used as global shortcuts without Control, Option, or Command,
+invalid names or identifiers, Hyper combined with a separate remap, and slots
+reserved for the built-in left/right Command IME switch. If multiple rows
+normalize to the same identifier, shortcut, or physical modifier slot, Tomari
+skips every row in that group rather than choosing one based on database order.
+Disabled rows take part too, preventing an item from silently displacing another
+when it is enabled later. The built-in Command IME pair is added only after the
+saved rules pass these checks.
+
+A persistent amber notice reports how many saved keyboard items need attention
+and links to localized details on the Keyboard page. The notice remains until
+the affected rows are repaired or deleted. Every warning offers deletion by its
+exact stored identity, including window shortcuts and modifier rules that the
+Keyboard editor cannot otherwise reconstruct. Persisted labels and accelerators
+are bounded and stripped of control characters for display without changing the
+stored values used by repair or deletion. This is separate from an apply warning,
+which means a valid setting reached macOS but its live system change failed.
+
 ### Notes on remapping
 
 Remapping rewrites event flags and key codes at the event-tap level. Control,
@@ -275,6 +303,11 @@ this case offers only the confirmed reset action. After a successful retry or
 reset, the settings panel opens again automatically. Reset leaves automation
 off until you re-enable it, while Try Again preserves the repaired saved
 settings.
+
+A semantically invalid but readable shortcut or modifier rule does not require
+this process-wide recovery screen. Tomari quarantines only the affected keyboard
+items, shows the amber notice described above, and keeps the rest of the valid
+configuration running.
 
 On the first launch, or after an update invalidates a previously granted
 permission, Settings opens with a focused Setup dialog over the current page

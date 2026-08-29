@@ -16,6 +16,7 @@ use tomari_core::{
 use tomari_keyboard::ModifierEngine;
 use tomari_window::{WindowHandle, WindowManager};
 
+use crate::configuration_warnings::ConfigurationWarningState;
 use crate::keepawake::KeepAwake;
 use crate::lifecycle::AppLifecycle;
 use crate::locks::MutexExt;
@@ -112,6 +113,10 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     /// Registered global shortcuts mapped to the action they fire.
     pub shortcuts: Mutex<HashMap<Shortcut, AppAction>>,
+    /// Persisted keyboard rows that were deliberately excluded from the live
+    /// runtime. Kept separate from apply warnings because these rows remain on
+    /// disk until the user edits or deletes them.
+    pub configuration_warnings: ConfigurationWarningState,
     /// Whether the most recent registration pass left the OS shortcut set out
     /// of step with the stored keyboard configuration. Kept separately from
     /// the dispatch map because an unregister failure can leave registrations
@@ -207,6 +212,7 @@ impl AppState {
             windows,
             settings: Mutex::new(settings),
             shortcuts: Mutex::new(HashMap::new()),
+            configuration_warnings: ConfigurationWarningState::default(),
             shortcut_registration_incomplete: AtomicBool::new(false),
             window_history: Mutex::new(WindowHistory::default()),
             placement_edit_history: Mutex::new(Vec::new()),

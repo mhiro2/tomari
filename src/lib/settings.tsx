@@ -23,7 +23,24 @@ import {
 
 import * as api from './api';
 import { hasCmdErrorCode } from './errors';
-import type { AppSettings } from './types';
+import { CONFIGURATION_ISSUE_REASONS } from './types';
+import type { AppSettings, ConfigurationWarnings } from './types';
+
+const CONFIGURATION_ISSUE_REASON_SET = new Set<string>(CONFIGURATION_ISSUE_REASONS);
+
+function isConfigurationIssue(issue: unknown): boolean {
+  return (
+    issue !== null &&
+    typeof issue === 'object' &&
+    'id' in issue &&
+    typeof issue.id === 'string' &&
+    'label' in issue &&
+    typeof issue.label === 'string' &&
+    'reason' in issue &&
+    typeof issue.reason === 'string' &&
+    CONFIGURATION_ISSUE_REASON_SET.has(issue.reason)
+  );
+}
 
 export type SettingsRecoveryKind = 'retryable' | 'databaseReset';
 
@@ -60,6 +77,10 @@ type SettingsContextValue = {
   // Codes for side effects that saved but could not be applied (see
   // `SaveSettingsOutcome`). Empty after a clean save.
   applyWarnings: string[];
+  // Invalid persisted keyboard records are quarantined by the backend, not
+  // deleted. Kept separate from transient side-effect apply warnings so this
+  // safety notice survives page navigation and unrelated successful saves.
+  configurationWarnings: ConfigurationWarnings | null;
   update: (patch: Partial<AppSettings>) => void;
   // Fold the outcome of a mutation made outside `update` — a modifier-rule
   // save, say — into `applyWarnings`. `probed` lists the codes that mutation
@@ -76,6 +97,124 @@ export function useSettings(): SettingsContextValue {
   const ctx = useContext(SettingsContext);
   if (!ctx) throw new Error('useSettings must be used within a SettingsProvider');
   return ctx;
+}
+
+type ReadonlyRef<T> = { readonly current: T };
+
+function useConfigurationWarnings(settingsReady: boolean, recoveryRequired: ReadonlyRef<boolean>) {
+  const [warnings, setWarnings] = useState<ConfigurationWarnings | null>(null);
+  const revision = useRef(-1);
+  // A recovery transition or newer pull invalidates every older command
+  // result. Revision ordering then arbitrates pulls against live events.
+  const pullGeneration = useRef(0);
+
+  const applySnapshot = useCallback(
+    (snapshot: unknown) => {
+      if (
+        recoveryRequired.current ||
+        snapshot === null ||
+        typeof snapshot !== 'object' ||
+        !('revision' in snapshot) ||
+        typeof snapshot.revision !== 'number' ||
+        !Number.isSafeInteger(snapshot.revision) ||
+        snapshot.revision < 0 ||
+        !('invalidHotkeys' in snapshot) ||
+        !Array.isArray(snapshot.invalidHotkeys) ||
+        !snapshot.invalidHotkeys.every(isConfigurationIssue) ||
+        !('invalidModifierRules' in snapshot) ||
+        !Array.isArray(snapshot.invalidModifierRules) ||
+        !snapshot.invalidModifierRules.every(isConfigurationIssue) ||
+        snapshot.revision <= revision.current
+      ) {
+        return;
+      }
+      revision.current = snapshot.revision;
+      setWarnings(snapshot as ConfigurationWarnings);
+    },
+    [recoveryRequired],
+  );
+
+  const refresh = useCallback(
+    async (isCancelled: () => boolean = () => false) => {
+      if (!settingsReady || recoveryRequired.current) return;
+      pullGeneration.current += 1;
+      const generation = pullGeneration.current;
+      try {
+        const snapshot = await api.getConfigurationWarnings();
+        if (isCancelled() || recoveryRequired.current || pullGeneration.current !== generation) {
+          return;
+        }
+        applySnapshot(snapshot);
+      } catch {
+        // Best effort. A panel-show retry or live event can still recover.
+      }
+    },
+    [applySnapshot, recoveryRequired, settingsReady],
+  );
+
+  const clear = useCallback(() => {
+    pullGeneration.current += 1;
+    revision.current = -1;
+    setWarnings(null);
+  }, []);
+
+  // Subscribe before the initial pull so an event that lands while the
+  // command is in flight wins by revision. Pull even when registration fails:
+  // panel-show retries then provide eventual consistency without an event.
+  useEffect(() => {
+    if (!settingsReady) return;
+    let cancelled = false;
+    let stopListening: (() => void) | null = null;
+    void (async () => {
+      try {
+        const unlisten = await listen<ConfigurationWarnings>(
+          'tomari:configuration-warnings-changed',
+          (event) => {
+            if (!cancelled) applySnapshot(event.payload);
+          },
+        );
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        stopListening = unlisten;
+      } catch {
+        // The pull below remains useful even without live updates.
+      }
+      if (!cancelled) await refresh(() => cancelled);
+    })();
+    return () => {
+      cancelled = true;
+      pullGeneration.current += 1;
+      stopListening?.();
+    };
+  }, [applySnapshot, refresh, settingsReady]);
+
+  return { warnings, refresh, clear };
+}
+
+type WarningRefresh = (isCancelled: () => boolean) => Promise<void>;
+
+function usePanelWarningRefresh(
+  recoveryRequired: ReadonlyRef<boolean>,
+  settings: ReadonlyRef<AppSettings | null>,
+  refreshApplyWarnings: WarningRefresh,
+  refreshConfigurationWarnings: WarningRefresh,
+) {
+  // The window is hidden rather than destroyed when the panel closes, so a
+  // mismatch or missed event that arose while hidden must be pulled on show.
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen('tomari:panel-shown', () => {
+      if (recoveryRequired.current || settings.current === null) return;
+      void refreshApplyWarnings(() => cancelled);
+      void refreshConfigurationWarnings(() => cancelled);
+    });
+    return () => {
+      cancelled = true;
+      void unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [recoveryRequired, refreshApplyWarnings, refreshConfigurationWarnings, settings]);
 }
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
@@ -106,10 +245,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Holds the latest `flush` so it can re-run itself without making flush its
   // own dependency.
   const flushRef = useRef<() => Promise<void>>(null);
+  const settingsReady = settings !== null;
+  const {
+    warnings: configurationWarnings,
+    refresh: refreshConfigurationWarnings,
+    clear: clearConfigurationWarnings,
+  } = useConfigurationWarnings(settingsReady, recoveryRequired);
 
-  // Adopt a healthy backend snapshot. Recovery commands restart the real app,
-  // but tests and non-restarting harnesses can resolve; in that case this is
-  // also the only transition back into the ordinary settings shell.
+  // Recovery commands restart the real app, but a resolved test harness uses
+  // this same transition back into the ordinary settings shell.
   const applySettings = useCallback((next: AppSettings) => {
     settled.current = true;
     recoveryRequired.current = false;
@@ -120,18 +264,22 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setSaveError(null);
   }, []);
 
-  const requireSettingsRecovery = useCallback((kind: SettingsRecoveryKind) => {
-    settled.current = true;
-    recoveryRequired.current = true;
-    settingsRef.current = null;
-    dirty.current = false;
-    warningsGeneration.current += 1;
-    setSettings(null);
-    setSettingsRecovery({ kind, phase: 'required', action: null, error: null });
-    setLoadError(null);
-    setSaveError(null);
-    setApplyWarnings([]);
-  }, []);
+  const requireSettingsRecovery = useCallback(
+    (kind: SettingsRecoveryKind) => {
+      settled.current = true;
+      recoveryRequired.current = true;
+      settingsRef.current = null;
+      dirty.current = false;
+      warningsGeneration.current += 1;
+      setSettings(null);
+      setSettingsRecovery({ kind, phase: 'required', action: null, error: null });
+      setLoadError(null);
+      setSaveError(null);
+      setApplyWarnings([]);
+      clearConfigurationWarnings();
+    },
+    [clearConfigurationWarnings],
+  );
 
   // Read the warnings the live state warrants right now. Best effort: a
   // failure leaves the current list alone, and the next save's outcome
@@ -155,20 +303,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // The window is hidden rather than destroyed when the panel closes, so a
-  // mismatch that arose while it was hidden (a `hidutil` timeout during the
-  // wake reset, say) has to be re-read each time it is shown again.
-  useEffect(() => {
-    let cancelled = false;
-    const unlisten = listen('tomari:panel-shown', () => {
-      if (recoveryRequired.current || settingsRef.current === null) return;
-      void refreshApplyWarnings(() => cancelled);
-    });
-    return () => {
-      cancelled = true;
-      void unlisten.then((fn) => fn()).catch(() => {});
-    };
-  }, [refreshApplyWarnings]);
+  usePanelWarningRefresh(
+    recoveryRequired,
+    settingsRef,
+    refreshApplyWarnings,
+    refreshConfigurationWarnings,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -213,9 +353,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return () => void unlisten.then((fn) => fn()).catch(() => {});
   }, [applySettings]);
 
-  // Persist the latest settings, one save at a time. New edits during a save
-  // set `dirty`, so the saver re-runs and the last write reflects the final
-  // state. On failure, re-sync from disk so the UI shows what truly persisted.
+  // Serialize saves; on failure, re-sync so the UI shows what persisted.
   const flush = useCallback(async () => {
     if (saving.current) {
       dirty.current = true;
@@ -293,10 +431,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  // Both backend recovery commands restart Tomari on success and therefore do
-  // not resolve in production. Reload after a resolved mock so tests and the
-  // browser preview exercise the same explicit recovery boundary without
-  // inventing a second success contract.
+  // Recovery normally restarts Tomari. Reload after a resolved mock so tests
+  // and previews still exercise the explicit recovery boundary.
   const runSettingsRecovery = useCallback(
     async (action: 'retry' | 'reset') => {
       if (
@@ -356,6 +492,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       retryLoad,
       saveError,
       applyWarnings,
+      configurationWarnings,
       update,
       reportApplyOutcome,
     }),
@@ -368,6 +505,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       retryLoad,
       saveError,
       applyWarnings,
+      configurationWarnings,
       update,
       reportApplyOutcome,
     ],

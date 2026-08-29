@@ -13,7 +13,7 @@ import {
 } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel, presetLabel } from '../lib/format';
+import { actionLabel, presetLabel, safeDisplayText } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
 import type {
@@ -422,8 +422,8 @@ export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) 
     }
     const next = { ...current, ...patch };
     try {
-      await api.saveHotkey(next);
-      setHotkeys((items) => items.map((item) => (item.id === id ? next : item)));
+      const saved = await api.saveHotkey(next);
+      setHotkeys((items) => items.map((item) => (item.id === id ? saved : item)));
       setStatus(null);
     } catch (error) {
       showStatus(formatCmdError(error, t), true);
@@ -809,8 +809,9 @@ function WindowShortcutRow({
 }) {
   const t = useT();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const action = actionLabel(hotkey.action, t);
-  const title = hotkey.label === action ? action : `${hotkey.label} — ${action}`;
+  const action = safeDisplayText(actionLabel(hotkey.action, t));
+  const label = safeDisplayText(hotkey.label);
+  const title = !label || label === action ? action : `${label} — ${action}`;
 
   function deleteHotkey() {
     if (confirmingDelete) {
@@ -827,7 +828,7 @@ function WindowShortcutRow({
       <span className="window-shortcut-row__title">{title}</span>
       <span inert={saving}>
         <ShortcutRecorder
-          value={hotkey.accelerator}
+          value={safeDisplayText(hotkey.accelerator)}
           onCapture={onAccelerator}
           ariaLabel={t('keyboard.changeShortcut', { label: title })}
         />

@@ -4,6 +4,8 @@
 //! * [`accelerator`] — validate and normalize global-shortcut strings.
 //! * [`engine`] — the tap/hold [`ModifierEngine`] that turns raw modifier
 //!   activity into [`AppAction`](tomari_core::AppAction)s.
+//! * [`validation`] — canonicalize persisted keyboard rows and quarantine
+//!   intrinsically invalid or colliding entries before they become live.
 //!
 //! Both are free of OS dependencies. The native layer (a CGEventTap requiring
 //! the *Input Monitoring* permission) lives in the Tauri app and simply feeds
@@ -13,6 +15,7 @@
 pub mod accelerator;
 pub mod engine;
 pub mod error;
+pub mod validation;
 
 pub use accelerator::Accelerator;
 pub use engine::{HYPER_MODIFIERS, KeyEvent, ModifierEngine};
