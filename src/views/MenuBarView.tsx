@@ -104,7 +104,7 @@ export function MenuBarView() {
       activeMoveRequest.current += 1;
       activeInventoryRequest.current = null;
       moveBusy.current = false;
-      void unlisten.then((fn) => fn());
+      void unlisten.then((fn) => fn()).catch(() => {});
     };
   }, [refreshInventory]);
 

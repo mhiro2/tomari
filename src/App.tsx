@@ -118,7 +118,7 @@ function AppShell() {
       setSection('general');
       setAutoCheckUpdate(true);
     });
-    return () => void unlisten.then((fn) => fn());
+    return () => void unlisten.then((fn) => fn()).catch(() => {});
   }, []);
 
   // Subscribe to permission transitions for the app's lifetime. Registered
@@ -143,7 +143,8 @@ function AppShell() {
       });
     return () => {
       cancelled = true;
-      void unlisten.then((fn) => fn());
+      // Registration may have rejected; the unsubscribe must not re-raise it.
+      void unlisten.then((fn) => fn()).catch(() => {});
     };
   }, [applyPermissionSnapshot]);
 

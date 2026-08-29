@@ -113,7 +113,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       cancelled = true;
-      void unlisten.then((fn) => fn());
+      void unlisten.then((fn) => fn()).catch(() => {});
     };
   }, [refreshApplyWarnings]);
 
@@ -167,7 +167,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       if (saving.current || dirty.current) return;
       applySettings(e.payload);
     });
-    return () => void unlisten.then((fn) => fn());
+    return () => void unlisten.then((fn) => fn()).catch(() => {});
   }, [applySettings]);
 
   // Persist the latest settings, one save at a time. New edits during a save
