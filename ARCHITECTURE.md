@@ -982,9 +982,11 @@ without permissions too (unit tests).
   cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
   --debug`) that exercises the same `tauri.conf.json` bundle config a release
   build uses, so a broken bundle setting fails on every push instead of first
-  showing up on a tag. Release tags additionally re-run the frontend and Rust
-  jobs before publishing (`.github/workflows/release.yaml`), so a release
-  build is gated on the same checks as a regular push.
+  showing up on a tag. Release tags additionally re-run the frontend, Rust and
+  cargo-deny jobs before publishing (`.github/workflows/release.yaml`), so a
+  release build is gated on the same checks as a regular push — a tag pushed
+  from a commit that never went through CI cannot publish an artifact whose
+  dependency policy was never checked.
 
 ## 12. Adding a feature
 
