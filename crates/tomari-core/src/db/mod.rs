@@ -410,13 +410,14 @@ fn version_out_of_range(version: i32, latest: i32) -> Error {
 /// Apply the single migration that brings the schema to version `next`, under
 /// an *immediate* (write-locking) transaction.
 ///
-/// The version is re-read once the lock is held: two app instances can race
-/// through [`apply_migrations`]' initial read at launch — the database opens
-/// before the single-instance guard engages — and the loser must skip steps
-/// the winner already committed rather than re-run them (a re-run would at
-/// best fail on existing DDL and at worst re-apply a non-idempotent data
-/// transformation). Skipping drops the transaction unstarted-equivalent: it
-/// rolls back having written nothing.
+/// The version is re-read once the lock is held. Normal app startup acquires
+/// its instance coordinator before opening the database, but this library must
+/// remain safe when independent processes or connections migrate the same
+/// database without sharing that guard. A loser must skip steps the winner
+/// already committed rather than re-run them (a re-run would at best fail on
+/// existing DDL and at worst re-apply a non-idempotent data transformation).
+/// Skipping drops the transaction unstarted-equivalent: it rolls back having
+/// written nothing.
 ///
 /// The re-read repeats the out-of-range check too: the racing instance could
 /// be a *newer* binary that advanced the version past what this one supports,
@@ -1269,13 +1270,12 @@ PRAGMA user_version = 3;
     }
 
     #[test]
-    fn a_step_that_lost_a_launch_race_is_skipped_under_the_lock() {
-        // Two instances can both read `user_version` before either has
-        // migrated (the database opens before the single-instance guard
-        // engages). Simulate the loser: it computed `next == 1` from that
-        // stale read, but the winner has already committed step 1. The
-        // re-check under the write lock must skip — re-running the DDL would
-        // fail on the existing table.
+    fn a_step_that_lost_an_external_migration_race_is_skipped_under_the_lock() {
+        // Independent connections that do not share the app's instance
+        // coordinator can both read `user_version` before either has migrated.
+        // Simulate the loser: it computed `next == 1` from that stale read, but
+        // the winner has already committed step 1. The re-check under the write
+        // lock must skip — re-running the DDL would fail on the existing table.
         let migrations: &[&str] = &["CREATE TABLE a (x INTEGER);"];
         let conn = Connection::open_in_memory().expect("open");
         apply_migrations(&conn, migrations).expect("winner migrates");

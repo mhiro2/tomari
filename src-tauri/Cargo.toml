@@ -32,12 +32,12 @@ tracing-subscriber.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2.5.1"
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
 tauri-plugin-deep-link = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"

@@ -590,26 +590,35 @@ and applies none of them.
   returns a `Result`: `Path::exists` reports a metadata error as "not there", and
   treating a sidecar we merely failed to look at as absent is how one ends up
   beside the replacement.
-- Two launches resetting at once is ruled out by the `InstanceLock`
-  (`instance_lock.rs`): an advisory `flock` on `tomari.lock` in the data
-  directory, taken in `main` before the database is opened and before the Tauri
-  builder runs, then kept in managed state for the life of the process. The
-  single-instance socket alone leaves a window where two launches both believe
-  they are the singleton — and the plugin removes any socket file it finds
-  before binding, so the later one would also take the socket from the earlier.
-  Without the lock, the second could move the first's fresh replacement aside
-  and leave one of them writing to a database no longer at the canonical path.
-  The holder is the instance: only it registers the plugin and binds the socket.
-  A launch that finds the lock held hands itself off to the holder at once over
-  the plugin's own socket — speaking the plugin's wire format itself, since it
-  must never run the plugin — and exits; if nobody is listening yet (the holder
-  is still starting, or an old instance still tearing down) it alternates lock
-  attempts and hand-offs for a few seconds, then exits with an alert. `flock` belongs to the open file description, so a crash leaves no stale
-  lock. Quarantine renames go through `renamex_np(RENAME_EXCL)`, so a `.broken-`
+- Two launches resetting at once are ruled out by the `InstanceCoordinator`
+  (`instance_lock.rs`). It takes an advisory `flock` on `tomari.lock` before the
+  database or Tauri builder, then binds the activation listener before declaring
+  that process primary. The endpoint is `instance.sock` inside a UID-named 0700
+  directory below Darwin's `_CS_DARWIN_USER_TEMP_DIR`; every newly published
+  socket is verified as 0600. Stale cleanup checks type, ownership, and dev/inode
+  stability. An active pre-bind, symlink, regular file, or non-owned endpoint is
+  never removed. After the data lock has been won, a disconnected socket owned
+  by the current UID can be retired even if a crash interrupted the original
+  bind before its mode was tightened.
+  A secondary connects with a bounded timeout, authenticates the server with
+  `getpeereid`, sends only a fixed activation token, and exits only after an
+  exact ACK. The listener authenticates the client UID before reading and never
+  accepts cwd, argv, URLs, or other external payload. Requests received before
+  Tauri setup are coalesced and delivered after the AppHandle is attached. On
+  terminal shutdown the listener stops and its exact dev/inode socket is
+  unlinked first, while `flock` remains held until all process-external cleanup
+  finishes. A crash releases the lock and leaves a disconnected socket that the
+  next lock winner can safely identify. Quarantine renames go through
+  `renamex_np(RENAME_EXCL)`, so a `.broken-`
   or `.orphaned-` name that is already taken fails the move atomically instead
   of replacing what an earlier reset kept. A two-process test spawns the test
-  binary against the same directory to pin the contention down, and another
-  checks the hand-off payload against a plugin-shaped listener.
+  binary against the same directory to pin contention and ACK-before-exit down.
+  Boundary tests cover fixed-frame parsing, truncated and timed-out clients,
+  peer-credential failure on both sides, first-launch races, hostile pre-binds,
+  exact modes, pending setup delivery, and listener/lock teardown ordering.
+  The credential boundary isolates different local users. A hostile process
+  already running under the same UID has equal authority over that user's Unix
+  sockets and is explicitly outside the endpoint's security guarantee.
 - A failed reset exits with an alert naming the files to move by hand, and a
   fresh database that then cannot be created reports *its own* error rather than
   the corruption that started it. The file operations sit behind a `FileOps`
@@ -674,19 +683,19 @@ and applies none of them.
   logging (stderr plus a daily-rotated file under `<data_dir>/logs`, seven days
   kept, each day soft-capped at 8 MiB by `logcap` — seeded from what an
   earlier run wrote that day; past the cap one notice is written and the rest
-  of the day's lines go to stderr only) → take the `InstanceLock` (a launch that
-  cannot acquire it hands off to the running instance and exits before touching
-  the database) → open the DB and
+  of the day's lines go to stderr only) → start the `InstanceCoordinator` (a
+  launch that cannot acquire its lock performs authenticated hand-off and exits
+  before touching the database) → open the DB and
   preflight the complete startup configuration → build either normal or
   fail-closed `AppState` (DB, both engines, the `WindowManager`, the settings
-  cache, the shortcut map, the undo history) → wire the plugins (single-instance
-  / deep-link / autostart / updater / global-shortcut) and the tray → start only
-  the effects allowed by the trusted startup plan. `single-instance` is
-  registered first among the plugins: a second launch would create a duplicate
-  event tap that double-fires every remap, so it hands off to the running
-  instance (surfacing its panel) and exits. `deep-link` is registered right
-  after it, as the plugin
-  requires.
+  cache, the shortcut map, the undo history) → wire the plugins (deep-link /
+  autostart / updater / global-shortcut) and the tray → start only the effects
+  allowed by the trusted startup plan. The coordinator's listener is already
+  live before setup; setup attaches its panel-activation handler before building
+  the tray, so a racing second launch is queued rather than lost. macOS reopen
+  events surface the panel through the same lifecycle gate. Deep links remain on
+  the dedicated OS/plugin channel and are never forwarded through instance IPC
+  or parsed from argv.
 - The activation policy is **Accessory** (no Dock icon). A single resizable
   window (`main`, 940×720 by default, minimum 860×620, decorated, opaque, not
   always on top) is declared in `tauri.conf.json`; a fixed-width sidebar lists
@@ -836,12 +845,14 @@ and applies none of them.
   same coordinator synchronously before asking Tauri to restart. New config
   mutations, tracked workers, tap/Caps effects, and the Menu Bar synthetic
   drag are rejected once terminal; work that already crossed a gate is drained
-  before cleanup continues. The fixed order is: cancel and join
-  process-lifetime workers, drain transient OS effects, release global
-  shortcuts, stop the keyboard and both drag taps, restore native Caps Lock,
-  remove menu-bar UI, then release keep-awake state. Concurrent shutdown calls
-  wait for the same completion and never reopen the lifecycle; relaunch
-  continuations run only for the caller that atomically won the terminal claim.
+  before cleanup continues. The fixed order is: stop the instance activation
+  listener while retaining its data lock, cancel and join process-lifetime
+  workers, drain transient OS effects, release global shortcuts, stop the
+  keyboard and both drag taps, restore native Caps Lock, remove menu-bar UI,
+  then release keep-awake state. Process teardown releases the coordinator's
+  `flock` only after that cleanup. Concurrent shutdown calls wait for the same
+  completion and never reopen the lifecycle; relaunch continuations run only
+  for the caller that atomically won the terminal claim.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
   consumes it, completes the terminal shutdown above, and relaunches. The

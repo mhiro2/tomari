@@ -50,7 +50,7 @@ use tomari_keyboard::{ModifierEngine, validation as keyboard_validation};
 use tomari_window::WindowManager;
 
 use crate::configuration_warnings::ConfigurationIssue;
-use crate::instance_lock::{AcquireError, InstanceLock, Outcome};
+use crate::instance_lock::{AcquireError, InstanceCoordinator, Outcome};
 use crate::locks::MutexExt;
 use crate::state::AppState;
 
@@ -84,18 +84,12 @@ fn main() {
     };
     let context = tauri::generate_context!();
 
-    // Before the database and before the Tauri builder: the process that holds
-    // this lock is the instance. Everything below — the single-instance socket,
-    // the database, the event taps — belongs to it alone. A launch that cannot
-    // get the lock hands itself off to the holder over the plugin's own socket
-    // and exits without ever registering the plugin, so the socket can never end
-    // up owned by a process that does not also own the data directory (the
-    // plugin would otherwise take an existing socket over when it binds).
-    let identifier = context.config().identifier.clone();
-    let lock = match InstanceLock::acquire_or_hand_off(&paths.data_dir, || {
-        instance_lock::hand_off_to_holder(&identifier).is_ok()
-    }) {
-        Ok(Outcome::Locked(lock)) => lock,
+    // Before the database and Tauri builder, elect one owner of both the data
+    // lock and authenticated activation listener. A secondary sends no argv,
+    // cwd, URL, or other external payload and exits only after the primary UID
+    // has acknowledged the fixed activation request.
+    let instance = match InstanceCoordinator::acquire_or_hand_off(&paths.data_dir) {
+        Ok(Outcome::Primary(instance)) => instance,
         Ok(Outcome::HandedOff) => {
             tracing::info!("another instance holds the data directory; handed off");
             std::process::exit(0);
@@ -106,26 +100,18 @@ fn main() {
                 "Tomari is already running. If it is not, wait a moment and open it again.",
             );
         }
-        Err(AcquireError::Io(e)) => fatal_startup_error(&format!(
-            "Tomari could not lock its data directory {}: {e}",
-            paths.data_dir.display()
+        Err(AcquireError::UnsafeEndpoint(reason)) => fatal_startup_error(&format!(
+            "Tomari refused an unsafe single-instance endpoint: {reason}"
+        )),
+        Err(AcquireError::Io(error)) => fatal_startup_error(&format!(
+            "Tomari could not establish secure single-instance ownership: {error}"
         )),
     };
     let app_state = build_state(&paths);
 
     tauri::Builder::default()
-        // Register first: a second launch must hand off to the running
-        // instance — two event taps would double-fire every remap and tap
-        // action. The callback surfaces the existing instance's panel. Only
-        // the lock holder gets here, so only it ever binds the socket.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // A bare second launch surfaces the panel. On macOS `tomari://`
-            // URLs are delivered to deep-link's `on_open_url`, not here, so this
-            // path only ever means "the user opened Tomari again".
-            let _ = actions::show_panel(app);
-        }))
-        // Registered right after single-instance, as the deep-link plugin
-        // requires, so the already-running instance receives `tomari://` URLs.
+        // Deep links remain on their dedicated OS delivery channel. They are
+        // never forwarded through the activation socket or recovered from argv.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -152,7 +138,7 @@ fn main() {
                 })
                 .build(),
         )
-        .manage(lock)
+        .manage(instance)
         .manage(paths)
         .manage(app_state)
         .manage(commands::PendingUpdate::default())
@@ -201,6 +187,33 @@ fn main() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // The listener is already live, before Tauri setup. Attach at the
+            // first setup opportunity so a coalesced early launch surfaces the
+            // panel. Both queueing and execution recheck the terminal lifecycle.
+            let activation_handle = app.handle().clone();
+            app.state::<InstanceCoordinator>()
+                .attach_activation_handler(move || {
+                    let Some(state) = activation_handle.try_state::<AppState>() else {
+                        return false;
+                    };
+                    if !state.lifecycle.is_running() {
+                        return false;
+                    }
+                    let dispatch_handle = activation_handle.clone();
+                    activation_handle
+                        .run_on_main_thread(move || {
+                            let Some(state) = dispatch_handle.try_state::<AppState>() else {
+                                return;
+                            };
+                            if state.lifecycle.is_running()
+                                && let Err(error) = actions::show_panel(&dispatch_handle)
+                            {
+                                tracing::warn!(%error, "could not show panel after activation");
+                            }
+                        })
+                        .is_ok()
+                });
 
             tray::build(app)?;
 
@@ -471,10 +484,21 @@ fn main() {
         // through the same native-alert-and-exit path as every other
         // unrecoverable startup error instead.
         .unwrap_or_else(|e| fatal_startup_error(&format!("Tomari could not start: {e}")))
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
                 lifecycle::handle_exit_requested(app, code, &api);
             }
+            tauri::RunEvent::Reopen { .. } => {
+                let Some(state) = app.try_state::<AppState>() else {
+                    return;
+                };
+                if state.lifecycle.is_running()
+                    && let Err(error) = actions::show_panel(app)
+                {
+                    tracing::warn!(%error, "could not show panel after reopen");
+                }
+            }
+            _ => {}
         });
 }
 
@@ -1149,9 +1173,10 @@ fn was_absent(result: &std::io::Result<()>) -> bool {
 /// [`sweep_orphan_sidecars`] and finishes the job before anything is opened.
 ///
 /// Two launches doing this at once is ruled out one level up: `main` takes the
-/// [`InstanceLock`] before the database is opened, so only one process can be in
-/// here. Without it the second process could move the first's fresh replacement
-/// aside and leave one of them writing to a file no longer at the canonical path.
+/// [`InstanceCoordinator`] before the database is opened, so only one process
+/// can be in here. Without it the second process could move the first's fresh
+/// replacement aside and leave one of them writing to a file no longer at the
+/// canonical path.
 /// The renames themselves never replace an existing file ([`FileOps::rename`]),
 /// so a `.broken-` name that is somehow already taken — a stamp collision, or a
 /// process the lock does not bind — fails the move rather than destroying what

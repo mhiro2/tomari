@@ -293,6 +293,7 @@ impl AppLifecycle {
 }
 
 trait ShutdownOps {
+    fn stop_instance_listener(&self);
     fn cancel_workers(&self);
     fn drain_config_mutations(&self);
     fn join_workers(&self);
@@ -312,6 +313,15 @@ struct SystemShutdown<'a> {
 }
 
 impl ShutdownOps for SystemShutdown<'_> {
+    fn stop_instance_listener(&self) {
+        if let Some(instance) = self
+            .app
+            .try_state::<crate::instance_lock::InstanceCoordinator>()
+        {
+            instance.stop_listener();
+        }
+    }
+
     fn cancel_workers(&self) {
         crate::keepawake::prepare_shutdown(self.app);
         crate::menubar::prepare_shutdown();
@@ -368,6 +378,10 @@ fn run_cleanup(ops: &impl ShutdownOps) {
     // synthetic input before taking the taps down. The final Caps operation
     // then always points toward native behavior, before either visible
     // menu-bar teardown or slow admin cleanup.
+    // Stop accepting second launches first. The data lock remains held through
+    // all cleanup, so a waiting process cannot become primary until external
+    // state has been restored and this process is ready to exit.
+    ops.stop_instance_listener();
     ops.cancel_workers();
     ops.drain_config_mutations();
     ops.join_workers();
@@ -541,6 +555,9 @@ mod tests {
     }
 
     impl ShutdownOps for FakeOps {
+        fn stop_instance_listener(&self) {
+            self.record("stop-instance-listener");
+        }
         fn cancel_workers(&self) {
             self.record("cancel-workers");
         }
@@ -603,6 +620,7 @@ mod tests {
         assert_eq!(
             ops.steps(),
             [
+                "stop-instance-listener",
                 "cancel-workers",
                 "drain-config",
                 "join-workers",
@@ -688,6 +706,7 @@ mod tests {
         let leader_ops = Arc::clone(&ops);
         let leader = std::thread::spawn(move || shutdown_with(&leader_lifecycle, &*leader_ops));
 
+        assert_eq!(step_rx.recv().unwrap(), "stop-instance-listener");
         assert_eq!(step_rx.recv().unwrap(), "cancel-workers");
         assert_eq!(step_rx.recv().unwrap(), "drain-config");
         assert_eq!(step_rx.recv().unwrap(), "join-workers");
@@ -719,6 +738,7 @@ mod tests {
         let leader_ops = Arc::clone(&ops);
         let leader = std::thread::spawn(move || shutdown_with(&leader_lifecycle, &*leader_ops));
 
+        assert_eq!(step_rx.recv().unwrap(), "stop-instance-listener");
         assert_eq!(step_rx.recv().unwrap(), "cancel-workers");
         entered_rx.recv().unwrap();
         assert!(matches!(step_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
@@ -1039,7 +1059,7 @@ mod tests {
         shutdown_with(&lifecycle, &ops);
 
         assert_eq!(
-            &ops.steps()[8..],
+            &ops.steps()[9..],
             ["restore-caps", "teardown-menu-bar", "cleanup-keep-awake"]
         );
     }
