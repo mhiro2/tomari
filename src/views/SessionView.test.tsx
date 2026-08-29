@@ -50,6 +50,10 @@ const ON: KeepAwakeStatus = {
   leftoverUndecided: false,
   revision: 3,
 };
+const OFF_AFTER_ON: KeepAwakeStatus = {
+  ...OFF,
+  revision: 4,
+};
 
 // Marks an override value as a command rejection rather than a resolved value.
 class Rejection {
@@ -143,10 +147,94 @@ describe('SessionView', () => {
     await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
     resolveSet(ENABLING);
 
-    // Applying it would strand the panel in a transition that already finished.
+    // The older response is applied through the same revision gate and cannot
+    // strand the panel in a transition that already finished.
     await waitFor(() => expect(toggle).not.toBeDisabled());
     expect(toggle).toHaveTextContent('Stop Preventing Sleep');
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('keeps Start and Stop usable when event subscription is unavailable', async () => {
+    mockListen.mockRejectedValue(new Error('event bridge unavailable'));
+    mockInvoke.mockImplementation((cmd, args) => {
+      if (cmd === 'get_keep_awake') return Promise.resolve(OFF);
+      if (cmd === 'set_keep_awake') {
+        return Promise.resolve((args as { enabled: boolean }).enabled ? ON : OFF_AFTER_ON);
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<SessionView />);
+    const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveTextContent('Start Preventing Sleep…'));
+
+    expect(
+      mockInvoke.mock.calls
+        .filter(([cmd]) => cmd === 'set_keep_awake')
+        .map(([, args]) => (args as { enabled: boolean }).enabled),
+    ).toEqual([true, false]);
+  });
+
+  it('polls a pending command to completion when event subscription is unavailable', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let reads = 0;
+      mockListen.mockRejectedValue(new Error('event bridge unavailable'));
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'get_keep_awake') {
+          reads += 1;
+          return Promise.resolve(reads === 1 ? OFF : ON);
+        }
+        if (cmd === 'set_keep_awake') return Promise.resolve(ENABLING);
+        return Promise.resolve(null);
+      });
+
+      render(<SessionView />);
+      const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle).toBeDisabled());
+
+      await act(() => vi.advanceTimersToNextTimerAsync());
+
+      await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+      expect(toggle).not.toBeDisabled();
+      expect(reads).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears an initial load error when fallback polling recovers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let reads = 0;
+      mockListen.mockRejectedValue(new Error('event bridge unavailable'));
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'get_keep_awake') {
+          reads += 1;
+          return reads === 1 ? Promise.reject(new Error('backend starting')) : Promise.resolve(ON);
+        }
+        return Promise.resolve(null);
+      });
+
+      render(<SessionView />);
+      expect(await screen.findByRole('alert')).toHaveTextContent('backend starting');
+      expect(screen.getByRole('button', { name: MAIN_ACTION })).toBeDisabled();
+
+      await act(() => vi.advanceTimersToNextTimerAsync());
+
+      const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
+      await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+      expect(toggle).not.toBeDisabled();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('subscribes to the change event before the first read', async () => {
@@ -226,10 +314,19 @@ describe('SessionView', () => {
     const toggle = screen.getByRole('button', { name: MAIN_ACTION });
     expect(toggle).toHaveTextContent('Start Preventing Sleep…');
     expect(toggle).toBeDisabled();
+    const timer = screen.getByRole('combobox', { name: 'After a set time' });
+    const acOnly = screen.getByRole('switch', { name: 'When unplugged from power' });
+    const lowBattery = screen.getByRole('combobox', { name: 'When battery reaches 20%' });
+    expect(timer).toBeDisabled();
+    expect(acOnly).toBeDisabled();
+    expect(lowBattery).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
     await waitFor(() => expect(toggle).not.toBeDisabled());
+    expect(timer).not.toBeDisabled();
+    expect(acOnly).not.toBeDisabled();
+    expect(lowBattery).not.toBeDisabled();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(attempts).toBe(2);
   });

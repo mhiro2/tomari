@@ -33,6 +33,8 @@ const DEFAULT_OPTIONS: KeepAwakeOptions = {
   lowBatteryAction: 'warn',
 };
 
+const FALLBACK_POLL_INTERVAL_MS = 1_000;
+
 const LID_CLOSE_CHIP: Record<
   LidCloseState,
   { tone: 'ok' | 'warn' | 'err' | 'muted'; key: MessageKey }
@@ -119,11 +121,17 @@ export function SessionView() {
   const [customTime, setCustomTime] = useState('');
   const [draftOptions, setDraftOptions] = useState(DEFAULT_OPTIONS);
   const [now, setNow] = useState(Date.now());
+  const [eventStreamAvailable, setEventStreamAvailable] = useState<boolean | null>(null);
   // Highest revision applied so far. Several backend threads emit, each
   // snapshotting before it emits, so an older snapshot can still arrive last.
   const appliedRevision = useRef(-1);
 
-  const reportLoadError = useEffectEvent((e: unknown) => setError(formatCmdError(e, t)));
+  const reportLoadError = useEffectEvent((e: unknown) => {
+    // A slower startup read may fail after an event or fallback poll already
+    // recovered the panel. Do not replace that confirmed state with stale
+    // initial-load feedback.
+    if (appliedRevision.current < 0) setError(formatCmdError(e, t));
+  });
 
   // The single writer of every rendered field. The backend owns the options, so
   // mirror whatever it reports back into the timer controls — that matters for
@@ -135,8 +143,12 @@ export function SessionView() {
     // has already finished — with every toggle disabled and no further event
     // coming to release it.
     if (next.revision < appliedRevision.current) return;
+    const firstConfirmedStatus = appliedRevision.current < 0;
     appliedRevision.current = next.revision;
     setStatus(next);
+    // Before the first snapshot there is no actionable command error, so any
+    // existing error can only be an initial-load failure this snapshot heals.
+    if (firstConfirmedStatus) setError(null);
     const options = next.options;
     setDraftOptions(options);
     if (options.durationSecs === 30 * 60) {
@@ -174,9 +186,13 @@ export function SessionView() {
           return;
         }
         unlisten = stop;
+        setEventStreamAvailable(true);
       } catch {
-        // Without the subscription the panel is static, but a read still gives
-        // it something truthful to show, so fall through rather than bail.
+        if (cancelled) return;
+        // A read still gives the panel something truthful to show. Mark the
+        // stream unavailable so the fallback below keeps transitions, timers,
+        // and power guards synchronized after that first snapshot.
+        setEventStreamAvailable(false);
       }
       if (cancelled) return;
       try {
@@ -191,6 +207,32 @@ export function SessionView() {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (eventStreamAvailable !== false) return;
+    let cancelled = false;
+    let requestInFlight = false;
+
+    async function poll() {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const next = await api.getKeepAwake();
+        if (!cancelled) applyStatus(next);
+      } catch {
+        // Preserve the last confirmed snapshot. The next tick retries, while
+        // an initial-load failure still exposes its explicit Retry control.
+      } finally {
+        requestInFlight = false;
+      }
+    }
+
+    const timer = window.setInterval(() => void poll(), FALLBACK_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [eventStreamAvailable]);
 
   useEffect(() => {
     if (!status?.active || status.options.endsAtMs === null) return;
@@ -208,18 +250,16 @@ export function SessionView() {
     if (recoveryShown) recoveryRef.current?.focus();
   }, [recoveryShown]);
 
-  // Transitions are driven entirely by "tomari:keep-awake-changed": the backend
-  // emits it for every change it makes, so the command's own return value is
-  // deliberately discarded. Applying it too would let the snapshot it captured
-  // *before* spawning the background worker overwrite the newer event that
-  // worker has already emitted — leaving the panel stuck showing enabling or
-  // disabling for a transition that finished.
+  // Commands and events are both authoritative snapshots. Apply either one;
+  // `applyStatus` rejects an older command response when its background worker
+  // has already published a newer event. This command path also keeps the
+  // controls usable when event subscription is unavailable.
   async function run(command: () => Promise<KeepAwakeStatus>) {
     if (commandBusy) return;
     setCommandBusy(true);
     setError(null);
     try {
-      await command();
+      applyStatus(await command());
     } catch (e) {
       setError(formatCmdError(e, t));
       try {
@@ -394,7 +434,9 @@ export function SessionView() {
 
       <SafetySettings
         t={t}
-        busy={busy}
+        // Drafts are defaults until the first backend snapshot. Keep them
+        // read-only so an edit cannot race the load and then appear to vanish.
+        busy={busy || !ready}
         timerMode={timerMode}
         customTime={customTime}
         options={draftOptions}
