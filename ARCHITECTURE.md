@@ -594,7 +594,10 @@ and applies none of them.
 ## 7. Tauri shell and the frontend boundary
 
 - `main.rs` is the assembly point: resolve the data directory and start
-  logging → take the `InstanceLock` (a launch that cannot hands off to the
+  logging (stderr plus a daily-rotated file under `<data_dir>/logs`, seven days
+  kept, each day soft-capped at 8 MiB by `logcap` — seeded from what an
+  earlier run wrote that day; past the cap one notice is written and the rest
+  of the day's lines go to stderr only) → take the `InstanceLock` (a launch that cannot hands off to the
   running instance and exits before touching the database) → open and seed the
   DB → build `AppState` (DB, both engines, the `WindowManager`, the settings
   cache, the shortcut map, the undo history) → wire the plugins (single-instance
@@ -716,7 +719,10 @@ and applies none of them.
   `dispatch_deep_link` in `main.rs`): launchers like Raycast/Alfred drive
   Tomari through `tomari://v1/...`. `tauri-plugin-deep-link` delivers URLs; the
   cold-start URL (`get_current`) and warm-start URLs (`on_open_url`) funnel
-  through one handler — never argv. `parse_deep_link` validates strictly
+  through one handler — never argv. The URL itself is never logged (a local
+  sender can put anything in it); a refusal logs only the error's kind and an
+  accepted action's failure only the action and error code, at most one line
+  per five seconds. `parse_deep_link` validates strictly
   (versioned `v1`; no query/fragment/userinfo/port; unknown verbs or extra
   args rejected) into `ExternalAction`, a deliberately small allowlist — snap /
   move-display / undo / toggle-panel — that is the security boundary between an

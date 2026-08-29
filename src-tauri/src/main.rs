@@ -21,10 +21,12 @@ mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
 mod locks;
+mod logcap;
 mod mailbox;
 mod menubar;
 #[cfg(target_os = "macos")]
 mod overlay;
+mod ratelimit;
 mod regrant;
 mod shortcuts;
 mod state;
@@ -446,6 +448,12 @@ fn main() {
 /// launcher has already moved on, so there is no caller to return a result to —
 /// a malformed URL, a disabled master switch, or a failed action is logged and
 /// dropped rather than surfaced.
+///
+/// The URL itself is never logged: any local process can send one, and its
+/// query, userinfo or path may carry tokens or personal data that would then
+/// sit in the seven-day log. Only the action kind and a redacted reason are
+/// recorded, and at most one line per [`DEEP_LINK_LOG_INTERVAL`], so a sender
+/// spraying URLs cannot fill the log either.
 fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -453,7 +461,9 @@ fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     let external = match tomari_core::parse_deep_link(raw) {
         Ok(action) => action,
         Err(e) => {
-            tracing::warn!(url = %raw, error = %e, "ignoring malformed tomari:// URL");
+            if DEEP_LINK_LOG.allow(std::time::Instant::now()) {
+                tracing::warn!(reason = e.kind(), "ignoring malformed tomari:// URL");
+            }
             return;
         }
     };
@@ -463,7 +473,12 @@ fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     // the recovery route for a hidden menu bar, so it must keep working.
     if external.is_window_placement() && !state.settings.lock_safe().external_window_actions_enabled
     {
-        tracing::warn!(url = %raw, "external window actions disabled; ignoring tomari:// URL");
+        if DEEP_LINK_LOG.allow(std::time::Instant::now()) {
+            tracing::warn!(
+                action = ?external,
+                "external window actions disabled; ignoring tomari:// URL"
+            );
+        }
         return;
     }
     // dispatch does exactly what the action says — a snap never summons the
@@ -474,17 +489,32 @@ fn dispatch_deep_link(app: &tauri::AppHandle, raw: &str) {
     let action = match validate::sanitize_app_action(action) {
         Ok(action) => action,
         Err(e) => {
-            tracing::warn!(url = %raw, error = %e, "tomari:// action rejected");
+            // The action is a closed enum; the error's text is not logged —
+            // nothing free-form from a URL-derived path reaches the file.
+            let _ = e;
+            if DEEP_LINK_LOG.allow(std::time::Instant::now()) {
+                tracing::warn!(action = ?external, "tomari:// action rejected");
+            }
             return;
         }
     };
-    if let Err(e) = actions::dispatch(&action, app, state.inner()) {
-        tracing::warn!(url = %raw, error = %e, "tomari:// action failed");
+    if let Err(e) = actions::dispatch(&action, app, state.inner())
+        && DEEP_LINK_LOG.allow(std::time::Instant::now())
+    {
+        // Same rule: the failure's kind (its error code) is logged, never its
+        // free-form message.
+        tracing::warn!(action = ?external, code = ?e.code, "tomari:// action failed");
     }
 }
 
+/// How often `tomari://` handling may log at most.
+const DEEP_LINK_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+static DEEP_LINK_LOG: ratelimit::RateLimit = ratelimit::RateLimit::new(DEEP_LINK_LOG_INTERVAL);
+
 /// How many daily log files to keep before the oldest is pruned.
 const LOG_KEEP_FILES: usize = 7;
+/// The per-day byte budget of the log file.
+static LOG_BUDGET: logcap::DailyBudget = logcap::DailyBudget::new(logcap::DAILY_LOG_BYTES);
 
 /// Route logs to stderr and, when the data directory is known, to a
 /// daily-rotated file under `<data_dir>/logs`. Launched as a login item the
@@ -499,16 +529,25 @@ fn init_logging(paths: Option<&AppPaths>) {
         .unwrap_or_else(|_| "tomari=info,warn".into());
 
     let file_layer = paths.and_then(|p| {
+        let logs_dir = p.data_dir.join("logs");
+        // What an earlier run wrote today counts against today's budget too;
+        // otherwise every restart would hand the day a fresh cap.
+        LOG_BUDGET.seed(
+            logcap::today(),
+            logcap::existing_bytes_today(&logs_dir, "tomari", "log"),
+        );
         match tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .filename_prefix("tomari")
             .filename_suffix("log")
             .max_log_files(LOG_KEEP_FILES)
-            .build(p.data_dir.join("logs"))
+            .build(logs_dir)
         {
+            // Capped per day (see `logcap`): rotation bounds how many days are
+            // kept, the budget bounds how much one day can hold.
             Ok(appender) => Some(
                 tracing_subscriber::fmt::layer()
-                    .with_writer(appender)
+                    .with_writer(logcap::Capped::new(appender, &LOG_BUDGET))
                     .with_ansi(false),
             ),
             Err(e) => {

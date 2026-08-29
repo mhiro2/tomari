@@ -100,6 +100,26 @@ pub enum DeepLinkError {
     UnknownDirection(String),
 }
 
+impl DeepLinkError {
+    /// The error's category alone — safe to log where the URL itself is not:
+    /// several variants quote a path segment verbatim, and a URL may carry
+    /// anything a local sender put in it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WrongScheme => "wrongScheme",
+            Self::Malformed(_) => "malformed",
+            Self::TooLong => "tooLong",
+            Self::DisallowedComponent(_) => "disallowedComponent",
+            Self::UnknownVersion(_) => "unknownVersion",
+            Self::UnknownVerb(_) => "unknownVerb",
+            Self::UnexpectedArguments(_) => "unexpectedArguments",
+            Self::MissingArgument(_) => "missingArgument",
+            Self::UnknownPreset(_) => "unknownPreset",
+            Self::UnknownDirection(_) => "unknownDirection",
+        }
+    }
+}
+
 /// Parse a `tomari://v1/...` URL into the [`ExternalAction`] it requests.
 ///
 /// Strict on purpose: anything the grammar does not explicitly allow — a query
@@ -180,6 +200,16 @@ pub fn parse_deep_link(input: &str) -> Result<ExternalAction, DeepLinkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_error_kind_never_quotes_the_url() {
+        let secret = "tomari://v1/snap/token-abc123?x=1";
+        let err = parse_deep_link(secret).expect_err("query strings are refused");
+        assert!(!err.kind().contains("abc123"));
+        let err = parse_deep_link("tomari://v1/frobnicate-abc123").expect_err("unknown verb");
+        assert_eq!(err.kind(), "unknownVerb");
+        assert!(!err.kind().contains("abc123"));
+    }
 
     #[test]
     fn parses_every_snap_preset() {

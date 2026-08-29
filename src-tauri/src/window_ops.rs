@@ -13,11 +13,11 @@ use tomari_core::{
 };
 use tomari_window::{FocusedWindow, WindowHandle, adjacent_work_area, geometry};
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::error::CmdError;
 use crate::locks::MutexExt;
+use crate::ratelimit::RateLimit;
 use crate::state::{AppState, LastPlacement, LastSnap, PlacementEdit, WindowChange};
 
 /// Opaque identity of the window represented by a [`PlacementContext`]. UI
@@ -181,41 +181,6 @@ fn apply(
 
 /// Rate limit for the drag-to-snap apply-failure log.
 static DRAG_APPLY_LOG: RateLimit = RateLimit::new(Duration::from_secs(10));
-
-/// At most one event per `interval`. Lock-free; the first call always passes.
-struct RateLimit {
-    interval: Duration,
-    /// Milliseconds since `RateLimit::EPOCH` of the last event let through, or
-    /// `0` for none yet.
-    last_ms: AtomicU64,
-}
-
-impl RateLimit {
-    const fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            last_ms: AtomicU64::new(0),
-        }
-    }
-
-    /// Whether an event at `now` may go through.
-    fn allow(&self, now: Instant) -> bool {
-        // Saturating: the first caller may have read `now` before `EPOCH` was
-        // initialised, i.e. slightly before it.
-        let now_ms = now.saturating_duration_since(*EPOCH).as_millis() as u64 + 1;
-        let last = self.last_ms.load(Ordering::Relaxed);
-        if last != 0 && now_ms.saturating_sub(last) < self.interval.as_millis() as u64 {
-            return false;
-        }
-        self.last_ms
-            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    }
-}
-
-/// Reference point for [`RateLimit`]'s timestamps (an `Instant` cannot be a
-/// `const`).
-static EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 
 /// Snap a window the user dragged to a screen edge to the frame `decide`
 /// chooses, recording its mouse-down frame as the undo target. Reading "before"
@@ -1263,17 +1228,6 @@ mod tests {
         assert!(!apply_dragged(&state, &handle, start, || None));
         assert_eq!(handle.frame().unwrap(), released_at_edge);
         assert_eq!(state.window_history_status(), (false, false));
-    }
-
-    #[test]
-    fn the_apply_failure_log_is_rate_limited() {
-        let limit = RateLimit::new(Duration::from_secs(10));
-        let t0 = *EPOCH + Duration::from_secs(100);
-        assert!(limit.allow(t0));
-        assert!(!limit.allow(t0 + Duration::from_secs(5)));
-        assert!(!limit.allow(t0 + Duration::from_millis(9_999)));
-        assert!(limit.allow(t0 + Duration::from_secs(10)));
-        assert!(!limit.allow(t0 + Duration::from_secs(11)));
     }
 
     /// A handle whose window always fails with a configurable error, to drive
