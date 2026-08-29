@@ -5,18 +5,22 @@
 //! with Command held. This module synthesizes that gesture and restores the
 //! cursor through a drop guard on every exit path.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventType, CGMouseButton,
+    CallbackResult, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use super::status::ScanContext;
 use super::{MenuBarItem, MenuBarItemZone};
-use crate::eventtap::SYNTHETIC_MARKER;
+use crate::eventtap::{SYNTHETIC_MARKER, is_synthetic};
+use crate::tap::{self, RunningTap};
 
 const DROP_GAP: f64 = 3.0;
 const DRAG_STEPS: usize = 16;
@@ -56,19 +60,30 @@ unsafe extern "C" {
 pub(super) struct CursorRestore {
     original: CGPoint,
     last: CGPoint,
+    /// The display the cursor started on, or `None` if none reported it (a
+    /// display unplugged as the position was read) — a fallback case too.
+    origin_display: Option<CGDisplay>,
+    /// The display used to hide/show the cursor (the origin one, else main).
     display: CGDisplay,
     cleanup_up: CGEvent,
     cursor_hidden: bool,
     cursor_moved: bool,
     mouse_down: bool,
+    /// Kept alive until the cursor is back where it belongs: `Drop::drop` runs
+    /// the warp/show first and the fields drop after it, so physical input is
+    /// watched for as long as the pointer is not the user's own.
+    _interference: InterferenceGuard,
 }
 
 impl CursorRestore {
-    fn new(original: CGPoint, cleanup_up: CGEvent) -> Self {
-        let display = CGDisplay::displays_with_point(original, 1)
+    fn new(original: CGPoint, cleanup_up: CGEvent, interference: InterferenceGuard) -> Self {
+        let origin_display = CGDisplay::displays_with_point(original, 1)
             .ok()
             .and_then(|(ids, count)| (count > 0).then(|| ids.into_iter().next()).flatten())
-            .map(CGDisplay::new)
+            .map(CGDisplay::new);
+        let display = origin_display
+            .as_ref()
+            .map(|d| CGDisplay::new(d.id))
             .unwrap_or_else(CGDisplay::main);
         let cursor_hidden = match display.hide_cursor() {
             Ok(()) => true,
@@ -80,12 +95,18 @@ impl CursorRestore {
         Self {
             original,
             last: original,
+            origin_display,
             display,
             cleanup_up,
             cursor_hidden,
             cursor_moved: false,
             mouse_down: false,
+            _interference: interference,
         }
+    }
+
+    fn interrupted(&self) -> bool {
+        self._interference.interrupted()
     }
 
     fn post(&mut self, event: &CGEvent, point: CGPoint) {
@@ -107,6 +128,23 @@ impl CursorRestore {
     }
 }
 
+/// Where to put the cursor back. The point it started from — unless the display
+/// it was on has gone away since (unplugged mid-drag), in which case warping
+/// there would park the cursor off every screen or on whatever display now
+/// happens to cover those coordinates; the main display's centre is the
+/// fallback. Judged by the *identity* of the original display, not by whether
+/// some display covers the point.
+fn restore_target(origin_display: Option<&CGDisplay>, original: CGPoint) -> CGPoint {
+    if origin_display.is_some_and(|display| display.is_active()) {
+        return original;
+    }
+    let bounds = CGDisplay::main().bounds();
+    CGPoint::new(
+        bounds.origin.x + bounds.size.width / 2.0,
+        bounds.origin.y + bounds.size.height / 2.0,
+    )
+}
+
 impl Drop for CursorRestore {
     fn drop(&mut self) {
         if self.mouse_down {
@@ -115,7 +153,10 @@ impl Drop for CursorRestore {
             self.mouse_down = false;
         }
         if self.cursor_moved {
-            if let Err(code) = CGDisplay::warp_mouse_cursor_position(self.original) {
+            if let Err(code) = CGDisplay::warp_mouse_cursor_position(restore_target(
+                self.origin_display.as_ref(),
+                self.original,
+            )) {
                 tracing::warn!(
                     code,
                     "could not restore cursor position after menu bar drag"
@@ -132,8 +173,82 @@ impl Drop for CursorRestore {
     }
 }
 
+/// Watches for *physical* input while the synthetic gesture runs. The gesture
+/// takes a few hundred milliseconds during which the pointer is parked over a
+/// foreign item; a real click landing then would go to that item at the warp
+/// destination, and a real mouse-down would tangle with the synthetic release.
+/// Checking the button state between steps only catches a press that is
+/// still held, so a short-lived listen-only tap records any event that does
+/// not carry Tomari's own marker — a click, a drag, a key — and the gesture
+/// cancels at the next step, letting the drop guard release and restore.
+///
+/// Best-effort: the tap needs Input Monitoring; without it (or if the tap
+/// fails to start) the gesture runs with the button-state checks alone, as it
+/// always did.
+struct InterferenceGuard {
+    _tap: Option<RunningTap>,
+    seen: Arc<AtomicBool>,
+}
+
+impl InterferenceGuard {
+    fn start() -> Self {
+        let seen = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&seen);
+        let tap = tap::spawn(
+            "tomari-menubar-guard",
+            "menu bar drag guard",
+            CGEventTapOptions::ListenOnly,
+            vec![
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+                CGEventType::LeftMouseDragged,
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+                CGEventType::RightMouseDragged,
+                CGEventType::OtherMouseDown,
+                CGEventType::OtherMouseUp,
+                CGEventType::OtherMouseDragged,
+                CGEventType::MouseMoved,
+                CGEventType::ScrollWheel,
+                CGEventType::KeyDown,
+                CGEventType::KeyUp,
+                CGEventType::FlagsChanged,
+            ],
+            move |_port_holder| {
+                Box::new(move |_proxy, _etype, event: &CGEvent| {
+                    // Nothing slow here: one marker read and one atomic store.
+                    if !is_synthetic(event) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    CallbackResult::Keep
+                })
+            },
+        );
+        let tap = match tap {
+            Ok(tap) => Some(tap),
+            Err(e) => {
+                tracing::debug!(error = %e, "menu bar drag runs without the physical-input guard");
+                None
+            }
+        };
+        Self { _tap: tap, seen }
+    }
+
+    fn interrupted(&self) -> bool {
+        self.seen.load(Ordering::SeqCst)
+    }
+}
+
+fn interrupted_error() -> CommandDragError {
+    CommandDragError::Unavailable(
+        "physical input arrived during the menu bar drag; the move was cancelled".into(),
+    )
+}
+
 /// Perform the public Command-drag gesture and leave cursor restoration to the
-/// returned guard. The function refuses to interfere with a real mouse press.
+/// returned guard. The function refuses to interfere with a real mouse press,
+/// and cancels — releasing and restoring through the guard — the moment
+/// physical input is seen while the gesture is in flight.
 pub(super) fn command_drag(
     item: &MenuBarItem,
     context: ScanContext,
@@ -180,10 +295,17 @@ pub(super) fn command_drag(
             "left mouse button was pressed before the drag could start".into(),
         ));
     }
+    // Armed before the cursor position is read and before the pointer is
+    // touched: starting the tap can take a moment, and a mouse moved meanwhile
+    // must both count as interference and define where the cursor goes back.
+    let interference = InterferenceGuard::start();
     let original = CGEvent::new(source.clone())
         .map_err(|()| "failed to read cursor position".to_string())?
         .location();
-    let mut restore = CursorRestore::new(original, cleanup_up);
+    if interference.interrupted() {
+        return Err(interrupted_error());
+    }
+    let mut restore = CursorRestore::new(original, cleanup_up, interference);
 
     // Creating the guard hides but does not move the pointer. Check once more
     // here so a physical press that began during setup is rejected in place,
@@ -192,6 +314,9 @@ pub(super) fn command_drag(
         return Err(CommandDragError::Unavailable(
             "left mouse button was pressed before the drag could start".into(),
         ));
+    }
+    if restore.interrupted() {
+        return Err(interrupted_error());
     }
     restore.post(&move_event, start);
     // Do not perform Accessibility work while the pointer is parked over a
@@ -202,14 +327,33 @@ pub(super) fn command_drag(
             "left mouse button was pressed before the drag could start".into(),
         ));
     }
+    if restore.interrupted() {
+        return Err(interrupted_error());
+    }
     restore.press(&down_event, start);
     std::thread::sleep(PRESS_SETTLE);
     for (event, point) in &drag_events {
+        // A cancel here leaves the synthetic press owned by `restore`, whose
+        // drop posts the matching release at the last point and restores the
+        // cursor — the item is left wherever the partial drag put it, which
+        // the caller's verification scan then reports.
+        if restore.interrupted() {
+            return Err(interrupted_error());
+        }
         restore.post(event, *point);
         std::thread::sleep(DRAG_STEP_DELAY);
     }
+    if restore.interrupted() {
+        return Err(interrupted_error());
+    }
     restore.release(&up_event, destination);
     std::thread::sleep(RELEASE_SETTLE);
+    // Input during the release or its settle (or one the tap had not yet
+    // handled at the last check) still contaminates the result: report it
+    // rather than verify an interrupted gesture as a success.
+    if restore.interrupted() {
+        return Err(interrupted_error());
+    }
     Ok(restore)
 }
 

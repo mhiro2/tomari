@@ -910,7 +910,13 @@ to the requested side of the divider. Scans and moves share one session lock;
 all other physical divider updates defer until that operation releases it. A
 move expands the divider, resolves the opaque id against a fresh scan, refuses
 ambiguous identities, and rechecks the selected process, item frame, and divider
-geometry immediately before mouse-down. A stable AX identifier remains valid
+geometry immediately before mouse-down. While the synthetic gesture is in
+flight a short-lived listen-only tap watches for any input that does not carry
+Tomari's synthetic marker — a real click, drag or key — and the gesture cancels
+at the next step, the drop guard posting the matching release and restoring the
+cursor (to its original point, or the main display's centre if that display has
+gone away). Without Input Monitoring the tap cannot start and the gesture falls
+back to the button-state checks alone. A stable AX identifier remains valid
 when a dynamic display label changes; an item without one must retain its label
 and snapshot geometry before Tomari will touch it. Post-drag verification waits
 on that retained AX element, takes one full inventory for the UI, then checks
