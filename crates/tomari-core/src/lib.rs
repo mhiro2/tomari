@@ -12,7 +12,10 @@ pub mod error;
 pub mod external;
 pub mod paths;
 
-pub use db::Database;
+pub use db::{
+    Database, PersistedRowCounts, PersistedSettings, PersistedStatePreflight,
+    StartupConfigurationReset,
+};
 pub use error::{Error, Result};
 pub use external::{DeepLinkError, ExternalAction, parse_deep_link};
 pub use paths::AppPaths;

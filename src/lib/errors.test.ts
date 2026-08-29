@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { LOCALIZED_CODES, cmdErrorMessage, errorText, formatCmdError } from './errors';
+import {
+  LOCALIZED_CODES,
+  cmdErrorMessage,
+  errorText,
+  formatCmdError,
+  hasCmdErrorCode,
+} from './errors';
 import { DICTS, translate } from './i18n';
 import type { CmdError } from './types';
 
@@ -50,6 +56,18 @@ describe('cmdErrorMessage', () => {
   it('falls back to errorText when message is missing or empty', () => {
     expect(cmdErrorMessage({ code: 'other', message: '' })).toBe('[object Object]');
     expect(cmdErrorMessage(new Error('boom'))).toBe('boom');
+  });
+});
+
+describe('hasCmdErrorCode', () => {
+  it('matches only the requested stable command code', () => {
+    expect(hasCmdErrorCode({ code: 'settingsRecoveryRequired' }, 'settingsRecoveryRequired')).toBe(
+      true,
+    );
+    expect(hasCmdErrorCode({ code: 'other' }, 'settingsRecoveryRequired')).toBe(false);
+    expect(hasCmdErrorCode(new Error('settingsRecoveryRequired'), 'settingsRecoveryRequired')).toBe(
+      false,
+    );
   });
 });
 

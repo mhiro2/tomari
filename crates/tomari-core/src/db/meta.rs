@@ -5,7 +5,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use super::Database;
+use super::{Database, PersistedRowCounts};
 use crate::error::Result;
 
 impl Database {
@@ -33,6 +33,20 @@ impl Database {
             Ok(())
         })
     }
+}
+
+/// Read every metadata column without retaining internal values in the public
+/// startup report.
+pub(super) fn preflight_meta(conn: &rusqlite::Connection) -> Result<PersistedRowCounts> {
+    let mut statement = conn.prepare("SELECT key, value FROM meta ORDER BY key")?;
+    let mut rows = statement.query([])?;
+    let mut counts = PersistedRowCounts::default();
+    while let Some(row) = rows.next()? {
+        let _: String = row.get(0)?;
+        let _: String = row.get(1)?;
+        counts.stored += 1;
+    }
+    Ok(counts)
 }
 
 #[cfg(test)]

@@ -30,6 +30,14 @@ import type {
 } from './types';
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
+
+// Retry the unreadable persisted snapshot without changing it, or replace the
+// affected settings and automation rows with the backend's fixed fail-closed
+// profile. A successful command restarts Tomari, so these promises do not
+// settle in production. Keeping `void` here also prevents the frontend from
+// supplying a supposedly safe profile of its own.
+export const retrySettingsRecovery = (): Promise<void> => invoke('retry_settings_recovery');
+export const resetSettingsRecovery = (): Promise<void> => invoke('reset_settings_recovery');
 // The `applyWarnings` the live state warrants right now, independent of any
 // save — read when the panel opens so a mismatch left over from an earlier
 // session (a Caps Lock restore that failed on quit, say) is shown at once.

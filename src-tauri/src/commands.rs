@@ -3,13 +3,16 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tomari_core::{AppSettings, DisplayDirection, Hotkey, ModifierRule, PlacementSlot};
+use tomari_core::{
+    AppPaths, AppSettings, DisplayDirection, Hotkey, ModifierRule, PersistedSettings,
+    PlacementSlot, StartupConfigurationReset,
+};
 use tomari_keyboard::accelerator;
 
 use crate::error::CmdError;
 use crate::locks::MutexExt;
 use crate::shortcuts;
-use crate::state::AppState;
+use crate::state::{AppState, ConfigurationRecovery};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,9 +96,20 @@ pub struct PendingUpdateSlot {
 type CmdResult<T> = Result<T, CmdError>;
 
 fn lock_config_mutation(state: &AppState) -> CmdResult<std::sync::MutexGuard<'_, ()>> {
-    state
+    // Reject before waiting as well as after acquiring the lock. A settings
+    // autosave issued while the recovery screen is up must not queue behind
+    // the explicit reset and then land on the freshly repaired row after the
+    // reset releases the lock.
+    if state.configuration_recovery_required() {
+        return Err(CmdError::settings_recovery_required());
+    }
+    let guard = state
         .lock_config_mutation()
-        .ok_or_else(|| CmdError::other("Tomari is shutting down"))
+        .ok_or_else(|| CmdError::other("Tomari is shutting down"))?;
+    if state.configuration_recovery_required() {
+        return Err(CmdError::settings_recovery_required());
+    }
+    Ok(guard)
 }
 
 /// Hold the terminal-aware config gate around one complete persistence and
@@ -136,12 +150,148 @@ where
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
+    settings_for_frontend(state.inner())
+}
+
+fn settings_for_frontend(state: &AppState) -> CmdResult<AppSettings> {
+    match state.configuration_recovery() {
+        Some(ConfigurationRecovery::DatabaseReset) => {
+            return Err(CmdError::database_reset_required());
+        }
+        Some(
+            ConfigurationRecovery::SettingsUnreadable | ConfigurationRecovery::DatabaseReadFailed,
+        ) => return Err(CmdError::settings_recovery_required()),
+        None => {}
+    }
     // Return the live, sanitized in-memory settings rather than re-reading the
     // database. `AppState.settings` is the single source of truth the engines,
     // tray and taps run from; the DB is only its persistence layer. Reading the
     // row directly would let the UI drift from runtime state if a row were
     // hand-edited, out of range, or written ahead of the live update.
     Ok(state.settings.lock_safe().clone())
+}
+
+/// Re-read every persisted input/window configuration source and relaunch only
+/// when the snapshot is now complete. This is the non-destructive recovery
+/// path for a transient read failure or a settings row repaired outside Tomari.
+#[tauri::command]
+pub async fn retry_settings_recovery(app: AppHandle) -> CmdResult<()> {
+    off_main(app, |app, state| {
+        run_settings_recovery(app, state, retry_settings_recovery_locked)
+    })
+    .await
+}
+
+/// Replace the unreadable startup configuration with Tomari's fixed safe
+/// profile, then relaunch. A settings-only decode failure preserves readable
+/// shortcuts and rules; a general database read failure replaces all startup
+/// automation rows so Reset cannot strand the user behind the same interlock.
+/// No caller-provided settings cross this boundary, and recovery always leaves
+/// automation off until the user enables it again.
+#[tauri::command]
+pub async fn reset_settings_recovery(app: AppHandle) -> CmdResult<()> {
+    off_main(app, |app, state| {
+        run_settings_recovery(app, state, reset_settings_recovery_locked)
+    })
+    .await
+}
+
+fn run_settings_recovery(
+    app: &AppHandle,
+    state: &AppState,
+    operation: impl FnOnce(&AppState) -> CmdResult<()>,
+) -> CmdResult<()> {
+    if state.configuration_recovery().is_none() {
+        return Ok(());
+    }
+    let paths = app.state::<AppPaths>();
+    match state
+        .lifecycle
+        .run_configuration_recovery(|| run_settings_recovery_operation(state, &paths, operation))
+    {
+        crate::lifecycle::RecoveryRun::Busy | crate::lifecycle::RecoveryRun::Terminating => Ok(()),
+        crate::lifecycle::RecoveryRun::Failed(error) => Err(error),
+        crate::lifecycle::RecoveryRun::Relaunch(leader) => {
+            let restart_app = app.clone();
+            crate::lifecycle::finish_recovery_shutdown_then(app, leader, move || {
+                restart_app.restart()
+            })
+        }
+        crate::lifecycle::RecoveryRun::QuitAfterFailure {
+            error,
+            code,
+            leader,
+        } => {
+            tracing::error!(%error, "configuration recovery failed while quit was pending");
+            crate::lifecycle::finish_recovery_shutdown_then(app, leader, || app.exit(code));
+            Err(error)
+        }
+    }
+}
+
+fn run_settings_recovery_operation(
+    state: &AppState,
+    paths: &AppPaths,
+    operation: impl FnOnce(&AppState) -> CmdResult<()>,
+) -> CmdResult<()> {
+    crate::recovery_markers::arm_show_panel_after_recovery(paths)
+        .map_err(|error| CmdError::other(error.to_string()))?;
+    let _config = state
+        .lock_config_mutation()
+        .ok_or_else(|| CmdError::other("Tomari is shutting down"))?;
+    operation(state)?;
+    if state.configuration_recovery() == Some(ConfigurationRecovery::DatabaseReset) {
+        crate::recovery_markers::clear_database_reset_required(paths)
+            .map_err(|error| CmdError::other(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn retry_settings_recovery_locked(state: &AppState) -> CmdResult<()> {
+    let Some(recovery) = state.configuration_recovery() else {
+        return Ok(());
+    };
+    if recovery == ConfigurationRecovery::DatabaseReset {
+        return Err(CmdError::database_reset_required());
+    }
+    probe_persisted_configuration(state)?;
+    Ok(())
+}
+
+fn reset_settings_recovery_locked(state: &AppState) -> CmdResult<()> {
+    let Some(recovery) = state.configuration_recovery() else {
+        return Ok(());
+    };
+    let safe = AppSettings::fail_closed();
+    let mode = match recovery {
+        ConfigurationRecovery::SettingsUnreadable => {
+            StartupConfigurationReset::PreserveReadableAutomation
+        }
+        ConfigurationRecovery::DatabaseReadFailed | ConfigurationRecovery::DatabaseReset => {
+            StartupConfigurationReset::ReplaceAutomation
+        }
+    };
+    state.db.reset_startup_configuration(
+        mode,
+        &tomari_core::defaults::default_hotkeys(),
+        &tomari_core::defaults::default_modifier_rules(),
+        &safe,
+    )?;
+    Ok(())
+}
+
+fn probe_persisted_configuration(state: &AppState) -> CmdResult<()> {
+    let report = state.db.preflight_persisted_state()?;
+    let settings_complete = matches!(report.settings, PersistedSettings::Ready(_))
+        && report.settings_rows.stored == 1
+        && report.settings_rows.skipped == 0;
+    if !settings_complete
+        || report.hotkey_rows.skipped != 0
+        || report.modifier_rule_rows.skipped != 0
+    {
+        return Err(CmdError::settings_recovery_required());
+    }
+    Ok(())
 }
 
 // `async fn`: Tauri dispatches synchronous commands on the main thread, and
@@ -550,7 +700,8 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
     // same terminal cleanup as ordinary quit first, including every tap, Caps
     // Lock's process-external HID mapping, the menu bar, and keep-awake state.
     let restart_app = app.clone();
-    crate::lifecycle::shutdown_then(&app, || restart_app.restart())
+    let _ = crate::lifecycle::shutdown_then_if_leader(&app, || restart_app.restart());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1155,6 +1306,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
+    use tomari_core::Database;
 
     /// A `TapCheck` that was not touched this save: only the live state
     /// matters.
@@ -1203,6 +1355,80 @@ mod tests {
         )
     }
 
+    fn recovery_state(db: Database, recovery: ConfigurationRecovery) -> AppState {
+        use tomari_core::Rect;
+        use tomari_keyboard::ModifierEngine;
+        use tomari_window::MockWindowManager;
+        AppState::new_with_configuration_recovery(
+            db,
+            ModifierEngine::new(Vec::new()),
+            Box::new(MockWindowManager::new(Rect::new(0.0, 0.0, 100.0, 100.0))),
+            AppSettings::fail_closed(),
+            false,
+            Some(recovery),
+        )
+    }
+
+    #[test]
+    fn settings_read_exposes_whether_recovery_can_be_retried() {
+        let retryable = recovery_state(
+            Database::open_in_memory().unwrap(),
+            ConfigurationRecovery::SettingsUnreadable,
+        );
+        assert_eq!(
+            settings_for_frontend(&retryable).unwrap_err().code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+
+        let reset_only = recovery_state(
+            Database::open_in_memory().unwrap(),
+            ConfigurationRecovery::DatabaseReset,
+        );
+        assert_eq!(
+            settings_for_frontend(&reset_only).unwrap_err().code,
+            crate::error::ErrorCode::DatabaseResetRequired
+        );
+    }
+
+    fn settings_recovery_fixture(
+        corrupt_automation_rows: bool,
+    ) -> (tempfile::TempDir, Database, Hotkey, ModifierRule) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.sqlite");
+        let mut hotkey = tomari_core::defaults::default_hotkeys()[0].clone();
+        hotkey.id = "custom-recovery-hotkey".into();
+        let mut rule = tomari_core::defaults::default_modifier_rules()[0].clone();
+        rule.id = "custom-recovery-rule".into();
+        {
+            let db = Database::open(&path).unwrap();
+            db.upsert_hotkey(&hotkey).unwrap();
+            db.upsert_modifier_rule(&rule).unwrap();
+            db.save_settings(&AppSettings::default()).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE settings SET data = ?1 WHERE id = 1",
+                ["{not valid settings json"],
+            )
+            .unwrap();
+            if corrupt_automation_rows {
+                conn.execute(
+                    "UPDATE hotkeys SET action = ?1 WHERE id = ?2",
+                    ("{not valid action json", &hotkey.id),
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE modifier_rules SET modifier = ?1 WHERE id = ?2",
+                    ("{not valid modifier json", &rule.id),
+                )
+                .unwrap();
+            }
+        }
+        let db = Database::open(&path).unwrap();
+        (directory, db, hotkey, rule)
+    }
+
     #[test]
     fn settings_save_queued_on_config_lock_is_rejected_after_terminal_quit() {
         let state = Arc::new(test_state(Vec::new()));
@@ -1232,6 +1458,412 @@ mod tests {
         assert!(result_rx.recv().unwrap());
         assert!(persisted_rx.try_recv().is_err());
         save.join().unwrap();
+    }
+
+    #[test]
+    fn recovery_interlock_rejects_an_ordinary_config_write_before_it_runs() {
+        let state = recovery_state(
+            Database::open_in_memory().unwrap(),
+            ConfigurationRecovery::SettingsUnreadable,
+        );
+        let mut persisted = false;
+
+        let error = with_config_mutation(&state, || {
+            persisted = true;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+        assert!(!persisted);
+    }
+
+    #[test]
+    fn settings_reset_is_safe_and_preserves_keyboard_rows() {
+        let (_directory, db, hotkey, rule) = settings_recovery_fixture(false);
+        assert!(db.get_settings().is_err());
+        let state = recovery_state(db, ConfigurationRecovery::SettingsUnreadable);
+
+        reset_settings_recovery_locked(&state).unwrap();
+        assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+        assert!(
+            state
+                .db
+                .list_hotkeys()
+                .unwrap()
+                .iter()
+                .any(|stored| stored.id == hotkey.id)
+        );
+        assert!(
+            state
+                .db
+                .list_modifier_rules()
+                .unwrap()
+                .iter()
+                .any(|stored| stored.id == rule.id)
+        );
+        assert!(state.configuration_recovery_required());
+    }
+
+    #[test]
+    fn reset_cannot_write_after_retry_has_won_relaunch() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        let db = Database::open_in_memory().unwrap();
+        let mut hotkey = tomari_core::defaults::default_hotkeys()[0].clone();
+        hotkey.id = "keep-after-retry".into();
+        let mut rule = tomari_core::defaults::default_modifier_rules()[0].clone();
+        rule.id = "keep-rule-after-retry".into();
+        db.upsert_hotkey(&hotkey).unwrap();
+        db.upsert_modifier_rule(&rule).unwrap();
+        db.save_settings(&AppSettings::default()).unwrap();
+        let state = recovery_state(db, ConfigurationRecovery::DatabaseReadFailed);
+
+        let first = state.lifecycle.run_configuration_recovery(|| {
+            run_settings_recovery_operation(&state, &paths, retry_settings_recovery_locked)
+        });
+        assert!(matches!(first, crate::lifecycle::RecoveryRun::Relaunch(_)));
+        assert!(
+            crate::recovery_markers::show_panel_after_recovery(&paths).unwrap(),
+            "the winning recovery must carry its panel intent across relaunch"
+        );
+
+        let mut reset_ran = false;
+        let second = state.lifecycle.run_configuration_recovery(|| {
+            reset_ran = true;
+            run_settings_recovery_operation(&state, &paths, reset_settings_recovery_locked)
+        });
+        assert!(matches!(second, crate::lifecycle::RecoveryRun::Terminating));
+        assert!(!reset_ran);
+        assert!(
+            state
+                .db
+                .list_hotkeys()
+                .unwrap()
+                .iter()
+                .any(|stored| stored.id == hotkey.id)
+        );
+        assert!(
+            state
+                .db
+                .list_modifier_rules()
+                .unwrap()
+                .iter()
+                .any(|stored| stored.id == rule.id)
+        );
+    }
+
+    #[test]
+    fn settings_reset_replaces_unreadable_keyboard_rows_in_the_same_repair() {
+        let (_directory, db, hotkey, rule) = settings_recovery_fixture(true);
+        assert!(db.get_settings().is_err());
+        assert_eq!(db.count_hotkeys().unwrap(), 1);
+        assert!(db.list_hotkeys().unwrap().is_empty());
+        assert_eq!(db.count_modifier_rules().unwrap(), 1);
+        assert!(db.list_modifier_rules().unwrap().is_empty());
+        let state = recovery_state(db, ConfigurationRecovery::SettingsUnreadable);
+
+        reset_settings_recovery_locked(&state).unwrap();
+        assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+        assert!(
+            state
+                .db
+                .list_hotkeys()
+                .unwrap()
+                .iter()
+                .all(|stored| stored.id != hotkey.id)
+        );
+        assert!(
+            state
+                .db
+                .list_modifier_rules()
+                .unwrap()
+                .iter()
+                .all(|stored| stored.id != rule.id)
+        );
+        assert_eq!(
+            state.db.count_hotkeys().unwrap(),
+            tomari_core::defaults::default_hotkeys().len()
+        );
+        assert_eq!(
+            state.db.count_modifier_rules().unwrap(),
+            tomari_core::defaults::default_modifier_rules().len()
+        );
+    }
+
+    #[test]
+    fn settings_reset_replaces_scalar_typed_hotkey_or_rule_rows_in_one_repair() {
+        for update in [
+            "UPDATE hotkeys SET enabled = 'unreadable'",
+            "UPDATE modifier_rules SET enabled = 'unreadable'",
+        ] {
+            let (directory, db, hotkey, rule) = settings_recovery_fixture(false);
+            drop(db);
+            {
+                let conn =
+                    rusqlite::Connection::open(directory.path().join("settings.sqlite")).unwrap();
+                conn.execute(update, []).unwrap();
+            }
+            let db = Database::open(directory.path().join("settings.sqlite")).unwrap();
+            assert!(db.get_settings().is_err());
+            let state = recovery_state(db, ConfigurationRecovery::SettingsUnreadable);
+
+            reset_settings_recovery_locked(&state).unwrap();
+            assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+            assert!(
+                state
+                    .db
+                    .list_hotkeys()
+                    .unwrap()
+                    .iter()
+                    .all(|stored| stored.id != hotkey.id)
+            );
+            assert!(
+                state
+                    .db
+                    .list_modifier_rules()
+                    .unwrap()
+                    .iter()
+                    .all(|stored| stored.id != rule.id)
+            );
+            assert_eq!(
+                state.db.count_hotkeys().unwrap(),
+                tomari_core::defaults::default_hotkeys().len()
+            );
+            assert_eq!(
+                state.db.count_modifier_rules().unwrap(),
+                tomari_core::defaults::default_modifier_rules().len()
+            );
+        }
+    }
+
+    #[test]
+    fn settings_reset_propagates_a_structural_error_and_rolls_back() {
+        let (directory, db, hotkey, _rule) = settings_recovery_fixture(false);
+        drop(db);
+        {
+            let conn =
+                rusqlite::Connection::open(directory.path().join("settings.sqlite")).unwrap();
+            conn.execute("DROP TABLE modifier_rules", []).unwrap();
+        }
+        let db = Database::open(directory.path().join("settings.sqlite")).unwrap();
+        let state = recovery_state(db, ConfigurationRecovery::SettingsUnreadable);
+
+        let outcome = state.lifecycle.run_configuration_recovery(|| {
+            let _config = state.lock_config_mutation().unwrap();
+            reset_settings_recovery_locked(&state)
+        });
+        let crate::lifecycle::RecoveryRun::Failed(error) = outcome else {
+            panic!("a failed reset must release recovery ownership");
+        };
+        assert_eq!(error.code, crate::error::ErrorCode::Other);
+        assert!(
+            state.db.get_settings().is_err(),
+            "the unreadable settings row must remain untouched"
+        );
+        assert!(
+            state
+                .db
+                .list_hotkeys()
+                .unwrap()
+                .iter()
+                .any(|stored| stored.id == hotkey.id),
+            "the destructive transaction must roll back before returning"
+        );
+
+        let mut later_operation_ran = false;
+        let later = state.lifecycle.run_configuration_recovery(|| {
+            later_operation_ran = true;
+            Err::<(), _>(CmdError::other("still unreadable"))
+        });
+        assert!(matches!(later, crate::lifecycle::RecoveryRun::Failed(_)));
+        assert!(later_operation_ran);
+    }
+
+    #[test]
+    fn recovery_requires_metadata_and_placement_tables_without_mutating_automation() {
+        for table in ["meta", "window_placements"] {
+            let (directory, db, hotkey, rule) = settings_recovery_fixture(false);
+            drop(db);
+            {
+                let conn =
+                    rusqlite::Connection::open(directory.path().join("settings.sqlite")).unwrap();
+                conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+            }
+            let db = Database::open(directory.path().join("settings.sqlite")).unwrap();
+            let state = recovery_state(db, ConfigurationRecovery::SettingsUnreadable);
+
+            assert!(retry_settings_recovery_locked(&state).is_err());
+            assert!(reset_settings_recovery_locked(&state).is_err());
+            assert!(
+                state.db.get_settings().is_err(),
+                "{table}: the unreadable settings row must not be replaced"
+            );
+            assert!(
+                state
+                    .db
+                    .list_hotkeys()
+                    .unwrap()
+                    .iter()
+                    .any(|stored| stored.id == hotkey.id),
+                "{table}: custom hotkeys must remain untouched"
+            );
+            assert!(
+                state
+                    .db
+                    .list_modifier_rules()
+                    .unwrap()
+                    .iter()
+                    .any(|stored| stored.id == rule.id),
+                "{table}: custom modifier rules must remain untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn quarantined_database_reset_seeds_safe_defaults_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        paths.ensure().unwrap();
+        crate::recovery_markers::arm_database_reset_required(&paths).unwrap();
+        let state = recovery_state(
+            Database::open(&paths.db_path).unwrap(),
+            ConfigurationRecovery::DatabaseReset,
+        );
+
+        run_settings_recovery_operation(&state, &paths, reset_settings_recovery_locked).unwrap();
+        assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+        assert!(!crate::recovery_markers::database_reset_required(&paths).unwrap());
+        assert!(crate::recovery_markers::show_panel_after_recovery(&paths).unwrap());
+        let mut hotkeys = state.db.list_hotkeys().unwrap();
+        let mut expected_hotkeys = tomari_core::defaults::default_hotkeys();
+        hotkeys.sort_by(|left, right| left.id.cmp(&right.id));
+        expected_hotkeys.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(hotkeys, expected_hotkeys);
+        let mut rules = state.db.list_modifier_rules().unwrap();
+        let mut expected_rules = tomari_core::defaults::default_modifier_rules();
+        rules.sort_by(|left, right| left.id.cmp(&right.id));
+        expected_rules.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(rules, expected_rules);
+    }
+
+    #[test]
+    fn quarantined_database_retry_never_reads_or_clears_its_reset_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        paths.ensure().unwrap();
+        crate::recovery_markers::arm_database_reset_required(&paths).unwrap();
+        let state = recovery_state(
+            Database::open(&paths.db_path).unwrap(),
+            ConfigurationRecovery::DatabaseReset,
+        );
+
+        let error = run_settings_recovery_operation(&state, &paths, retry_settings_recovery_locked)
+            .unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::DatabaseResetRequired);
+        assert!(crate::recovery_markers::database_reset_required(&paths).unwrap());
+        assert!(crate::recovery_markers::show_panel_after_recovery(&paths).unwrap());
+        assert!(!state.db.settings_exist().unwrap());
+        assert_eq!(state.db.count_hotkeys().unwrap(), 0);
+        assert_eq!(state.db.count_modifier_rules().unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_quarantined_reset_keeps_both_recovery_markers() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        paths.ensure().unwrap();
+        {
+            let db = Database::open(&paths.db_path).unwrap();
+            drop(db);
+            let conn = rusqlite::Connection::open(&paths.db_path).unwrap();
+            conn.execute("DROP TABLE meta", []).unwrap();
+        }
+        crate::recovery_markers::arm_database_reset_required(&paths).unwrap();
+        let state = recovery_state(
+            Database::open(&paths.db_path).unwrap(),
+            ConfigurationRecovery::DatabaseReset,
+        );
+
+        assert!(
+            run_settings_recovery_operation(&state, &paths, reset_settings_recovery_locked)
+                .is_err()
+        );
+        assert!(crate::recovery_markers::database_reset_required(&paths).unwrap());
+        assert!(crate::recovery_markers::show_panel_after_recovery(&paths).unwrap());
+        assert!(!state.db.settings_exist().unwrap());
+    }
+
+    #[test]
+    fn reset_does_not_report_success_when_its_database_marker_cannot_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        paths.ensure().unwrap();
+        std::fs::create_dir(&paths.database_reset_required_path).unwrap();
+        let state = recovery_state(
+            Database::open(&paths.db_path).unwrap(),
+            ConfigurationRecovery::DatabaseReset,
+        );
+
+        assert!(
+            run_settings_recovery_operation(&state, &paths, reset_settings_recovery_locked)
+                .is_err()
+        );
+        assert!(crate::recovery_markers::database_reset_required(&paths).unwrap());
+        assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+        assert!(crate::recovery_markers::show_panel_after_recovery(&paths).unwrap());
+    }
+
+    #[test]
+    fn general_database_read_reset_replaces_custom_automation_rows() {
+        let db = Database::open_in_memory().unwrap();
+        let mut hotkey = tomari_core::defaults::default_hotkeys()[0].clone();
+        hotkey.id = "custom-recovery-hotkey".into();
+        let mut rule = tomari_core::defaults::default_modifier_rules()[0].clone();
+        rule.id = "custom-recovery-rule".into();
+        db.upsert_hotkey(&hotkey).unwrap();
+        db.upsert_modifier_rule(&rule).unwrap();
+        db.save_settings(&AppSettings::default()).unwrap();
+        let state = recovery_state(db, ConfigurationRecovery::DatabaseReadFailed);
+
+        reset_settings_recovery_locked(&state).unwrap();
+        assert_eq!(state.db.get_settings().unwrap(), AppSettings::fail_closed());
+        assert!(
+            state
+                .db
+                .list_hotkeys()
+                .unwrap()
+                .iter()
+                .all(|stored| stored.id != hotkey.id)
+        );
+        assert!(
+            state
+                .db
+                .list_modifier_rules()
+                .unwrap()
+                .iter()
+                .all(|stored| stored.id != rule.id)
+        );
+    }
+
+    #[test]
+    fn retry_never_seeds_or_overwrites_an_incomplete_store() {
+        let state = recovery_state(
+            Database::open_in_memory().unwrap(),
+            ConfigurationRecovery::DatabaseReadFailed,
+        );
+
+        let error = retry_settings_recovery_locked(&state).unwrap_err();
+        assert_eq!(
+            error.code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+        assert!(!state.db.settings_exist().unwrap());
+        assert_eq!(state.db.count_hotkeys().unwrap(), 0);
+        assert_eq!(state.db.count_modifier_rules().unwrap(), 0);
     }
 
     #[test]

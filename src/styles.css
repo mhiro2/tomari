@@ -73,8 +73,11 @@ button {
   background: var(--bg);
 }
 
+.loading-shell,
 .app--loading {
   display: flex;
+  width: 100%;
+  height: 100vh;
   align-items: center;
   justify-content: center;
   gap: 10px;
@@ -93,6 +96,246 @@ button {
   to {
     opacity: 0.38;
     transform: scale(0.8);
+  }
+}
+
+/* Settings recovery: a quiet, process-wide automation interlock. */
+
+.recovery-shell {
+  display: grid;
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
+  place-items: center;
+  padding: clamp(18px, 5vh, 40px) clamp(18px, 5vw, 48px);
+  overflow: auto;
+  background: var(--bg);
+}
+
+.recovery-card {
+  display: grid;
+  width: min(650px, 100%);
+  gap: 18px;
+  padding: clamp(20px, 4vw, 32px);
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 22px 70px #09080673;
+}
+
+.recovery-shell--load-error .recovery-card {
+  width: min(560px, 100%);
+}
+
+.recovery-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+}
+
+.recovery-brand .brand__icon {
+  width: 28px;
+  height: 28px;
+}
+
+.recovery-brand strong {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 680;
+}
+
+.recovery-header {
+  display: grid;
+  gap: 6px;
+}
+
+.recovery-eyebrow {
+  color: var(--accent-bright);
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.095em;
+  text-transform: uppercase;
+}
+
+.recovery-header h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(24px, 4vw, 30px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.12;
+}
+
+.recovery-header h1:focus-visible {
+  outline: none;
+}
+
+.recovery-header p,
+.recovery-actions p,
+.recovery-confirm p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.recovery-interlock {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 13px;
+  padding: 13px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-surface);
+}
+
+/* An open circuit is the one signature graphic: automation is physically
+   interrupted, without introducing an alarming new visual language. */
+.interlock-mark {
+  position: relative;
+  width: 46px;
+  height: 34px;
+  border: 1px solid #765d24;
+  border-radius: 9px;
+  background: #292318;
+}
+
+.interlock-mark__lead,
+.interlock-mark__arm {
+  position: absolute;
+  top: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent-bright);
+}
+
+.interlock-mark__lead {
+  left: 6px;
+  width: 12px;
+}
+
+.interlock-mark__arm {
+  left: 17px;
+  width: 18px;
+  transform: rotate(-27deg);
+  transform-origin: left center;
+}
+
+.interlock-mark__contact {
+  position: absolute;
+  top: 13px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--accent-bright);
+  border-radius: 50%;
+}
+
+.recovery-interlock__copy {
+  display: grid;
+  gap: 2px;
+}
+
+.recovery-interlock__copy strong {
+  color: var(--accent-bright);
+  font-size: 13px;
+}
+
+.recovery-interlock__copy > span {
+  color: #d8c49c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.recovery-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.recovery-actions > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.recovery-actions h2,
+.recovery-confirm legend {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 660;
+}
+
+.recovery-actions__buttons,
+.recovery-confirm__buttons {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.recovery-confirm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 18px;
+  min-width: 0;
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid #6f4c2d;
+  border-radius: var(--radius-sm);
+  background: var(--warning-surface);
+}
+
+.recovery-confirm legend {
+  grid-column: 1;
+  padding: 0;
+  color: #efbb82;
+}
+
+.recovery-confirm p {
+  grid-column: 1;
+  color: #d5ac83;
+  font-size: 12px;
+}
+
+.recovery-confirm__buttons {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.recovery-error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #754038;
+  border-radius: var(--radius-sm);
+  background: var(--danger-surface);
+  color: #ee9389;
+  font-size: 12px;
+}
+
+@media (max-width: 620px) {
+  .recovery-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recovery-confirm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recovery-confirm__buttons {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .recovery-actions__buttons,
+  .recovery-confirm__buttons {
+    justify-content: flex-start;
   }
 }
 

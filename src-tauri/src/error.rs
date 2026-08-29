@@ -36,6 +36,12 @@ pub enum ErrorCode {
     /// The target application's Accessibility server did not answer the
     /// message, even after the safe read-only retry.
     WindowNotResponding,
+    /// Startup could not establish a trustworthy persisted configuration, so
+    /// ordinary edits stay blocked behind the explicit recovery interlock.
+    SettingsRecoveryRequired,
+    /// SQLite was physically damaged and quarantined. The replacement store
+    /// cannot be trusted until the user explicitly confirms a safe reset.
+    DatabaseResetRequired,
     /// Anything else; `message` carries the detail.
     Other,
 }
@@ -77,6 +83,20 @@ impl CmdError {
 
     pub fn window_target_changed(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::WindowTargetChanged, message)
+    }
+
+    pub fn settings_recovery_required() -> Self {
+        Self::new(
+            ErrorCode::SettingsRecoveryRequired,
+            "saved settings must be repaired before they can be changed",
+        )
+    }
+
+    pub fn database_reset_required() -> Self {
+        Self::new(
+            ErrorCode::DatabaseResetRequired,
+            "the quarantined settings database must be reset before Tomari can continue",
+        )
     }
 }
 
@@ -138,6 +158,8 @@ mod tests {
             ErrorCode::PlacementNotFound => "placementNotFound",
             ErrorCode::WindowTargetChanged => "windowTargetChanged",
             ErrorCode::WindowNotResponding => "windowNotResponding",
+            ErrorCode::SettingsRecoveryRequired => "settingsRecoveryRequired",
+            ErrorCode::DatabaseResetRequired => "databaseResetRequired",
             ErrorCode::Other => "other",
         }
     }
@@ -155,7 +177,9 @@ mod tests {
             Some(ErrorCode::ShortcutConflict) => Some(ErrorCode::PlacementNotFound),
             Some(ErrorCode::PlacementNotFound) => Some(ErrorCode::WindowTargetChanged),
             Some(ErrorCode::WindowTargetChanged) => Some(ErrorCode::WindowNotResponding),
-            Some(ErrorCode::WindowNotResponding) => Some(ErrorCode::Other),
+            Some(ErrorCode::WindowNotResponding) => Some(ErrorCode::SettingsRecoveryRequired),
+            Some(ErrorCode::SettingsRecoveryRequired) => Some(ErrorCode::DatabaseResetRequired),
+            Some(ErrorCode::DatabaseResetRequired) => Some(ErrorCode::Other),
             Some(ErrorCode::Other) => None,
         }
     }
@@ -173,7 +197,7 @@ mod tests {
         // The exact count catches a chain that skips a variant (a lazily
         // added `=> None` arm would otherwise hide the new variant from the
         // loop above).
-        assert_eq!(visited, 7, "the chain must visit every variant once");
+        assert_eq!(visited, 9, "the chain must visit every variant once");
     }
 
     #[test]

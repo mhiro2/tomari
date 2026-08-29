@@ -1,38 +1,15 @@
 //! Repository methods for hotkeys and modifier rules.
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, params};
 
-use super::Database;
+use super::{Database, DecodedRows, PersistedRowCounts};
 use crate::domain::action::AppAction;
 use crate::domain::keyboard::{Hotkey, KeySide, ModifierKey, ModifierRule};
 use crate::error::{Error, Result};
 
-/// Parse a JSON column into a domain value, mapping serde errors into the
-/// `rusqlite` error type so they flow through `query_map`.
-fn from_json<T: serde::de::DeserializeOwned>(json: &str) -> rusqlite::Result<T> {
-    serde_json::from_str(json).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-    })
-}
-
-fn map_hotkey(row: &Row<'_>) -> rusqlite::Result<Hotkey> {
-    let action: AppAction = from_json(&row.get::<_, String>("action")?)?;
-    Ok(Hotkey {
-        id: row.get("id")?,
-        label: row.get("label")?,
-        accelerator: row.get("accelerator")?,
-        action,
-        enabled: row.get::<_, i64>("enabled")? != 0,
-    })
-}
-
 impl Database {
     pub fn list_hotkeys(&self) -> Result<Vec<Hotkey>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT * FROM hotkeys ORDER BY label")?;
-            let rows = stmt.query_map([], map_hotkey)?;
-            super::collect_valid_rows(rows, "hotkey")
-        })
+        self.with_conn(|conn| Ok(read_hotkeys(conn)?.values))
     }
 
     /// Total stored hotkey rows, whether or not they still decode. Paired with
@@ -63,11 +40,7 @@ impl Database {
     }
 
     pub fn list_modifier_rules(&self) -> Result<Vec<ModifierRule>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT * FROM modifier_rules ORDER BY label")?;
-            let rows = stmt.query_map([], map_modifier_rule)?;
-            super::collect_valid_rows(rows, "modifier_rule")
-        })
+        self.with_conn(|conn| Ok(read_modifier_rules(conn)?.values))
     }
 
     pub fn upsert_modifier_rule(&self, rule: &ModifierRule) -> Result<()> {
@@ -136,24 +109,97 @@ pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Res
     Ok(())
 }
 
-fn map_modifier_rule(row: &Row<'_>) -> rusqlite::Result<ModifierRule> {
-    let modifier: ModifierKey = from_json(&row.get::<_, String>("modifier")?)?;
-    let side: KeySide = from_json(&row.get::<_, String>("side")?)?;
-    let remap_to: Option<ModifierKey> = match row.get::<_, Option<String>>("remap_to")? {
-        Some(j) => Some(from_json(&j)?),
-        None => None,
-    };
-    let tap: AppAction = from_json(&row.get::<_, String>("tap")?)?;
-    Ok(ModifierRule {
-        id: row.get("id")?,
-        label: row.get("label")?,
-        modifier,
-        side,
-        remap_to,
-        hyper: row.get::<_, i64>("hyper")? != 0,
-        tap,
-        enabled: row.get::<_, i64>("enabled")? != 0,
-    })
+/// Read every persisted hotkey column from an existing connection.
+pub(super) fn read_hotkeys(conn: &Connection) -> Result<DecodedRows<Hotkey>> {
+    let mut statement = conn.prepare(
+        "SELECT id, label, accelerator, action, enabled
+         FROM hotkeys
+         ORDER BY label, id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut values = Vec::new();
+    let mut counts = PersistedRowCounts::default();
+
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let label: String = row.get(1)?;
+        let accelerator: String = row.get(2)?;
+        let action: String = row.get(3)?;
+        let enabled: i64 = row.get(4)?;
+        counts.stored += 1;
+
+        match serde_json::from_str(&action) {
+            Ok(action) => values.push(Hotkey {
+                id,
+                label,
+                accelerator,
+                action,
+                enabled: enabled != 0,
+            }),
+            Err(error) => {
+                counts.skipped += 1;
+                tracing::warn!(
+                    entity = "hotkey",
+                    row_id = id,
+                    %error,
+                    "skipping a stored row whose JSON does not deserialize"
+                );
+            }
+        }
+    }
+
+    Ok(DecodedRows { values, counts })
+}
+
+/// Read every persisted modifier-rule column from an existing connection.
+pub(super) fn read_modifier_rules(conn: &Connection) -> Result<DecodedRows<ModifierRule>> {
+    let mut statement = conn.prepare(
+        "SELECT id, label, modifier, side, remap_to, hyper, tap, enabled
+         FROM modifier_rules
+         ORDER BY label, id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut values = Vec::new();
+    let mut counts = PersistedRowCounts::default();
+
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let label: String = row.get(1)?;
+        let modifier: String = row.get(2)?;
+        let side: String = row.get(3)?;
+        let remap_to: Option<String> = row.get(4)?;
+        let hyper: i64 = row.get(5)?;
+        let tap: String = row.get(6)?;
+        let enabled: i64 = row.get(7)?;
+        counts.stored += 1;
+
+        let decoded = (|| -> serde_json::Result<ModifierRule> {
+            Ok(ModifierRule {
+                id: id.clone(),
+                label,
+                modifier: serde_json::from_str::<ModifierKey>(&modifier)?,
+                side: serde_json::from_str::<KeySide>(&side)?,
+                remap_to: remap_to.as_deref().map(serde_json::from_str).transpose()?,
+                hyper: hyper != 0,
+                tap: serde_json::from_str::<AppAction>(&tap)?,
+                enabled: enabled != 0,
+            })
+        })();
+        match decoded {
+            Ok(rule) => values.push(rule),
+            Err(error) => {
+                counts.skipped += 1;
+                tracing::warn!(
+                    entity = "modifier rule",
+                    row_id = id,
+                    %error,
+                    "skipping a stored row whose JSON does not deserialize"
+                );
+            }
+        }
+    }
+
+    Ok(DecodedRows { values, counts })
 }
 
 #[cfg(test)]

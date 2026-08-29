@@ -49,14 +49,54 @@ function Localized() {
 
   return (
     <I18nProvider lang={lang}>
-      <AppShell />
+      <SettingsRoot />
     </I18nProvider>
   );
 }
 
-function AppShell() {
+// Do not mount permission listeners or any feature view until the settings
+// snapshot is known healthy. Recovery is a process-wide safety state, not a
+// warning layered over controls that could continue issuing commands.
+function SettingsRoot() {
   const t = useT();
-  const { settings, loadError, retryLoad, saveError, applyWarnings } = useSettings();
+  const { settings, settingsRecovery, loadError, retryLoad } = useSettings();
+
+  if (settingsRecovery !== null) return <SettingsRecoveryView />;
+  if (settings === null && loadError === null) {
+    return (
+      <output className="loading-shell">
+        <span className="loading-mark" aria-hidden="true" />
+        <span>{t('common.loading')}</span>
+      </output>
+    );
+  }
+  if (settings === null) {
+    return (
+      <div className="recovery-shell recovery-shell--load-error">
+        <main className="recovery-card" aria-label={t('common.loadFailedTitle')}>
+          <div className="recovery-brand" aria-label="Tomari">
+            <BrandIcon />
+            <strong>Tomari</strong>
+          </div>
+          <Banner tone="warn">
+            <div className="banner__body" role="alert">
+              <strong>{t('common.loadFailedTitle')}</strong>
+              <p>{t('common.loadFailed', { error: formatCmdError(loadError, t) })}</p>
+            </div>
+            <button type="button" className="btn btn--primary" onClick={retryLoad}>
+              {t('common.retry')}
+            </button>
+          </Banner>
+        </main>
+      </div>
+    );
+  }
+  return <OperationalShell />;
+}
+
+function OperationalShell() {
+  const t = useT();
+  const { saveError, applyWarnings } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
   const [setupLoaded, setSetupLoaded] = useState(false);
@@ -201,10 +241,10 @@ function AppShell() {
 
   if (!setupLoaded) {
     return (
-      <div className="app app--loading">
+      <output className="app app--loading">
         <span className="loading-mark" aria-hidden="true" />
         <span>{t('common.loading')}</span>
-      </div>
+      </output>
     );
   }
 
@@ -260,23 +300,12 @@ function AppShell() {
         )}
 
         <main ref={mainRef} className="app__main" aria-label={t(`app.nav.${section}`)}>
-          {settings === null && loadError !== null ? (
-            <Banner tone="warn">
-              <div className="banner__body" role="alert">
-                <p>{t('common.loadFailed', { error: formatCmdError(loadError, t) })}</p>
-              </div>
-              <button type="button" className="btn btn--primary" onClick={retryLoad}>
-                {t('common.retry')}
-              </button>
-            </Banner>
-          ) : (
-            <SelectedView
-              section={section}
-              autoCheckUpdate={autoCheckUpdate}
-              onAutoCheckHandled={onAutoCheckHandled}
-              onOpenKeyboard={() => setSection('keyboard')}
-            />
-          )}
+          <SelectedView
+            section={section}
+            autoCheckUpdate={autoCheckUpdate}
+            onAutoCheckHandled={onAutoCheckHandled}
+            onOpenKeyboard={() => setSection('keyboard')}
+          />
         </main>
       </div>
 
@@ -289,6 +318,151 @@ function AppShell() {
           onDismiss={closeSetup}
         />
       )}
+    </div>
+  );
+}
+
+function SettingsRecoveryView() {
+  const t = useT();
+  const { settingsRecovery, retrySettingsRecovery, resetSettingsRecovery } = useSettings();
+  const [confirmReset, setConfirmReset] = useState(false);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const resetButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const busy = settingsRecovery?.phase === 'retrying' || settingsRecovery?.phase === 'resetting';
+
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (confirmReset) confirmButtonRef.current?.focus();
+  }, [confirmReset]);
+
+  useEffect(() => {
+    if (!confirmReset || busy) return;
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setConfirmReset(false);
+      resetButtonRef.current?.focus();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [busy, confirmReset]);
+
+  if (settingsRecovery === null) return null;
+  const databaseReset = settingsRecovery.kind === 'databaseReset';
+  const error =
+    settingsRecovery.phase === 'failed'
+      ? t(settingsRecovery.action === 'retry' ? 'recovery.retryFailed' : 'recovery.resetFailed', {
+          error: formatCmdError(settingsRecovery.error, t),
+        })
+      : null;
+
+  function cancelReset() {
+    if (busy) return;
+    setConfirmReset(false);
+    resetButtonRef.current?.focus();
+  }
+
+  return (
+    <div className="recovery-shell" aria-busy={busy}>
+      <main className="recovery-card" aria-labelledby="settings-recovery-title">
+        <div className="recovery-brand" aria-label="Tomari">
+          <BrandIcon />
+          <strong>Tomari</strong>
+        </div>
+
+        <header className="recovery-header">
+          <span className="recovery-eyebrow">{t('recovery.eyebrow')}</span>
+          <h1 id="settings-recovery-title" ref={titleRef} tabIndex={-1}>
+            {t('recovery.title')}
+          </h1>
+          <p>{t(databaseReset ? 'recovery.databaseResetIntro' : 'recovery.intro')}</p>
+        </header>
+
+        <div className="recovery-interlock" role="alert">
+          <span className="interlock-mark" aria-hidden="true">
+            <span className="interlock-mark__lead" />
+            <span className="interlock-mark__arm" />
+            <span className="interlock-mark__contact" />
+          </span>
+          <span className="recovery-interlock__copy">
+            <strong>{t('recovery.pausedTitle')}</strong>
+            <span>{t('recovery.pausedBody')}</span>
+          </span>
+        </div>
+
+        <section className="recovery-actions" aria-labelledby="recovery-options-title">
+          <div>
+            <h2 id="recovery-options-title">
+              {t(databaseReset ? 'recovery.databaseResetOptionsTitle' : 'recovery.optionsTitle')}
+            </h2>
+            <p>{t(databaseReset ? 'recovery.databaseResetOptionsBody' : 'recovery.optionsBody')}</p>
+          </div>
+          <div className="recovery-actions__buttons">
+            {!databaseReset && (
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={busy}
+                onClick={() => {
+                  setConfirmReset(false);
+                  void retrySettingsRecovery();
+                }}
+              >
+                {settingsRecovery.phase === 'retrying'
+                  ? t('recovery.retrying')
+                  : t('recovery.retry')}
+              </button>
+            )}
+            <button
+              ref={resetButtonRef}
+              type="button"
+              className={databaseReset ? 'btn btn--primary' : 'btn btn--ghost'}
+              disabled={busy}
+              onClick={() => setConfirmReset(true)}
+            >
+              {t('recovery.reset')}
+            </button>
+          </div>
+        </section>
+
+        {confirmReset && (
+          <fieldset className="recovery-confirm" aria-describedby="recovery-confirm-description">
+            <legend>{t('recovery.confirmTitle')}</legend>
+            <p id="recovery-confirm-description">{t('recovery.confirmBody')}</p>
+            <div className="recovery-confirm__buttons">
+              <button
+                ref={confirmButtonRef}
+                type="button"
+                className="btn btn--amber"
+                disabled={busy}
+                onClick={() => void resetSettingsRecovery()}
+              >
+                {settingsRecovery.phase === 'resetting'
+                  ? t('recovery.resetting')
+                  : t('recovery.confirmAction')}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy}
+                onClick={cancelReset}
+              >
+                {t('common.cancel')}
+              </button>
+            </div>
+          </fieldset>
+        )}
+
+        {error !== null && (
+          <p className="recovery-error" role="alert">
+            {error}
+          </p>
+        )}
+      </main>
     </div>
   );
 }

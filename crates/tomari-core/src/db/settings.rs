@@ -2,9 +2,9 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::Database;
+use super::{Database, PersistedRowCounts, PersistedSettings};
 use crate::domain::AppSettings;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 impl Database {
     /// Fetch settings, falling back to [`AppSettings::default`] if none stored.
@@ -22,9 +22,11 @@ impl Database {
         })
     }
 
-    /// Whether the single settings row has been written yet. Used to tell a
-    /// first run (no row) apart from a user who has deliberately cleared all of
-    /// their hotkeys and sequences (row present), so defaults are not re-seeded.
+    /// Whether the single settings row has been written yet.
+    ///
+    /// Presence marks an initialized store even when the user deliberately
+    /// cleared every hotkey and rule. Absence alone does not prove a first run;
+    /// callers must also verify [`Database::has_persisted_data`] is false.
     pub fn settings_exist(&self) -> Result<bool> {
         self.with_conn(|conn| {
             let exists = conn
@@ -50,6 +52,39 @@ pub(super) fn write_settings(conn: &Connection, settings: &AppSettings) -> Resul
         params![json],
     )?;
     Ok(())
+}
+
+/// Read every settings column without acquiring the database mutex.
+pub(super) fn preflight_settings(
+    conn: &Connection,
+) -> Result<(PersistedSettings, PersistedRowCounts)> {
+    let mut statement = conn.prepare("SELECT id, data FROM settings ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut state = PersistedSettings::Missing;
+    let mut counts = PersistedRowCounts::default();
+
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let raw: String = row.get(1)?;
+        counts.stored += 1;
+        if id != 1 {
+            return Err(Error::invalid(
+                "settings.id",
+                format!("expected canonical id 1, found {id}"),
+            ));
+        }
+        match serde_json::from_str(&raw) {
+            Ok(settings) => state = PersistedSettings::Ready(settings),
+            Err(error) => {
+                counts.skipped += 1;
+                state = PersistedSettings::UnreadableJson {
+                    message: error.to_string(),
+                };
+            }
+        }
+    }
+
+    Ok((state, counts))
 }
 
 #[cfg(test)]

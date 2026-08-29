@@ -18,6 +18,8 @@ export const LOCALIZED_CODES = [
   'placementNotFound',
   'windowTargetChanged',
   'windowNotResponding',
+  'settingsRecoveryRequired',
+  'databaseResetRequired',
 ] as const;
 type LocalizedCode = (typeof LOCALIZED_CODES)[number];
 
@@ -32,6 +34,11 @@ export type EveryCodeIsLocalized = AssertNever<Exclude<CmdErrorCode, LocalizedCo
 
 function isLocalized(code: CmdErrorCode): code is LocalizedCode {
   return (LOCALIZED_CODES as readonly string[]).includes(code);
+}
+
+/** Whether an unknown command rejection carries one particular stable code. */
+export function hasCmdErrorCode(e: unknown, code: CmdErrorCode): boolean {
+  return Boolean(e && typeof e === 'object' && 'code' in e && e.code === code);
 }
 
 /**

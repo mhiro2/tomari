@@ -16,6 +16,12 @@ export async function installDevPreview() {
   const params = new URLSearchParams(window.location.search);
   const language = params.get('lang') === 'ja' ? 'ja' : 'en';
   const permissionsMissing = params.has('missing');
+  const setupPending = params.has('setupPending');
+  let recoveryKind: 'retryable' | 'databaseReset' | null = params.has('databaseReset')
+    ? 'databaseReset'
+    : params.has('recovery')
+      ? 'retryable'
+      : null;
   const settings: AppSettings = {
     launchAtLogin: true,
     language,
@@ -202,13 +208,45 @@ export async function installDevPreview() {
     ],
   };
 
-  mockIPC((cmd, payload) => {
+  const previewCommand: Parameters<typeof mockIPC>[0] = (cmd, payload) => {
     switch (cmd) {
-      case 'get_settings':
+      case 'get_settings': {
+        if (recoveryKind !== null) {
+          throw {
+            code:
+              recoveryKind === 'databaseReset'
+                ? 'databaseResetRequired'
+                : 'settingsRecoveryRequired',
+            message:
+              recoveryKind === 'databaseReset'
+                ? 'settings database was quarantined'
+                : 'saved settings could not be read',
+          };
+        }
         return settings;
+      }
+      case 'retry_settings_recovery':
+        recoveryKind = null;
+        return null;
+      case 'reset_settings_recovery':
+        Object.assign(settings, {
+          launchAtLogin: false,
+          keyboardEnabled: false,
+          windowManagementEnabled: false,
+          externalWindowActionsEnabled: false,
+          commandImeSwitchEnabled: false,
+          showInMenuBar: true,
+          dragToSnapEnabled: false,
+          dragToMoveEnabled: false,
+          menuBarTidyEnabled: false,
+          menuBarAutoCollapseSecs: 0,
+        });
+        recoveryKind = null;
+        return null;
       case 'save_settings':
         return { applyWarnings: [] };
       case 'setup_status':
+        if (setupPending) return new Promise<SetupStatus>(() => {});
         return setup;
       case 'input_monitoring_status':
       case 'accessibility_status':
@@ -259,5 +297,6 @@ export async function installDevPreview() {
       default:
         return null;
     }
-  });
+  };
+  mockIPC(previewCommand, { shouldMockEvents: true });
 }

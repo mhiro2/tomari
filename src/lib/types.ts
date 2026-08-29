@@ -260,6 +260,8 @@ export type CmdErrorCode =
   | 'placementNotFound'
   | 'windowTargetChanged'
   | 'windowNotResponding'
+  | 'settingsRecoveryRequired'
+  | 'databaseResetRequired'
   | 'other';
 
 export interface CmdError {

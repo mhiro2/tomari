@@ -9,6 +9,12 @@ pub enum Error {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    /// SQLite's integrity pragmas can report damage as a successful query row
+    /// rather than a `SQLITE_CORRUPT` error. Keep that diagnostic distinct from
+    /// ordinary database failures so startup can quarantine the damaged file.
+    #[error("database integrity check failed: {0}")]
+    DatabaseIntegrity(String),
+
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
@@ -48,6 +54,7 @@ impl Error {
     /// doing so on a transient error would discard a healthy database.
     pub fn is_database_corruption(&self) -> bool {
         match self {
+            Error::DatabaseIntegrity(_) => true,
             Error::Database(e) | Error::MigrationStep { source: e, .. } => sqlite_corruption(e),
             _ => false,
         }
@@ -118,6 +125,9 @@ mod tests {
         );
         let plain = Error::Database(sqlite(rusqlite::ErrorCode::NotADatabase, 26));
         assert!(plain.is_database_corruption());
+        let integrity = Error::DatabaseIntegrity("page 2 is malformed".into());
+        assert!(integrity.is_database_corruption());
+        assert!(integrity.sqlite_error().is_none());
         // A step that failed for any other reason is a real migration failure,
         // not a damaged file.
         let bad_sql = Error::MigrationStep {

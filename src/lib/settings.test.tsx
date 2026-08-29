@@ -47,9 +47,34 @@ function saveCalls() {
 // A view of the load/save error state, so tests can assert on it without
 // depending on i18n or App.tsx (which this task must not touch).
 function StatusConsumer() {
-  const { settings, loadError, retryLoad, saveError, applyWarnings, update } = useSettings();
+  const {
+    settings,
+    settingsRecovery,
+    retrySettingsRecovery,
+    resetSettingsRecovery,
+    loadError,
+    retryLoad,
+    saveError,
+    applyWarnings,
+    update,
+  } = useSettings();
   return (
     <div>
+      {settingsRecovery !== null && (
+        <div>
+          <span data-testid="recovery-kind">{settingsRecovery.kind}</span>
+          <span data-testid="recovery-phase">{settingsRecovery.phase}</span>
+          {settingsRecovery.phase === 'failed' && (
+            <span data-testid="recovery-error">{errorText(settingsRecovery.error)}</span>
+          )}
+          <button type="button" onClick={() => void retrySettingsRecovery()}>
+            retry recovery
+          </button>
+          <button type="button" onClick={() => void resetSettingsRecovery()}>
+            reset recovery
+          </button>
+        </div>
+      )}
       {loadError !== null && (
         <div>
           <span data-testid="load-error">{errorText(loadError)}</span>
@@ -605,5 +630,145 @@ describe('SettingsProvider', () => {
       resolveInitialLoad?.(SETTINGS);
     });
     expect(screen.getByTestId('toggle')).toHaveTextContent('true');
+  });
+
+  it('separates settings recovery from a generic load error and skips live warning reads', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') {
+        return Promise.reject({
+          code: 'settingsRecoveryRequired',
+          message: 'settings row does not decode',
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    expect(await screen.findByTestId('recovery-phase')).toHaveTextContent('required');
+    expect(screen.getByTestId('recovery-kind')).toHaveTextContent('retryable');
+    expect(screen.queryByTestId('load-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('toggle')).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_apply_warnings')).toBe(false);
+  });
+
+  it('marks a quarantined database as reset-only and refuses a retry dispatch', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') {
+        return Promise.reject({
+          code: 'databaseResetRequired',
+          message: 'settings database was quarantined',
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+
+    expect(await screen.findByTestId('recovery-kind')).toHaveTextContent('databaseReset');
+    fireEvent.click(screen.getByRole('button', { name: 'retry recovery' }));
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'retry_settings_recovery')).toBe(false);
+    expect(screen.getByTestId('recovery-phase')).toHaveTextContent('required');
+  });
+
+  it('ignores a settings-changed event until an explicit recovery action succeeds', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') {
+        return Promise.reject({
+          code: 'settingsRecoveryRequired',
+          message: 'settings row does not decode',
+        });
+      }
+      return Promise.resolve(null);
+    });
+    let settingsChanged: ((event: { payload: AppSettings }) => void) | undefined;
+    mockListen.mockImplementation(
+      (event: string, handler: (event: { payload: AppSettings }) => void) => {
+        if (event === 'tomari:settings-changed') settingsChanged = handler;
+        return Promise.resolve(() => {});
+      },
+    );
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await screen.findByTestId('recovery-phase');
+
+    await act(async () => {
+      settingsChanged?.({ payload: SETTINGS });
+    });
+
+    expect(screen.getByTestId('recovery-phase')).toHaveTextContent('required');
+    expect(screen.queryByTestId('toggle')).not.toBeInTheDocument();
+  });
+
+  it('keeps recovery active and exposes a local retry error when retry rejects', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') {
+        return Promise.reject({
+          code: 'settingsRecoveryRequired',
+          message: 'settings row does not decode',
+        });
+      }
+      if (cmd === 'retry_settings_recovery') return Promise.reject(new Error('still unreadable'));
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await screen.findByTestId('recovery-phase');
+    fireEvent.click(screen.getByRole('button', { name: 'retry recovery' }));
+
+    expect(await screen.findByTestId('recovery-phase')).toHaveTextContent('failed');
+    expect(screen.getByTestId('recovery-error')).toHaveTextContent('still unreadable');
+    expect(screen.queryByTestId('toggle')).not.toBeInTheDocument();
+  });
+
+  it('re-loads settings when a mocked retry command resolves', async () => {
+    mockInvoke.mockReset();
+    let reads = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_settings') {
+        reads += 1;
+        return reads === 1
+          ? Promise.reject({
+              code: 'settingsRecoveryRequired',
+              message: 'settings row does not decode',
+            })
+          : Promise.resolve(SETTINGS);
+      }
+      if (cmd === 'retry_settings_recovery') return Promise.resolve();
+      if (cmd === 'get_apply_warnings') return Promise.resolve({ warnings: [], unprobed: [] });
+      return Promise.resolve(null);
+    });
+
+    render(
+      <SettingsProvider>
+        <StatusConsumer />
+      </SettingsProvider>,
+    );
+    await screen.findByTestId('recovery-phase');
+    fireEvent.click(screen.getByRole('button', { name: 'retry recovery' }));
+
+    expect(await screen.findByTestId('toggle')).toBeInTheDocument();
+    expect(screen.queryByTestId('recovery-phase')).not.toBeInTheDocument();
+    expect(reads).toBe(2);
   });
 });

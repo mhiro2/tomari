@@ -22,10 +22,31 @@ import {
 } from 'react';
 
 import * as api from './api';
+import { hasCmdErrorCode } from './errors';
 import type { AppSettings } from './types';
+
+export type SettingsRecoveryKind = 'retryable' | 'databaseReset';
+
+export type SettingsRecoveryState =
+  | { kind: SettingsRecoveryKind; phase: 'required'; action: null; error: null }
+  | { kind: SettingsRecoveryKind; phase: 'retrying'; action: 'retry'; error: null }
+  | { kind: SettingsRecoveryKind; phase: 'resetting'; action: 'reset'; error: null }
+  | { kind: SettingsRecoveryKind; phase: 'failed'; action: 'retry' | 'reset'; error: unknown };
+
+function recoveryKindFromError(error: unknown): SettingsRecoveryKind | null {
+  if (hasCmdErrorCode(error, 'databaseResetRequired')) return 'databaseReset';
+  if (hasCmdErrorCode(error, 'settingsRecoveryRequired')) return 'retryable';
+  return null;
+}
 
 type SettingsContextValue = {
   settings: AppSettings | null;
+  // A settings read failed in a way that requires an explicit retry or reset.
+  // While this is set, no editable feature view is mounted and settings events
+  // are ignored, so a late broadcast cannot silently lift the safety state.
+  settingsRecovery: SettingsRecoveryState | null;
+  retrySettingsRecovery: () => Promise<void>;
+  resetSettingsRecovery: () => Promise<void>;
   // Raw rejection from the last failed initial load (format with
   // `formatCmdError` at display time so this stays independent of the i18n
   // provider). `settings` stays null while this is set, so consumers can show
@@ -59,6 +80,7 @@ export function useSettings(): SettingsContextValue {
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsRecovery, setSettingsRecovery] = useState<SettingsRecoveryState | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [saveError, setSaveError] = useState<unknown>(null);
@@ -71,6 +93,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Latest settings, so an in-flight save reads the current state even before
   // React commits.
   const settingsRef = useRef<AppSettings | null>(null);
+  const recoveryRequired = useRef(false);
+  const recoveryActionRunning = useRef(false);
   // A save is in flight; `dirty` means new edits arrived while it ran, so the
   // saver should persist the latest state once more.
   const saving = useRef(false);
@@ -83,16 +107,44 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // own dependency.
   const flushRef = useRef<() => Promise<void>>(null);
 
+  // Adopt a healthy backend snapshot. Recovery commands restart the real app,
+  // but tests and non-restarting harnesses can resolve; in that case this is
+  // also the only transition back into the ordinary settings shell.
+  const applySettings = useCallback((next: AppSettings) => {
+    settled.current = true;
+    recoveryRequired.current = false;
+    settingsRef.current = next;
+    setSettings(next);
+    setSettingsRecovery(null);
+    setLoadError(null);
+    setSaveError(null);
+  }, []);
+
+  const requireSettingsRecovery = useCallback((kind: SettingsRecoveryKind) => {
+    settled.current = true;
+    recoveryRequired.current = true;
+    settingsRef.current = null;
+    dirty.current = false;
+    warningsGeneration.current += 1;
+    setSettings(null);
+    setSettingsRecovery({ kind, phase: 'required', action: null, error: null });
+    setLoadError(null);
+    setSaveError(null);
+    setApplyWarnings([]);
+  }, []);
+
   // Read the warnings the live state warrants right now. Best effort: a
   // failure leaves the current list alone, and the next save's outcome
   // replaces it either way. A result is dropped when a save landed or a newer
   // read started meanwhile (either is fresher) or the caller has unmounted.
   const refreshApplyWarnings = useCallback(async (isCancelled: () => boolean) => {
+    if (recoveryRequired.current || settingsRef.current === null) return;
     warningsGeneration.current += 1;
     const generation = warningsGeneration.current;
     try {
       const live = await api.getApplyWarnings();
-      if (isCancelled() || warningsGeneration.current !== generation) return;
+      if (isCancelled() || recoveryRequired.current || warningsGeneration.current !== generation)
+        return;
       if (!live || !Array.isArray(live.warnings)) return;
       // Codes the live read has no probe for keep the last save's verdict —
       // their absence from `warnings` means "not checked", not "healed".
@@ -109,6 +161,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     const unlisten = listen('tomari:panel-shown', () => {
+      if (recoveryRequired.current || settingsRef.current === null) return;
       void refreshApplyWarnings(() => cancelled);
     });
     return () => {
@@ -123,39 +176,29 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       try {
         const s = await api.getSettings();
         if (cancelled || settled.current) return;
-        settled.current = true;
-        settingsRef.current = s;
-        setSettings(s);
-        setLoadError(null);
+        applySettings(s);
         // Seed the warnings from the live state so one that outlived the last
         // save (a restore that failed on quit, retried at this launch) shows
         // without waiting for a save.
         void refreshApplyWarnings(() => cancelled);
       } catch (e) {
         if (cancelled || settled.current) return;
-        setLoadError(e);
+        const recoveryKind = recoveryKindFromError(e);
+        if (recoveryKind !== null) {
+          requireSettingsRecovery(recoveryKind);
+        } else {
+          setLoadError(e);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadAttempt, refreshApplyWarnings]);
+  }, [applySettings, loadAttempt, refreshApplyWarnings, requireSettingsRecovery]);
 
   const retryLoad = useCallback(() => {
     setLoadError(null);
     setLoadAttempt((n) => n + 1);
-  }, []);
-
-  // Set state and ref together so an in-flight save reads the current settings
-  // even before React commits. Also marks the provider as settled (so a slow
-  // initial load that resolves afterward is discarded instead of clobbering
-  // this newer snapshot) and clears any stale `loadError`, keeping the
-  // invariant that `settings` and `loadError` are never both set.
-  const applySettings = useCallback((next: AppSettings) => {
-    settled.current = true;
-    settingsRef.current = next;
-    setSettings(next);
-    setLoadError(null);
   }, []);
 
   // Adopt settings the backend broadcasts (e.g. a save applied out of band),
@@ -164,7 +207,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // own flush will re-broadcast the merged result.
   useEffect(() => {
     const unlisten = listen<AppSettings>('tomari:settings-changed', (e) => {
-      if (saving.current || dirty.current) return;
+      if (recoveryRequired.current || saving.current || dirty.current) return;
       applySettings(e.payload);
     });
     return () => void unlisten.then((fn) => fn()).catch(() => {});
@@ -190,6 +233,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setApplyWarnings(outcome.applyWarnings);
       }
     } catch (e) {
+      const recoveryKind = recoveryKindFromError(e);
+      if (recoveryKind !== null) {
+        requireSettingsRecovery(recoveryKind);
+        return;
+      }
       // Leave `applyWarnings` as-is: a failed save reconciled no side effect, so
       // the warnings from the last successful save still reflect the live
       // mismatch and must not be cleared here.
@@ -200,7 +248,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       try {
         const fresh = await api.getSettings();
         if (!dirty.current) applySettings(fresh);
-      } catch {
+      } catch (readError) {
+        const readRecoveryKind = recoveryKindFromError(readError);
+        if (readRecoveryKind !== null) {
+          requireSettingsRecovery(readRecoveryKind);
+          return;
+        }
         /* keep the optimistic UI */
       }
       setSaveError(e);
@@ -209,7 +262,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
     // Edits arrived mid-save → persist the latest once more.
     if (dirty.current) await flushRef.current?.();
-  }, [applySettings]);
+  }, [applySettings, requireSettingsRecovery]);
 
   useEffect(() => {
     flushRef.current = flush;
@@ -217,6 +270,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   const update = useCallback(
     (patch: Partial<AppSettings>) => {
+      if (recoveryRequired.current) return;
       const previous = settingsRef.current;
       if (!previous) return;
       applySettings({ ...previous, ...patch });
@@ -227,6 +281,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   const reportApplyOutcome = useCallback(
     (outcome: { applyWarnings: string[] }, probed: readonly string[]) => {
+      if (recoveryRequired.current) return;
       // Fresher than any live read still in flight.
       warningsGeneration.current += 1;
       const replaced = new Set(probed);
@@ -238,9 +293,65 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  // Both backend recovery commands restart Tomari on success and therefore do
+  // not resolve in production. Reload after a resolved mock so tests and the
+  // browser preview exercise the same explicit recovery boundary without
+  // inventing a second success contract.
+  const runSettingsRecovery = useCallback(
+    async (action: 'retry' | 'reset') => {
+      if (
+        !recoveryRequired.current ||
+        recoveryActionRunning.current ||
+        settingsRecovery === null ||
+        (action === 'retry' && settingsRecovery.kind === 'databaseReset')
+      )
+        return;
+      const kind = settingsRecovery.kind;
+      recoveryActionRunning.current = true;
+      setSettingsRecovery(
+        action === 'retry'
+          ? { kind, phase: 'retrying', action: 'retry', error: null }
+          : { kind, phase: 'resetting', action: 'reset', error: null },
+      );
+      try {
+        if (action === 'retry') {
+          await api.retrySettingsRecovery();
+        } else {
+          await api.resetSettingsRecovery();
+        }
+        const recovered = await api.getSettings();
+        applySettings(recovered);
+        void refreshApplyWarnings(() => false);
+      } catch (error) {
+        const errorKind = recoveryKindFromError(error);
+        setSettingsRecovery({
+          kind: kind === 'databaseReset' || errorKind === 'databaseReset' ? 'databaseReset' : kind,
+          phase: 'failed',
+          action,
+          error,
+        });
+      } finally {
+        recoveryActionRunning.current = false;
+      }
+    },
+    [applySettings, refreshApplyWarnings, settingsRecovery],
+  );
+
+  const retrySettingsRecovery = useCallback(
+    () => runSettingsRecovery('retry'),
+    [runSettingsRecovery],
+  );
+  const resetSettingsRecovery = useCallback(
+    () => runSettingsRecovery('reset'),
+    [runSettingsRecovery],
+  );
+
   const value = useMemo(
     () => ({
       settings,
+      settingsRecovery,
+      retrySettingsRecovery,
+      resetSettingsRecovery,
       loadError,
       retryLoad,
       saveError,
@@ -248,7 +359,18 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       update,
       reportApplyOutcome,
     }),
-    [settings, loadError, retryLoad, saveError, applyWarnings, update, reportApplyOutcome],
+    [
+      settings,
+      settingsRecovery,
+      retrySettingsRecovery,
+      resetSettingsRecovery,
+      loadError,
+      retryLoad,
+      saveError,
+      applyWarnings,
+      update,
+      reportApplyOutcome,
+    ],
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

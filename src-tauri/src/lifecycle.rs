@@ -2,11 +2,12 @@
 //!
 //! Tomari owns process-external state (the Caps Lock HID mapping and the
 //! lid-close sleep override), so exiting is a coordinated transition rather
-//! than letting process teardown drop whatever happens to be live. Once the
-//! lifecycle leaves [`Phase::Running`], no worker or runtime effect may start
-//! again. The leader drains work that already crossed the gate, performs the
-//! cleanup once, and releases any concurrent shutdown callers only after the
-//! process-external state has been restored.
+//! than letting process teardown drop whatever happens to be live. Recovery is
+//! a bounded, non-terminal running sub-state; once the lifecycle becomes
+//! terminal, no worker or runtime effect may start again. The leader drains
+//! work that already crossed the gate, performs the cleanup once, and releases
+//! any concurrent shutdown callers only after the process-external state has
+//! been restored.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -20,8 +21,15 @@ use crate::state::AppState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Running,
+    Recovering { pending_quit: Option<i32> },
     ShuttingDown,
     Stopped,
+}
+
+impl Phase {
+    fn accepts_work(self) -> bool {
+        matches!(self, Self::Running | Self::Recovering { .. })
+    }
 }
 
 struct Inner {
@@ -49,9 +57,9 @@ fn warn_if_worker_panicked(worker: JoinHandle<()>) {
     }
 }
 
-/// App-wide terminal state, tracked workers, and the serialization gate for
-/// restartable tap/Caps effects and transient synthetic input that must finish
-/// before cleanup can release the process-owned input machinery.
+/// App-wide recovery/terminal state, tracked workers, and the serialization
+/// gate for restartable tap/Caps effects and transient synthetic input that
+/// must finish before cleanup can release the process-owned input machinery.
 pub struct AppLifecycle {
     inner: Mutex<Inner>,
     changed: Condvar,
@@ -71,16 +79,39 @@ impl Default for AppLifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ShutdownLeader(());
+
+#[derive(Debug, PartialEq, Eq)]
 enum ShutdownClaim {
-    Leader,
+    Leader(ShutdownLeader),
+    Deferred,
     InProgress,
     Complete,
 }
 
+/// The result of atomically owning and completing one recovery operation.
+///
+/// Only the caller that moves the lifecycle from `Running` to `Recovering`
+/// executes the supplied operation. A successful repair already owns the
+/// terminal transition carried by [`ShutdownLeader`]; a concurrent ordinary
+/// quit is either deferred behind that winner or becomes the terminal leader
+/// when the repair fails.
+pub(crate) enum RecoveryRun<E> {
+    Busy,
+    Terminating,
+    Relaunch(ShutdownLeader),
+    Failed(E),
+    QuitAfterFailure {
+        error: E,
+        code: i32,
+        leader: ShutdownLeader,
+    },
+}
+
 impl AppLifecycle {
     pub fn is_running(&self) -> bool {
-        self.inner.lock_safe().phase == Phase::Running
+        self.inner.lock_safe().phase.accepts_work()
     }
 
     /// Register a worker atomically with respect to shutdown. A worker that
@@ -91,7 +122,7 @@ impl AppLifecycle {
         F: FnOnce(Arc<Self>) + Send + 'static,
     {
         let mut inner = self.inner.lock_safe();
-        if inner.phase != Phase::Running {
+        if !inner.phase.accepts_work() {
             return Ok(false);
         }
         inner.reap_finished_workers();
@@ -108,14 +139,14 @@ impl AppLifecycle {
     /// timeout expires.
     pub fn wait_for_shutdown(&self, timeout: Duration) -> bool {
         let inner = self.inner.lock_safe();
-        if inner.phase != Phase::Running {
+        if !inner.phase.accepts_work() {
             return true;
         }
         let (inner, _) = self
             .changed
-            .wait_timeout_while(inner, timeout, |inner| inner.phase == Phase::Running)
+            .wait_timeout_while(inner, timeout, |inner| inner.phase.accepts_work())
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.phase != Phase::Running
+        !inner.phase.accepts_work()
     }
 
     /// Enter a terminally gated OS effect. Checking the phase only after
@@ -127,23 +158,96 @@ impl AppLifecycle {
         self.is_running().then_some(effect)
     }
 
-    fn claim_shutdown(&self) -> ShutdownClaim {
+    fn request_quit(&self, code: i32) -> ShutdownClaim {
         let mut inner = self.inner.lock_safe();
         match inner.phase {
             Phase::Running => {
                 inner.phase = Phase::ShuttingDown;
                 self.changed.notify_all();
-                ShutdownClaim::Leader
+                ShutdownClaim::Leader(ShutdownLeader(()))
+            }
+            Phase::Recovering {
+                ref mut pending_quit,
+            } => {
+                if pending_quit.is_none() {
+                    *pending_quit = Some(code);
+                }
+                ShutdownClaim::Deferred
             }
             Phase::ShuttingDown => ShutdownClaim::InProgress,
             Phase::Stopped => ShutdownClaim::Complete,
         }
     }
 
+    /// Run exactly one recovery operation and resolve its terminal intent
+    /// under the same mutex used by ordinary quit.
+    ///
+    /// Recovery itself is not terminal: workers and runtime-effect gates stay
+    /// live while the bounded database operation runs. A quit that arrives in
+    /// that interval is remembered rather than racing a second terminal
+    /// transition. Success gives the original recovery caller the sole
+    /// relaunch capability; failure either reopens recovery for another try or
+    /// hands the deferred quit capability back to that same caller.
+    pub(crate) fn run_configuration_recovery<E>(
+        &self,
+        operation: impl FnOnce() -> Result<(), E>,
+    ) -> RecoveryRun<E> {
+        {
+            let mut inner = self.inner.lock_safe();
+            match inner.phase {
+                Phase::Running => {
+                    inner.phase = Phase::Recovering { pending_quit: None };
+                }
+                Phase::Recovering { .. } => return RecoveryRun::Busy,
+                Phase::ShuttingDown | Phase::Stopped => return RecoveryRun::Terminating,
+            }
+        }
+
+        let result = operation();
+        let mut inner = self.inner.lock_safe();
+        let pending_quit = match inner.phase {
+            Phase::Recovering { pending_quit } => pending_quit,
+            _ => unreachable!("only request_quit may observe an active recovery"),
+        };
+
+        match result {
+            Ok(()) => {
+                inner.phase = Phase::ShuttingDown;
+                self.changed.notify_all();
+                RecoveryRun::Relaunch(ShutdownLeader(()))
+            }
+            Err(error) => match pending_quit {
+                Some(code) => {
+                    inner.phase = Phase::ShuttingDown;
+                    self.changed.notify_all();
+                    RecoveryRun::QuitAfterFailure {
+                        error,
+                        code,
+                        leader: ShutdownLeader(()),
+                    }
+                }
+                None => {
+                    inner.phase = Phase::Running;
+                    RecoveryRun::Failed(error)
+                }
+            },
+        }
+    }
+
+    fn request_relaunch(&self) -> Option<ShutdownLeader> {
+        let mut inner = self.inner.lock_safe();
+        if inner.phase != Phase::Running {
+            return None;
+        }
+        inner.phase = Phase::ShuttingDown;
+        self.changed.notify_all();
+        Some(ShutdownLeader(()))
+    }
+
     fn join_workers(&self) {
         let workers = {
             let mut inner = self.inner.lock_safe();
-            debug_assert_ne!(inner.phase, Phase::Running);
+            debug_assert!(!inner.phase.accepts_work());
             std::mem::take(&mut inner.workers)
         };
         for worker in workers {
@@ -155,12 +259,14 @@ impl AppLifecycle {
         drop(self.runtime_effect.lock_safe());
     }
 
-    fn finish_shutdown(&self) {
+    fn finish_shutdown(&self, _leader: ShutdownLeader) {
         let mut inner = self.inner.lock_safe();
+        debug_assert_eq!(inner.phase, Phase::ShuttingDown);
         inner.phase = Phase::Stopped;
         self.changed.notify_all();
     }
 
+    #[cfg(test)]
     fn wait_until_stopped(&self) {
         let inner = self.inner.lock_safe();
         drop(
@@ -175,12 +281,12 @@ impl AppLifecycle {
     /// tests independent from Tauri and macOS resources.
     #[cfg(test)]
     pub(crate) fn stop_for_test(&self) {
-        match self.claim_shutdown() {
-            ShutdownClaim::Leader => {
+        match self.request_quit(0) {
+            ShutdownClaim::Leader(leader) => {
                 self.drain_runtime_effects();
-                self.finish_shutdown();
+                self.finish_shutdown(leader);
             }
-            ShutdownClaim::InProgress => self.wait_until_stopped(),
+            ShutdownClaim::Deferred | ShutdownClaim::InProgress => self.wait_until_stopped(),
             ShutdownClaim::Complete => {}
         }
     }
@@ -279,32 +385,52 @@ fn run_cleanup(ops: &impl ShutdownOps) {
     ops.cleanup_keep_awake();
 }
 
-fn finish_claimed_shutdown(lifecycle: &AppLifecycle, ops: &impl ShutdownOps) {
+fn finish_claimed_shutdown(
+    lifecycle: &AppLifecycle,
+    ops: &impl ShutdownOps,
+    leader: ShutdownLeader,
+) {
     run_cleanup(ops);
-    lifecycle.finish_shutdown();
+    lifecycle.finish_shutdown(leader);
 }
 
+#[cfg(test)]
 fn shutdown_with(lifecycle: &AppLifecycle, ops: &impl ShutdownOps) {
-    match lifecycle.claim_shutdown() {
-        ShutdownClaim::Leader => finish_claimed_shutdown(lifecycle, ops),
-        ShutdownClaim::InProgress => lifecycle.wait_until_stopped(),
+    match lifecycle.request_quit(0) {
+        ShutdownClaim::Leader(leader) => finish_claimed_shutdown(lifecycle, ops, leader),
+        ShutdownClaim::Deferred | ShutdownClaim::InProgress => lifecycle.wait_until_stopped(),
         ShutdownClaim::Complete => {}
     }
+}
+
+fn finish_claimed_shutdown_then_with<R>(
+    lifecycle: &AppLifecycle,
+    ops: &impl ShutdownOps,
+    leader: ShutdownLeader,
+    continuation: impl FnOnce() -> R,
+) -> R {
+    finish_claimed_shutdown(lifecycle, ops, leader);
+    continuation()
 }
 
 fn shutdown_then_with<R>(
     lifecycle: &AppLifecycle,
     ops: &impl ShutdownOps,
     continuation: impl FnOnce() -> R,
-) -> R {
-    shutdown_with(lifecycle, ops);
-    continuation()
+) -> Option<R> {
+    let leader = lifecycle.request_relaunch()?;
+    Some(finish_claimed_shutdown_then_with(
+        lifecycle,
+        ops,
+        leader,
+        continuation,
+    ))
 }
 
-/// Complete terminal cleanup and only then run `continuation`. Keeping the
-/// updater's relaunch behind this seam makes it impossible for that exit path
-/// to bypass a newly added cleanup step.
-pub fn shutdown_then<R>(app: &AppHandle, continuation: impl FnOnce() -> R) -> R {
+/// Claim terminal cleanup for a relaunch and run `continuation` only if this
+/// caller won. Keeping the updater's relaunch behind this seam prevents that
+/// exit path from bypassing cleanup or turning an ordinary quit into a restart.
+pub fn shutdown_then_if_leader<R>(app: &AppHandle, continuation: impl FnOnce() -> R) -> Option<R> {
     let state = app.state::<AppState>();
     let ops = SystemShutdown {
         app,
@@ -313,17 +439,33 @@ pub fn shutdown_then<R>(app: &AppHandle, continuation: impl FnOnce() -> R) -> R 
     shutdown_then_with(&state.lifecycle, &ops, continuation)
 }
 
+/// Finish cleanup for a terminal transition already won by configuration
+/// recovery, then run its one permitted continuation.
+pub(crate) fn finish_recovery_shutdown_then<R>(
+    app: &AppHandle,
+    leader: ShutdownLeader,
+    continuation: impl FnOnce() -> R,
+) -> R {
+    let state = app.state::<AppState>();
+    let ops = SystemShutdown {
+        app,
+        state: state.inner(),
+    };
+    finish_claimed_shutdown_then_with(&state.lifecycle, &ops, leader, continuation)
+}
+
 /// Hold the first ordinary exit request, make the lifecycle terminal on the
 /// main thread immediately, and finish cleanup off-main. A second request while
 /// cleanup is active is held too; the request issued after `Stopped` is allowed
 /// through. Tauri restart requests arrive only after the updater has already
-/// called [`shutdown_then`], so their prevent API is intentionally unused.
+/// called [`shutdown_then_if_leader`], so their prevent API is intentionally
+/// unused.
 pub fn handle_exit_requested(app: &AppHandle, code: Option<i32>, api: &ExitRequestApi) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    match state.lifecycle.claim_shutdown() {
-        ShutdownClaim::Leader => {
+    match state.lifecycle.request_quit(code.unwrap_or(0)) {
+        ShutdownClaim::Leader(leader) => {
             api.prevent_exit();
             let handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -332,11 +474,11 @@ pub fn handle_exit_requested(app: &AppHandle, code: Option<i32>, api: &ExitReque
                     app: &handle,
                     state: state.inner(),
                 };
-                finish_claimed_shutdown(&state.lifecycle, &ops);
+                finish_claimed_shutdown(&state.lifecycle, &ops, leader);
                 handle.exit(code.unwrap_or(0));
             });
         }
-        ShutdownClaim::InProgress => api.prevent_exit(),
+        ShutdownClaim::Deferred | ShutdownClaim::InProgress => api.prevent_exit(),
         ShutdownClaim::Complete => {}
     }
 }
@@ -608,12 +750,14 @@ mod tests {
         });
         attempting_rx.recv().unwrap();
 
-        assert_eq!(lifecycle.claim_shutdown(), ShutdownClaim::Leader);
+        let ShutdownClaim::Leader(leader) = lifecycle.request_quit(0) else {
+            panic!("the first quit must lead shutdown");
+        };
         drop(held);
 
         assert!(!result_rx.recv().unwrap());
         waiter.join().unwrap();
-        lifecycle.finish_shutdown();
+        lifecycle.finish_shutdown(leader);
     }
 
     #[test]
@@ -654,9 +798,144 @@ mod tests {
     }
 
     #[test]
+    fn only_the_recovery_owner_runs_the_operation() {
+        let lifecycle = Arc::new(AppLifecycle::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let owner_lifecycle = Arc::clone(&lifecycle);
+        let owner = std::thread::spawn(move || {
+            owner_lifecycle.run_configuration_recovery(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<(), &'static str>(())
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        let loser_calls = Mutex::new(0_usize);
+        let loser = lifecycle.run_configuration_recovery(|| {
+            *loser_calls.lock_safe() += 1;
+            Ok::<(), &'static str>(())
+        });
+        assert!(matches!(loser, RecoveryRun::Busy));
+        assert_eq!(*loser_calls.lock_safe(), 0);
+
+        release_tx.send(()).unwrap();
+        let RecoveryRun::Relaunch(leader) = owner.join().unwrap() else {
+            panic!("the recovery owner must claim relaunch");
+        };
+        lifecycle.finish_shutdown(leader);
+    }
+
+    #[test]
+    fn a_failed_recovery_releases_ownership_for_another_try() {
+        let lifecycle = AppLifecycle::default();
+        assert!(matches!(
+            lifecycle.run_configuration_recovery(|| Err::<(), _>("unreadable")),
+            RecoveryRun::Failed("unreadable")
+        ));
+
+        let RecoveryRun::Relaunch(leader) =
+            lifecycle.run_configuration_recovery(|| Ok::<(), &'static str>(()))
+        else {
+            panic!("a later recovery must be allowed after failure");
+        };
+        lifecycle.finish_shutdown(leader);
+    }
+
+    #[test]
+    fn quit_winning_first_prevents_recovery_work_and_relaunch() {
+        let lifecycle = Arc::new(AppLifecycle::default());
+        let ShutdownClaim::Leader(quit_leader) = lifecycle.request_quit(7) else {
+            panic!("quit must win from idle");
+        };
+        let recovery_calls = Mutex::new(0_usize);
+
+        let recovery = lifecycle.run_configuration_recovery(|| {
+            *recovery_calls.lock_safe() += 1;
+            Ok::<(), &'static str>(())
+        });
+        assert!(matches!(recovery, RecoveryRun::Terminating));
+        assert_eq!(*recovery_calls.lock_safe(), 0);
+
+        let ops = FakeOps::new(Arc::clone(&lifecycle));
+        let relaunch_calls = Mutex::new(0_usize);
+        let relaunch = shutdown_then_with(&lifecycle, &ops, || {
+            *relaunch_calls.lock_safe() += 1;
+        });
+        assert!(relaunch.is_none());
+        assert_eq!(*relaunch_calls.lock_safe(), 0);
+        finish_claimed_shutdown(&lifecycle, &ops, quit_leader);
+    }
+
+    #[test]
+    fn recovery_winning_first_defers_quit_and_relaunches_after_success() {
+        let lifecycle = Arc::new(AppLifecycle::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let recovery_lifecycle = Arc::clone(&lifecycle);
+        let recovery = std::thread::spawn(move || {
+            recovery_lifecycle.run_configuration_recovery(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<(), &'static str>(())
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        assert_eq!(lifecycle.request_quit(23), ShutdownClaim::Deferred);
+        release_tx.send(()).unwrap();
+        let RecoveryRun::Relaunch(leader) = recovery.join().unwrap() else {
+            panic!("successful recovery must keep its first-winner relaunch");
+        };
+
+        let ops = FakeOps::new(Arc::clone(&lifecycle));
+        let relaunch_calls = Mutex::new(0_usize);
+        finish_claimed_shutdown_then_with(&lifecycle, &ops, leader, || {
+            *relaunch_calls.lock_safe() += 1;
+        });
+        assert_eq!(*relaunch_calls.lock_safe(), 1);
+    }
+
+    #[test]
+    fn recovery_failure_hands_a_deferred_quit_the_terminal_claim() {
+        let lifecycle = Arc::new(AppLifecycle::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let recovery_lifecycle = Arc::clone(&lifecycle);
+        let recovery = std::thread::spawn(move || {
+            recovery_lifecycle.run_configuration_recovery(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err::<(), _>("still unreadable")
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        assert_eq!(lifecycle.request_quit(37), ShutdownClaim::Deferred);
+        release_tx.send(()).unwrap();
+        let RecoveryRun::QuitAfterFailure {
+            error,
+            code,
+            leader,
+        } = recovery.join().unwrap()
+        else {
+            panic!("failed recovery must return the deferred quit claim");
+        };
+        assert_eq!(error, "still unreadable");
+        assert_eq!(code, 37);
+
+        let ops = FakeOps::new(Arc::clone(&lifecycle));
+        finish_claimed_shutdown(&lifecycle, &ops, leader);
+        assert_eq!(lifecycle.inner.lock_safe().phase, Phase::Stopped);
+    }
+
+    #[test]
     fn terminal_rejects_new_workers_and_runtime_effects() {
         let lifecycle = Arc::new(AppLifecycle::default());
-        assert_eq!(lifecycle.claim_shutdown(), ShutdownClaim::Leader);
+        let ShutdownClaim::Leader(leader) = lifecycle.request_quit(0) else {
+            panic!("the first quit must lead shutdown");
+        };
 
         assert!(
             !lifecycle
@@ -664,7 +943,7 @@ mod tests {
                 .unwrap()
         );
         assert!(lifecycle.runtime_effect().is_none());
-        lifecycle.finish_shutdown();
+        lifecycle.finish_shutdown(leader);
     }
 
     #[test]
@@ -702,10 +981,12 @@ mod tests {
         let state = test_state();
         assert!(state.lock_config_mutation().is_some());
 
-        assert_eq!(state.lifecycle.claim_shutdown(), ShutdownClaim::Leader);
+        let ShutdownClaim::Leader(leader) = state.lifecycle.request_quit(0) else {
+            panic!("the first quit must lead shutdown");
+        };
 
         assert!(state.lock_config_mutation().is_none());
-        state.lifecycle.finish_shutdown();
+        state.lifecycle.finish_shutdown(leader);
     }
 
     #[test]
@@ -723,12 +1004,14 @@ mod tests {
         });
         attempting_rx.recv().unwrap();
 
-        assert_eq!(state.lifecycle.claim_shutdown(), ShutdownClaim::Leader);
+        let ShutdownClaim::Leader(leader) = state.lifecycle.request_quit(0) else {
+            panic!("the first quit must lead shutdown");
+        };
         drop(held);
 
         assert!(!result_rx.recv().unwrap());
         waiter.join().unwrap();
-        state.lifecycle.finish_shutdown();
+        state.lifecycle.finish_shutdown(leader);
     }
 
     #[test]
@@ -736,12 +1019,12 @@ mod tests {
         let lifecycle = Arc::new(AppLifecycle::default());
         let ops = FakeOps::new(Arc::clone(&lifecycle));
 
-        let result: Result<(), &str> = shutdown_then_with(&lifecycle, &ops, || {
+        let result: Option<Result<(), &str>> = shutdown_then_with(&lifecycle, &ops, || {
             ops.record("relaunch");
             Err("spawn failed")
         });
 
-        assert_eq!(result, Err("spawn failed"));
+        assert_eq!(result, Some(Err("spawn failed")));
         assert_eq!(ops.steps().last(), Some(&"relaunch"));
         assert!(!lifecycle.is_running());
         assert!(lifecycle.runtime_effect().is_none());

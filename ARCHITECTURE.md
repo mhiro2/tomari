@@ -494,7 +494,10 @@ and applies none of them.
 ## 6. Persistence (`tomari-core::db`)
 
 - SQLite (rusqlite, bundled). `Database` wraps a single connection in a
-  `Mutex`, with WAL and `foreign_keys = ON`.
+  `Mutex`. Opening first requires `PRAGMA quick_check(1)` to return exactly one
+  `ok` row; only then are WAL, `foreign_keys = ON`, and migrations allowed to
+  touch the file. This catches damage in current-schema table pages that would
+  otherwise surface only during a later settings query.
 - Migrations are `PRAGMA user_version` plus an ordered `MIGRATIONS` list:
   entry `n` upgrades a version-`n` database to `n + 1`, and the version a
   binary writes is simply the list's length. Each step runs in its own
@@ -511,19 +514,23 @@ and applies none of them.
   they never leak into the settings object the frontend round-trips). Domain
   values are stored as JSON strings in their columns, keeping the schema
   resilient to domain-type evolution.
-- First-run seeding keys off the _absence of the settings row_
-  (`seed_first_run_defaults` in `main.rs`). Keying off empty tables would
-  resurrect defaults whenever a user deliberately clears everything. A launch
-  where the seed actually ran is flagged as `AppState::first_run`, which
+- First-run seeding requires both the _absence of the settings row_ and no rows
+  in any persistent table (`seed_first_run_defaults` in `main.rs`). The schema
+  and SQLite `user_version` do not count as data, but shortcuts, modifier rules,
+  internal metadata, and remembered window placements do. This prevents a
+  partial or older store from being mistaken for a pristine install while the
+  settings row remains the initialized marker for users who deliberately clear
+  their configurable rows. A launch where the seed actually ran is flagged as
+  `AppState::first_run`, which
   `setup` uses to auto-open the settings window once. The frontend pulls it via
   the `setup_status` command (together with the current permission states) to
   open the focused Setup dialog over the current settings page when a permission
   is missing; later recovery opens the same dialog from the sidebar permission
   status. It is a pull, not an event: a push at launch would race the WebView
-  load. Any ambiguous detection counts as _not_ a first run, so an
-  existing database never triggers it; a corruption reset that re-seeds a fresh
-  database does, deliberately — the settings are back at defaults and the
-  window shows the user that state. Defaults live in
+  load. Any ambiguous detection counts as _not_ a first run, so an existing or
+  recovered database never triggers it. A quarantined database is kept unseeded
+  behind the recovery interlock until the user explicitly resets it; that reset
+  relaunches with automation still off. Defaults live in
   `defaults.rs` (Caps Lock → Control — the one seeded modifier rule — plus
   focused window shortcuts for quick snaps, remembered-home restore,
   move-and-restore, undo, and redo). The left/right ⌘ IME toggle is _not_ a
@@ -532,9 +539,17 @@ and applies none of them.
 - Storage location comes from `AppPaths` (`directories::ProjectDirs`,
   `tomari.sqlite`).
 - A *corrupt* database is moved aside under a `.broken-<unix-ms>` suffix and a
-  fresh one takes the original path, because for a resident tool losing settings
-  beats never starting again; a transient failure (a lock, a read-only or full
-  disk) exits with an alert instead, so a healthy database is never discarded.
+  fresh, unseeded one takes the original path, because for a resident tool
+  preserving a recoverable copy beats either never starting again or silently
+  enabling defaults. The replacement enters a fail-closed recovery session;
+  transient open failures (a lock, a read-only or full disk) exit with an alert
+  instead, so a healthy database is never discarded. Before the first rename,
+  Tomari creates and flushes a `database-reset-required` write-ahead marker in
+  the data directory. Its presence wins over first-run detection on every later
+  launch, including a crash after the old database moved but before the
+  replacement was created. Only a successful, explicitly confirmed
+  `DatabaseReset` transaction may remove it; a failed removal prevents relaunch
+  and leaves the interlock armed.
   `quarantine_database` aims to move the whole set or none of it: a stale `-wal`
   beside a brand-new database is replayed into it, so an incompletely
   quarantined set is worse than the corrupt one it was found as. The database
@@ -587,9 +602,51 @@ and applies none of them.
   trait so each failure ordering — a rollback that cannot finish, an orphan that
   cannot be moved, a lookup that cannot be made — is unit tested without a real
   corrupt database.
-- Every config mutation — each interactive save/delete — holds
-  `AppState::config_mutation`, so they serialize and the in-memory engines
-  never disagree with disk.
+- After open and first-run detection, startup reads every required column in
+  `settings`, `hotkeys`, `modifier_rules`, `meta`, and `window_placements`
+  under one SQLite read transaction before constructing any input or window
+  effect. A settings JSON error, a hard query/schema/scalar failure in any
+  table, or an inconsistent store with any persisted data but no settings row
+  builds `AppState` with `AppSettings::fail_closed()`, an empty modifier engine, an
+  empty shortcut map, and `ConfigurationRecovery` instead. Global shortcuts,
+  keyboard/drag taps, Caps Lock remapping, menu-bar automation, login-item
+  writes, and permission-triggered tap restarts are not attempted in that
+  session.
+- Recovery is an explicit process boundary. `get_settings` identifies
+  retryable failures with `settingsRecoveryRequired` and quarantined databases
+  with `databaseResetRequired`; ordinary configuration mutations reject, and
+  the frontend mounts only the dedicated recovery view. **Try Again** re-reads
+  the complete startup snapshot without modifying SQLite. `DatabaseReset`
+  exposes only Reset: only the destructive action the user explicitly confirms
+  may retire its write-ahead marker. **Reset** writes the fixed fail-closed profile;
+  a settings-only decode failure preserves shortcuts and rules only after every
+  stored row is proven readable. Skipped JSON or invalid scalar values in those
+  automation rows escalate the same reset to a transactional replacement with
+  known-good defaults. Metadata and placements are hard-read before the first
+  write; structural failures abort or roll the transaction back, so Reset
+  cannot modify a partial store and then relaunch into the same recovery. A
+  quarantined fresh DB is seeded the same way. Valid window placements remain
+  when their database survived.
+  Recovery ownership and terminal intent share `AppLifecycle`'s mutex. Only the
+  first retry/reset executes its database closure; duplicates perform no reads
+  or writes. That owner first flushes a separate
+  `show-panel-after-recovery` filesystem intent; this does not alter the saved
+  configuration Retry is inspecting. A quit requested during that bounded
+  operation is deferred: a successful first-winner repair completes cleanup and
+  relaunches, while a failed repair completes the pending quit without an
+  intervening retry. A quit or updater relaunch that already won can never be
+  turned into a later recovery restart. The next healthy process shows the
+  panel and consumes the intent only after the show succeeds. Automation remains
+  off after a Reset until the user deliberately enables it; Try Again respects
+  the repaired persisted switches.
+- Settings, hotkey, and modifier-rule mutations hold
+  `AppState::config_mutation`, so they serialize and the in-memory engines never
+  disagree with disk. The recovery gate is checked before and after that lock,
+  preventing a stale autosave from queueing behind Reset and landing on the
+  repaired database afterward. Remembered-position edits stay on the
+  main-thread `window_mutation` coordinator to avoid the shortcut-registration
+  deadlock; each entry checks the immutable recovery gate before touching DB or
+  history.
 
 ## 7. Tauri shell and the frontend boundary
 
@@ -597,15 +654,18 @@ and applies none of them.
   logging (stderr plus a daily-rotated file under `<data_dir>/logs`, seven days
   kept, each day soft-capped at 8 MiB by `logcap` — seeded from what an
   earlier run wrote that day; past the cap one notice is written and the rest
-  of the day's lines go to stderr only) → take the `InstanceLock` (a launch that cannot hands off to the
-  running instance and exits before touching the database) → open and seed the
-  DB → build `AppState` (DB, both engines, the `WindowManager`, the settings
+  of the day's lines go to stderr only) → take the `InstanceLock` (a launch that
+  cannot acquire it hands off to the running instance and exits before touching
+  the database) → open the DB and
+  preflight the complete startup configuration → build either normal or
+  fail-closed `AppState` (DB, both engines, the `WindowManager`, the settings
   cache, the shortcut map, the undo history) → wire the plugins (single-instance
-  / deep-link / autostart / updater / global-shortcut) and the tray → start the
-  event tap and the drag-to-snap tap. `single-instance` is registered first
-  among the plugins: a second launch would create a duplicate event tap that
-  double-fires every remap, so it hands off to the running instance (surfacing
-  its panel) and exits. `deep-link` is registered right after it, as the plugin
+  / deep-link / autostart / updater / global-shortcut) and the tray → start only
+  the effects allowed by the trusted startup plan. `single-instance` is
+  registered first among the plugins: a second launch would create a duplicate
+  event tap that double-fires every remap, so it hands off to the running
+  instance (surfacing its panel) and exits. `deep-link` is registered right
+  after it, as the plugin
   requires.
 - The activation policy is **Accessory** (no Dock icon). A single resizable
   window (`main`, 940×720 by default, minimum 860×620, decorated, opaque, not
@@ -624,6 +684,16 @@ and applies none of them.
   The global shortcut / modifier-tap / `tomari://v1/toggle-panel` toggle hides
   the window only when it is the active (visible and focused) window and
   otherwise raises it.
+- When `get_settings` reports either recovery code, the frontend does not mount
+  the sidebar, permission subscriptions, Setup dialog, or any feature view. It
+  shows a focused, localized safety-interlock screen with the paused effect
+  list and a two-step reset confirmation. Retryable failures also offer a
+  non-destructive retry; `databaseResetRequired` explains the quarantine and
+  exposes only Reset. In-flight settings events and apply-warning reads cannot
+  dismiss the interlock. Escape cancels reset confirmation and focus returns
+  to its trigger. This state is a full-screen workflow rather than a toast
+  because no ordinary control is safe to use until the process relaunches from
+  a verified configuration.
 - **Permission polling**: Accessibility / Input Monitoring change in System
   Settings, outside the app, so a tracked worker runs only the cheap status
   checks every two seconds while a grant is missing and every 30 seconds once
@@ -713,9 +783,12 @@ and applies none of them.
   modifier tap actions, including optional remembered-position restore. Both
   reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
   shortcuts (`set_hotkeys_suspended`) while capturing a chord.
-- **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way
-  `Running → ShuttingDown → Stopped` lifecycle. Ordinary quit holds the first
-  `ExitRequested` on the main thread, marks the lifecycle terminal there, and
+- **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way terminal
+  lifecycle with a non-terminal `Recovering` sub-state:
+  `Running → Recovering → ShuttingDown → Stopped` on successful repair, or
+  `Recovering → Running` when repair fails without a pending quit. Ordinary
+  quit holds the first `ExitRequested` on the main thread, marks the lifecycle
+  terminal there, and
   runs cleanup on the blocking pool; this leaves the main thread available to
   finish a shortcut registration already in progress. The updater runs the
   same coordinator synchronously before asking Tauri to restart. New config
@@ -725,7 +798,8 @@ and applies none of them.
   process-lifetime workers, drain transient OS effects, release global
   shortcuts, stop the keyboard and both drag taps, restore native Caps Lock,
   remove menu-bar UI, then release keep-awake state. Concurrent shutdown calls
-  wait for the same completion and never reopen the lifecycle.
+  wait for the same completion and never reopen the lifecycle; relaunch
+  continuations run only for the caller that atomically won the terminal claim.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
   consumes it, completes the terminal shutdown above, and relaunches. The

@@ -21,6 +21,19 @@ use crate::lifecycle::AppLifecycle;
 use crate::locks::MutexExt;
 use crate::menubar::MenuBarState;
 
+/// Why the persisted configuration cannot be trusted for this launch.
+///
+/// The distinction decides how the explicit reset repairs disk: a database
+/// that was already quarantined needs a fresh default row set, while an
+/// unreadable settings row must leave the user's still-readable shortcuts and
+/// modifier rules alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigurationRecovery {
+    SettingsUnreadable,
+    DatabaseReadFailed,
+    DatabaseReset,
+}
+
 /// How many window frames the undo history keeps before dropping the oldest.
 const WINDOW_HISTORY_CAP: usize = 50;
 
@@ -130,6 +143,11 @@ pub struct AppState {
     /// they never interleave. It guards the *sequence* of operations, not a
     /// value, hence `Mutex<()>`.
     config_mutation: Mutex<()>,
+    /// Present while startup could not establish one trustworthy, complete
+    /// configuration snapshot. Runtime settings are fail-closed in this state,
+    /// and every ordinary config mutation is rejected until the dedicated
+    /// recovery command repairs the store and relaunches the process.
+    configuration_recovery: Option<ConfigurationRecovery>,
     #[cfg(test)]
     config_mutation_waiters: AtomicUsize,
     /// Serializes window mutations end to end. A snap, recall, undo or redo
@@ -170,6 +188,17 @@ impl AppState {
         settings: AppSettings,
         first_run: bool,
     ) -> Self {
+        Self::new_with_configuration_recovery(db, engine, windows, settings, first_run, None)
+    }
+
+    pub(crate) fn new_with_configuration_recovery(
+        db: Database,
+        engine: ModifierEngine,
+        windows: Box<dyn WindowManager + Send + Sync>,
+        settings: AppSettings,
+        first_run: bool,
+        configuration_recovery: Option<ConfigurationRecovery>,
+    ) -> Self {
         let menu_bar = MenuBarState::new(settings.menu_bar_auto_collapse_secs);
         Self {
             lifecycle: Arc::new(AppLifecycle::default()),
@@ -185,6 +214,7 @@ impl AppState {
             last_placement: Mutex::new(None),
             screen_geometry: Mutex::new(ScreenGeometry::default()),
             config_mutation: Mutex::new(()),
+            configuration_recovery,
             #[cfg(test)]
             config_mutation_waiters: AtomicUsize::new(0),
             window_mutation: Mutex::new(()),
@@ -194,6 +224,16 @@ impl AppState {
             update_regrant: AtomicBool::new(false),
             epoch: Instant::now(),
         }
+    }
+
+    /// The recovery interlock is immutable for this process. A successful
+    /// repair relaunches instead of mutating a partially initialized runtime.
+    pub(crate) fn configuration_recovery(&self) -> Option<ConfigurationRecovery> {
+        self.configuration_recovery
+    }
+
+    pub(crate) fn configuration_recovery_required(&self) -> bool {
+        self.configuration_recovery().is_some()
     }
 
     /// Record the update-regrant detection result (see [`crate::regrant`]).

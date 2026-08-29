@@ -70,6 +70,27 @@ fn default_command_ime_switch_enabled() -> bool {
     true
 }
 
+impl AppSettings {
+    /// Settings for a session whose persisted configuration could not be read.
+    /// Every feature that can alter system or application state is disabled;
+    /// the tray stays visible so the user cannot lose the recovery path.
+    pub fn fail_closed() -> Self {
+        Self {
+            launch_at_login: false,
+            language: Language::System,
+            keyboard_enabled: false,
+            window_management_enabled: false,
+            external_window_actions_enabled: false,
+            command_ime_switch_enabled: false,
+            show_in_menu_bar: true,
+            drag_to_snap_enabled: false,
+            drag_to_move_enabled: false,
+            menu_bar_tidy_enabled: false,
+            menu_bar_auto_collapse_secs: 0,
+        }
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -104,6 +125,26 @@ mod tests {
         // The left/right ⌘ IME toggle is on out of the box, matching the
         // bindings a fresh install ships with.
         assert!(AppSettings::default().command_ime_switch_enabled);
+    }
+
+    #[test]
+    fn fail_closed_disables_every_persisted_side_effect() {
+        assert_eq!(
+            AppSettings::fail_closed(),
+            AppSettings {
+                launch_at_login: false,
+                language: Language::System,
+                keyboard_enabled: false,
+                window_management_enabled: false,
+                external_window_actions_enabled: false,
+                command_ime_switch_enabled: false,
+                show_in_menu_bar: true,
+                drag_to_snap_enabled: false,
+                drag_to_move_enabled: false,
+                menu_bar_tidy_enabled: false,
+                menu_bar_auto_collapse_secs: 0,
+            }
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use super::{Database, collect_valid_rows};
+use super::{Database, DecodedRows, PersistedRowCounts, collect_valid_rows};
 use crate::domain::{PlacementSlot, WindowApplication, WindowPlacement};
 use crate::error::{Error, Result};
 
@@ -132,23 +132,67 @@ impl Database {
     }
 }
 
+/// Read every persisted placement column and classify only malformed slot/frame
+/// payloads as damaged rows.
+pub(super) fn preflight_window_placements(
+    conn: &rusqlite::Connection,
+) -> Result<DecodedRows<WindowPlacement>> {
+    let mut statement = conn.prepare(
+        "SELECT bundle_id, app_name, slot, frame
+         FROM window_placements
+         ORDER BY bundle_id, slot",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut values = Vec::new();
+    let mut counts = PersistedRowCounts::default();
+
+    while let Some(row) = rows.next()? {
+        let bundle_id: String = row.get(0)?;
+        let app_name: String = row.get(1)?;
+        let slot: String = row.get(2)?;
+        let frame: String = row.get(3)?;
+        counts.stored += 1;
+
+        match decode_placement_values(bundle_id, app_name, slot, frame) {
+            Ok(placement) => values.push(placement),
+            Err(error) => {
+                counts.skipped += 1;
+                tracing::warn!(
+                    entity = "window placement",
+                    %error,
+                    "skipping a stored row with a damaged slot or frame"
+                );
+            }
+        }
+    }
+
+    Ok(DecodedRows { values, counts })
+}
+
 fn decode_placement(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowPlacement> {
+    let bundle_id: String = row.get(0)?;
+    let app_name: String = row.get(1)?;
     let slot: String = row.get(2)?;
+    let frame: String = row.get(3)?;
+    decode_placement_values(bundle_id, app_name, slot, frame).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+fn decode_placement_values(
+    bundle_id: String,
+    app_name: String,
+    slot: String,
+    frame: String,
+) -> Result<WindowPlacement> {
     let slot = match slot.as_str() {
         "primary" => PlacementSlot::Primary,
         "secondary" => PlacementSlot::Secondary,
         other => {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(Error::invalid("slot", format!("unknown value {other}"))),
-            ));
+            return Err(Error::invalid("slot", format!("unknown value {other}")));
         }
     };
-    let raw: String = row.get(3)?;
-    let frame: crate::domain::NormalizedRect = serde_json::from_str(&raw).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
-    })?;
+    let frame: crate::domain::NormalizedRect = serde_json::from_str(&frame)?;
     // Meaning, not just shape: a frame that parses but is non-finite, empty or
     // outside the work area would be refused on write (`save_window_placement`),
     // so reading it back as a placement would recall a window to nowhere. Treat
@@ -156,19 +200,15 @@ fn decode_placement(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowPlacement
     // point read — so a valid Secondary is not blocked by a damaged Primary and
     // the slot can be overwritten or forgotten.
     if !frame.is_valid() {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(Error::invalid(
-                "frame",
-                "stored value is not a valid normalized rectangle",
-            )),
+        return Err(Error::invalid(
+            "frame",
+            "stored value is not a valid normalized rectangle",
         ));
     }
     Ok(WindowPlacement {
         application: WindowApplication {
-            bundle_id: row.get(0)?,
-            name: row.get(1)?,
+            bundle_id,
+            name: app_name,
         },
         slot,
         frame,

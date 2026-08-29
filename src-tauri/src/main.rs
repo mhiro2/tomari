@@ -28,6 +28,7 @@ mod menubar;
 #[cfg(target_os = "macos")]
 mod overlay;
 mod ratelimit;
+mod recovery_markers;
 mod regrant;
 mod shortcuts;
 mod state;
@@ -43,7 +44,7 @@ use std::path::Path;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
-use tomari_core::{AppPaths, AppSettings, Database, defaults};
+use tomari_core::{AppPaths, AppSettings, Database, PersistedSettings, defaults};
 use tomari_keyboard::ModifierEngine;
 use tomari_window::WindowManager;
 
@@ -150,10 +151,13 @@ fn main() {
                 .build(),
         )
         .manage(lock)
+        .manage(paths)
         .manage(app_state)
         .manage(commands::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::retry_settings_recovery,
+            commands::reset_settings_recovery,
             commands::save_settings,
             commands::get_apply_warnings,
             commands::list_hotkeys,
@@ -199,6 +203,8 @@ fn main() {
 
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
+            let configuration_recovery = state.configuration_recovery_required();
+            let startup_automation = startup_automation_plan(state.inner());
 
             // Wire the `tomari://` URL scheme. The cold-start URL (Tomari was
             // launched by the link) and warm-start URLs (it was already running)
@@ -220,8 +226,10 @@ fn main() {
                 });
             }
 
-            // Apply the persisted menu-bar and login-item preferences on launch
-            // so the actual system state matches what the settings show.
+            // Apply trusted menu-bar and login-item preferences on launch so
+            // the actual system state matches what the settings show. Recovery
+            // keeps the tray visible but must not rewrite the user's login item
+            // from a synthetic fail-closed profile.
             let (show_tray, launch_at_login) = {
                 let s = state.settings.lock_safe();
                 (s.show_in_menu_bar, s.launch_at_login)
@@ -229,20 +237,31 @@ fn main() {
             if !show_tray {
                 tray::set_visible(&handle, false);
             }
-            commands::apply_launch_at_login(&handle, launch_at_login);
+            if !configuration_recovery {
+                commands::apply_launch_at_login(&handle, launch_at_login);
+            }
 
             // Individual hotkeys that fail to register are logged (and
             // tolerated) inside `register_all`; only failing to read the
             // hotkey list at all lands here.
-            if let Err(e) = shortcuts::register_all(&handle, state.inner()) {
+            if startup_automation.keyboard
+                && let Err(e) = shortcuts::register_all(&handle, state.inner())
+            {
                 tracing::error!(error = %e, "failed to register global shortcuts");
             }
 
-            // Start the keyboard event tap (Input Monitoring). Attempting this
-            // even before the permission is granted adds Tomari to the Input
-            // Monitoring list so the user can enable it.
+            // Start the keyboard event tap (Input Monitoring) only for a
+            // trusted, enabled configuration. On an ordinary launch this is
+            // attempted even before permission is granted so Tomari appears in
+            // the Input Monitoring list; recovery never attempts the tap.
             #[cfg(target_os = "macos")]
-            eventtap::restart(&handle);
+            if startup_automation.keyboard {
+                eventtap::restart(&handle);
+            } else {
+                // A prior crash may have left Caps Lock mapped outside this
+                // process. Restore it without ever attempting to create a tap.
+                let _ = capsmap::reconcile(false);
+            }
 
             // Prime the drag-to-snap display-geometry cache and keep it current
             // on display changes — before the drag-to-snap tap starts, so the
@@ -252,9 +271,13 @@ fn main() {
 
             // Start the drag-to-snap and drag-to-move taps when enabled.
             #[cfg(target_os = "macos")]
-            drag_to_snap::restart(&handle);
+            if startup_automation.drag_to_snap {
+                drag_to_snap::restart(&handle);
+            }
             #[cfg(target_os = "macos")]
-            drag_to_move::restart(&handle);
+            if startup_automation.drag_to_move {
+                drag_to_move::restart(&handle);
+            }
 
             // A sleep or session switch can swallow key releases; reset the
             // key-tracking state whenever the system comes back.
@@ -273,7 +296,9 @@ fn main() {
 
             // Put the menu bar divider back if tidying is switched on. Always
             // collapsed to start with, so a launch looks the same every time.
-            menubar::init(&handle);
+            if startup_automation.menu_bar_tidy {
+                menubar::init(&handle);
+            }
 
             // Compare the current permission state against the snapshot the
             // previous run stored: a grant that vanished together with a
@@ -289,7 +314,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             eventtap::set_accessibility_granted(initial.0);
             let app_version = app.package_info().version.to_string();
-            {
+            if !configuration_recovery {
                 let prev = regrant::load_snapshot(&state.db);
                 let update_regrant =
                     regrant::is_update_regrant(prev.as_ref(), initial, &app_version);
@@ -368,7 +393,9 @@ fn main() {
                                 let _ = apply_permission_transition_if_running(
                                     &state.lifecycle,
                                     || {
-                                        if input_monitoring_changed {
+                                        if input_monitoring_changed
+                                            && !state.configuration_recovery_required()
+                                        {
                                             eventtap::restart(&refresh_handle);
                                             drag_to_snap::restart(&refresh_handle);
                                             drag_to_move::restart(&refresh_handle);
@@ -385,11 +412,13 @@ fn main() {
                                         // Keep the stored snapshot tracking every observed
                                         // transition, so the next launch compares against
                                         // the state this run actually ended with.
-                                        regrant::store_snapshot(
-                                            &state.db,
-                                            current,
-                                            &refresh_version,
-                                        );
+                                        if !state.configuration_recovery_required() {
+                                            regrant::store_snapshot(
+                                                &state.db,
+                                                current,
+                                                &refresh_version,
+                                            );
+                                        }
                                     },
                                 );
                             });
@@ -400,15 +429,20 @@ fn main() {
                 }
             }
 
-            // A true first run (the database was just seeded) auto-opens the
-            // settings window once: launched as an Accessory there is no
-            // window, no Dock icon, and every headline feature still waits on
-            // permissions — without this, "nothing happened" is the whole
-            // first impression. Later launches stay quiet as before. Safe
-            // even before the WebView has finished loading; this only shows
-            // the window.
-            if state.first_run {
-                let _ = actions::show_panel(&handle);
+            // A true first run and every recovery session open the settings
+            // window. A successful repair carries a durable one-shot intent
+            // through the process relaunch too; consume it only after show
+            // succeeds, so an Accessory app with no Dock icon never strands
+            // the user behind a hidden panel. This is safe before the WebView
+            // finishes loading because it only shows the existing window.
+            let paths = app.state::<AppPaths>();
+            if let Err(error) = show_startup_panel_if_requested(
+                &paths,
+                state.first_run,
+                configuration_recovery,
+                || actions::show_panel(&handle).map_err(|error| error.to_string()),
+            ) {
+                tracing::error!(%error, "could not complete the startup panel request");
             }
 
             Ok(())
@@ -561,62 +595,215 @@ fn init_logging(paths: Option<&AppPaths>) {
         .try_init();
 }
 
-/// Open the database, seed first-run defaults, and assemble shared state.
+struct OpenedDatabase {
+    db: Database,
+    recovered_from_corruption: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Initialization {
+    Existing,
+    FirstRun,
+    MissingSettingsWithData,
+}
+
+struct ReadyConfiguration {
+    settings: AppSettings,
+    rules: Vec<tomari_core::ModifierRule>,
+    first_run: bool,
+    dropped_rules: usize,
+    dropped_hotkeys: usize,
+}
+
+enum StartupConfiguration {
+    Ready(ReadyConfiguration),
+    RecoveryRequired(crate::state::ConfigurationRecovery),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupAutomationPlan {
+    keyboard: bool,
+    drag_to_snap: bool,
+    drag_to_move: bool,
+    menu_bar_tidy: bool,
+}
+
+fn startup_automation_plan(state: &AppState) -> StartupAutomationPlan {
+    let settings = state.settings.lock_safe();
+    StartupAutomationPlan {
+        keyboard: settings.keyboard_enabled,
+        drag_to_snap: settings.window_management_enabled && settings.drag_to_snap_enabled,
+        drag_to_move: settings.window_management_enabled && settings.drag_to_move_enabled,
+        menu_bar_tidy: settings.menu_bar_tidy_enabled,
+    }
+}
+
+fn should_show_startup_panel(
+    first_run: bool,
+    configuration_recovery: bool,
+    show_after_recovery: bool,
+) -> bool {
+    first_run || configuration_recovery || show_after_recovery
+}
+
+fn show_startup_panel_if_requested(
+    paths: &AppPaths,
+    first_run: bool,
+    configuration_recovery: bool,
+    show: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let (show_after_recovery, marker_error) =
+        match recovery_markers::show_panel_after_recovery(paths) {
+            Ok(requested) => (requested, None),
+            Err(error) => {
+                // Losing a one-shot marker read must not hide the only route
+                // back to the settings that recovery just disabled.
+                (true, Some(error.to_string()))
+            }
+        };
+    if !should_show_startup_panel(first_run, configuration_recovery, show_after_recovery) {
+        return Ok(());
+    }
+
+    show()?;
+    if let Some(error) = marker_error {
+        return Err(format!(
+            "the panel was shown, but its recovery marker could not be inspected: {error}"
+        ));
+    }
+    if show_after_recovery {
+        recovery_markers::clear_show_panel_after_recovery(paths).map_err(|error| {
+            format!("the panel was shown, but its recovery marker remains: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Open the database, establish one complete persisted snapshot, and assemble
+/// shared state. Any uncertainty is an interlock, never an excuse to activate
+/// defaults: the degraded state keeps every input/window effect off, exposes
+/// only explicit retry/reset UI, and rejects ordinary configuration writes.
 ///
 /// Startup must not panic: as an Accessory (no Dock icon, no window) launched
 /// at login, a panic is a silent crash loop with no feedback at all. Anything
 /// unrecoverable shows a native alert once and exits instead.
 fn build_state(paths: &AppPaths) -> AppState {
-    let db = open_database(paths);
-    let first_run = seed_first_run_defaults(&db);
+    let database_reset_marker = match recovery_markers::database_reset_required(paths) {
+        Ok(required) => required,
+        Err(error) => fatal_startup_error(&format!(
+            "Tomari could not inspect its database recovery marker: {error}"
+        )),
+    };
+    let OpenedDatabase {
+        mut db,
+        mut recovered_from_corruption,
+    } = open_database(paths);
+    recovered_from_corruption |= database_reset_marker;
 
-    // A read failure here is a row that opened fine but no longer decodes (a
-    // corrupt JSON blob, or a value a newer build wrote) — distinct from the
-    // unreadable *file* `open_database` already handled. Falling back keeps the
-    // app running, but never silently: the loss is logged and surfaced so the
-    // user knows their saved values are not in effect, rather than discovering it
-    // only when a later save overwrites them.
-    let settings = db.get_settings().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "could not read saved settings; using defaults for this session");
-        alert(
-            "Tomari could not read your saved settings, so it is running with defaults \
-             for now. Your settings file was left in place.",
-            false,
+    loop {
+        if recovered_from_corruption {
+            return recovery_state(db, crate::state::ConfigurationRecovery::DatabaseReset);
+        }
+
+        match load_startup_configuration(&db) {
+            Ok(StartupConfiguration::Ready(ready)) => {
+                warn_on_undecodable_rows(ready.dropped_rules, ready.dropped_hotkeys);
+                return AppState::new(
+                    db,
+                    ModifierEngine::new(ready.rules),
+                    make_window_manager(),
+                    ready.settings,
+                    ready.first_run,
+                );
+            }
+            Ok(StartupConfiguration::RecoveryRequired(recovery)) => {
+                return recovery_state(db, recovery);
+            }
+            Err(error) if error.is_database_corruption() => {
+                // Close the live WAL connection before moving its database and
+                // sidecars. Letting it drop after the rename could checkpoint
+                // into a path that now belongs to the replacement.
+                drop(db);
+                db = recover_corrupt_database(paths, &error);
+                recovered_from_corruption = true;
+            }
+            Err(error) => {
+                let recovery = if matches!(error, tomari_core::Error::Serde(_)) {
+                    crate::state::ConfigurationRecovery::SettingsUnreadable
+                } else {
+                    crate::state::ConfigurationRecovery::DatabaseReadFailed
+                };
+                tracing::error!(%error, "persisted configuration is unreadable; automation is paused");
+                return recovery_state(db, recovery);
+            }
+        }
+    }
+}
+
+fn recovery_state(db: Database, recovery: crate::state::ConfigurationRecovery) -> AppState {
+    AppState::new_with_configuration_recovery(
+        db,
+        ModifierEngine::new(Vec::new()),
+        make_window_manager(),
+        AppSettings::fail_closed(),
+        false,
+        Some(recovery),
+    )
+}
+
+fn load_startup_configuration(db: &Database) -> Result<StartupConfiguration, tomari_core::Error> {
+    let initialization = seed_first_run_defaults(db)?;
+    if initialization == Initialization::MissingSettingsWithData {
+        tracing::error!(
+            "settings row is missing while other configuration remains; automation is paused"
         );
-        AppSettings::default()
-    });
-    // A row this build would not have accepted (older build, hand edit) is
-    // repaired rather than trusted: the live settings drive timers.
-    let settings = validate::repair_settings(settings);
+        return Ok(StartupConfiguration::RecoveryRequired(
+            crate::state::ConfigurationRecovery::SettingsUnreadable,
+        ));
+    }
 
-    // The stored modifier rules plus the built-in left/right ⌘ IME toggle,
-    // which lives behind a setting rather than as an editable row.
-    let loaded_rules = db.list_modifier_rules();
-    // `Some(n)` only when the list actually read, so the per-row drop check below
-    // is skipped on a hard read failure (already surfaced by the fallback).
-    let decoded_rule_count = loaded_rules.as_ref().ok().map(Vec::len);
-    let mut rules = loaded_rules.unwrap_or_else(|e| {
-        tracing::error!(error = %e, "could not read saved keyboard rules; starting with none for this session");
-        alert(
-            "Tomari could not read your saved keyboard rules, so none are active for \
-             now. Your saved rules were left in place.",
-            false,
-        );
-        Vec::new()
-    });
-
-    // A *whole-list* read failure is surfaced above; an individual row whose
-    // stored JSON no longer decodes is instead skipped silently by the list
-    // queries (one bad row must not lose the whole list). Compare the raw row
-    // counts with what decoded so that silent loss is surfaced too.
-    warn_on_undecodable_rows(&db, decoded_rule_count);
+    // Read every persisted source under one SQLite snapshot before any input
+    // or window effect is activated. Meta and placement values participate in
+    // the hard-read boundary even though only keyboard rows are loaded into an
+    // engine here; missing schema or scalar damage anywhere must fail closed.
+    let report = db.preflight_persisted_state()?;
+    let settings = match report.settings {
+        PersistedSettings::Ready(settings)
+            if report.settings_rows.stored == 1 && report.settings_rows.skipped == 0 =>
+        {
+            validate::repair_settings(settings)
+        }
+        PersistedSettings::Missing | PersistedSettings::UnreadableJson { .. } => {
+            tracing::error!(
+                "the canonical settings row is missing or unreadable; automation is paused"
+            );
+            return Ok(StartupConfiguration::RecoveryRequired(
+                crate::state::ConfigurationRecovery::SettingsUnreadable,
+            ));
+        }
+        PersistedSettings::Ready(_) => {
+            tracing::error!(
+                "the settings table is not a complete canonical snapshot; automation is paused"
+            );
+            return Ok(StartupConfiguration::RecoveryRequired(
+                crate::state::ConfigurationRecovery::SettingsUnreadable,
+            ));
+        }
+    };
+    let mut rules = report.modifier_rules;
+    let dropped_rules = report.modifier_rule_rows.skipped;
+    let dropped_hotkeys = report.hotkey_rows.skipped;
 
     if settings.command_ime_switch_enabled {
         rules.extend(defaults::command_ime_rules());
     }
-    let engine = ModifierEngine::new(rules);
-
-    AppState::new(db, engine, make_window_manager(), settings, first_run)
+    Ok(StartupConfiguration::Ready(ReadyConfiguration {
+        settings,
+        rules,
+        first_run: initialization == Initialization::FirstRun,
+        dropped_rules,
+        dropped_hotkeys,
+    }))
 }
 
 /// Seed defaults only on the very first run, detected by the absence of the
@@ -624,78 +811,49 @@ fn build_state(paths: &AppPaths) -> AppState {
 /// settings row — not empty tables — is the primary marker so that a user who
 /// deliberately clears all of their hotkeys or rules does not get them back.
 ///
-/// Returns whether this launch is a true first run — the seed actually ran —
-/// which `setup` uses to auto-open the settings window once. Every ambiguous
-/// case (an unreadable row, an inconsistent database, a failed seed) returns
-/// `false`: surprising an existing user with a window is worse than staying
-/// quiet on a genuinely fresh install.
-fn seed_first_run_defaults(db: &Database) -> bool {
-    match db.settings_exist() {
-        // Already initialized: leave the user's data alone.
-        Ok(true) => false,
+/// Returns whether this is an existing store, a seed that just completed, or
+/// an inconsistent store with user data but no settings row. Read and write
+/// errors propagate so corruption can re-enter the central quarantine path and
+/// every other failure can activate the recovery interlock without touching
+/// the user's data.
+fn seed_first_run_defaults(db: &Database) -> Result<Initialization, tomari_core::Error> {
+    let report = db.preflight_persisted_state()?;
+    match report.settings {
+        // Any canonical settings row, even one that this build cannot decode,
+        // proves the store is not a first run. The complete startup load below
+        // decides whether it is safe to activate.
+        PersistedSettings::Ready(_) | PersistedSettings::UnreadableJson { .. } => {
+            Ok(Initialization::Existing)
+        }
         // No settings row — a first run *if* the database is otherwise empty.
-        // Guard against seeding over an inconsistent database that has hotkey or
-        // rule rows but no settings row (an older build could write those before
-        // a failed settings write): `seed_defaults` upserts by primary key, so
-        // seeding would overwrite any user row whose id matches a default. Only
-        // seed a truly pristine database; on a raw-count read failure, treat the
-        // database as non-empty and skip, never risking a clobber.
-        Ok(false) => {
-            let has_rows =
-                db.count_hotkeys().unwrap_or(1) > 0 || db.count_modifier_rules().unwrap_or(1) > 0;
-            if has_rows {
+        // Guard against seeding over any inconsistent database that already has
+        // persisted state. Besides shortcuts and rules, internal metadata and
+        // remembered window placements can predate a failed settings write.
+        // Only seed a truly pristine database; a probe failure propagates into
+        // the recovery interlock, never risking a clobber.
+        PersistedSettings::Missing => {
+            if !report.is_pristine() {
                 tracing::warn!(
-                    "settings row missing but hotkeys or rules exist; skipping first-run seed to avoid overwriting existing data"
+                    "settings row missing but other persisted data exists; skipping first-run seed to avoid overwriting existing data"
                 );
-                return false;
+                return Ok(Initialization::MissingSettingsWithData);
             }
-            if let Err(e) = db.seed_defaults(
+            db.seed_defaults(
                 &defaults::default_hotkeys(),
                 &defaults::default_modifier_rules(),
                 &AppSettings::default(),
-            ) {
-                tracing::error!(error = %e, "could not seed first-run defaults");
-                alert(
-                    "Tomari could not save its initial settings. It is running with \
-                     built-in defaults for now; they will be stored on your next change.",
-                    false,
-                );
-                return false;
-            }
-            true
-        }
-        // A read failure is *not* a first run: the settings row may well exist
-        // but be momentarily unreadable (a lock, a transient SQLite error).
-        // Seeding now would overwrite a real user's configuration, so touch
-        // nothing on disk and run this session on the fallbacks the reads in
-        // `build_state` already provide (each surfaces its own alert if it,
-        // too, fails).
-        Err(e) => {
-            tracing::error!(error = %e, "could not determine first-run state; leaving the database untouched");
-            false
+            )?;
+            Ok(Initialization::FirstRun)
         }
     }
 }
 
 /// Alert (once) when the database holds hotkey or rule rows that no longer
 /// decode — which the list queries skip silently — so a vanished shortcut or
-/// rule is visible rather than a mystery. `decoded_rules` is the rule count
-/// already read in [`build_state`] (reused to avoid a second query); `None` when
-/// that read failed, in which case the rule drop check is skipped because the
-/// failure was already surfaced.
-fn build_drop_count(decoded: Option<usize>, total: Result<usize, tomari_core::Error>) -> usize {
-    match (decoded, total) {
-        (Some(decoded), Ok(total)) => total.saturating_sub(decoded),
-        _ => 0,
-    }
-}
-
-fn warn_on_undecodable_rows(db: &Database, decoded_rules: Option<usize>) {
-    let rules_dropped = build_drop_count(decoded_rules, db.count_modifier_rules());
-    // Hotkeys are not otherwise loaded here, so read both counts for the check;
-    // only a successful list paired with a successful count flags a real drop.
-    let hotkeys_dropped =
-        build_drop_count(db.list_hotkeys().ok().map(|h| h.len()), db.count_hotkeys());
+/// rule is visible rather than a mystery. The counts belong to the same full
+/// startup read as the decoded rows; a hard count failure activates recovery
+/// before this notification path is reached.
+fn warn_on_undecodable_rows(rules_dropped: usize, hotkeys_dropped: usize) {
     if rules_dropped == 0 && hotkeys_dropped == 0 {
         return;
     }
@@ -718,7 +876,7 @@ fn warn_on_undecodable_rows(db: &Database, decoded_rules: Option<usize>) {
 /// alert. Transient failures — a lock held by another process, a read-only
 /// or full disk — must not discard a healthy database, so they exit with an
 /// alert instead.
-fn open_database(paths: &AppPaths) -> Database {
+fn open_database(paths: &AppPaths) -> OpenedDatabase {
     if !sweep_orphan_sidecars(&RealFileOps, &paths.db_path, unix_ms()) {
         fatal_startup_error(&format!(
             "Tomari found -wal or -shm files left beside {} by an interrupted settings \
@@ -728,44 +886,84 @@ fn open_database(paths: &AppPaths) -> Database {
         ));
     }
     let error = match Database::open(&paths.db_path) {
-        Ok(db) => return db,
+        Ok(db) => {
+            return OpenedDatabase {
+                db,
+                recovered_from_corruption: false,
+            };
+        }
         Err(e) => e,
     };
     if error.is_database_corruption() {
-        tracing::error!(error = %error, "database is corrupt — moving it aside and starting fresh");
-        if !move_database_aside(paths) {
-            // The corrupt set is still in place — either the database, or a
-            // sidecar SQLite would replay into whatever replaced it. A "fresh"
-            // database beside those would not be fresh, so name the files to
-            // deal with rather than start on top of them.
-            fatal_startup_error(&format!(
-                "Tomari's settings database is damaged, and could not be moved aside \
-                 automatically. Move {} — along with any -wal or -shm file beside it \
-                 — somewhere else, then open Tomari again.",
-                paths.db_path.display()
-            ));
-        }
-        match Database::open(&paths.db_path) {
-            Ok(db) => {
-                alert(
-                    "Tomari could not read its settings database, so it was reset. \
-                     The unreadable file was kept next to it with a .broken suffix.",
-                    false,
-                );
-                return db;
-            }
-            // The damaged database is aside by now, so the corruption error that
-            // got us here explains nothing about *this* failure — report the one
-            // that actually stopped us.
-            Err(fresh) => fatal_startup_error(&format!(
-                "Tomari moved its damaged settings database aside but could not create \
-                 a new one: {fresh}"
-            )),
-        }
+        return OpenedDatabase {
+            db: recover_corrupt_database(paths, &error),
+            recovered_from_corruption: true,
+        };
     }
     fatal_startup_error(&format!(
         "Tomari could not open its settings database: {error}"
     ));
+}
+
+fn recover_corrupt_database(paths: &AppPaths, error: &tomari_core::Error) -> Database {
+    recover_corrupt_database_with(paths, error, |message| alert(message, false))
+}
+
+fn recover_corrupt_database_with(
+    paths: &AppPaths,
+    error: &tomari_core::Error,
+    notify: impl FnOnce(&str),
+) -> Database {
+    tracing::error!(%error, "database is corrupt — moving it aside and pausing automation");
+    let moved = match quarantine_after_recovery_marker(
+        paths,
+        recovery_markers::arm_database_reset_required,
+        || move_database_aside(paths),
+    ) {
+        Ok(moved) => moved,
+        Err(marker_error) => fatal_startup_error(&format!(
+            "Tomari's settings database is damaged, but the recovery marker could not be written: \
+             {marker_error}. The database was left in place."
+        )),
+    };
+    if !moved {
+        // The corrupt set is still in place — either the database, or a
+        // sidecar SQLite would replay into whatever replaced it. A "fresh"
+        // database beside those would not be fresh, so name the files to deal
+        // with rather than start on top of them.
+        fatal_startup_error(&format!(
+            "Tomari's settings database is damaged, and could not be moved aside \
+             automatically. Move {} — along with any -wal or -shm file beside it \
+             — somewhere else, then open Tomari again.",
+            paths.db_path.display()
+        ));
+    }
+    match Database::open(&paths.db_path) {
+        Ok(db) => {
+            notify(
+                "Tomari found a damaged settings database and paused all keyboard and \
+                 window automation. The unreadable file was kept next to it with a \
+                 .broken suffix. Open Tomari to review the safe reset.",
+            );
+            db
+        }
+        // The damaged database is aside by now, so the corruption error that
+        // got us here explains nothing about *this* failure — report the one
+        // that actually stopped us.
+        Err(fresh) => fatal_startup_error(&format!(
+            "Tomari moved its damaged settings database aside but could not create \
+             a new one: {fresh}"
+        )),
+    }
+}
+
+fn quarantine_after_recovery_marker(
+    paths: &AppPaths,
+    arm_marker: impl FnOnce(&AppPaths) -> std::io::Result<()>,
+    quarantine: impl FnOnce() -> bool,
+) -> std::io::Result<bool> {
+    arm_marker(paths)?;
+    Ok(quarantine())
 }
 
 /// The sidecars SQLite keeps beside a database in WAL mode. A stale `-wal` is
@@ -1113,6 +1311,68 @@ mod tests {
         assert!(applied_rx.try_recv().is_err());
     }
 
+    #[test]
+    fn startup_panel_policy_includes_the_one_shot_recovery_intent() {
+        assert!(!should_show_startup_panel(false, false, false));
+        assert!(should_show_startup_panel(true, false, false));
+        assert!(should_show_startup_panel(false, true, false));
+        assert!(should_show_startup_panel(false, false, true));
+    }
+
+    #[test]
+    fn successful_recovery_panel_show_consumes_its_one_shot_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        recovery_markers::arm_show_panel_after_recovery(&paths).unwrap();
+        let shows = std::cell::Cell::new(0);
+
+        show_startup_panel_if_requested(&paths, false, false, || {
+            shows.set(shows.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        show_startup_panel_if_requested(&paths, false, false, || {
+            shows.set(shows.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(shows.get(), 1);
+        assert!(!recovery_markers::show_panel_after_recovery(&paths).unwrap());
+    }
+
+    #[test]
+    fn failed_recovery_panel_show_keeps_its_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        recovery_markers::arm_show_panel_after_recovery(&paths).unwrap();
+
+        assert!(
+            show_startup_panel_if_requested(&paths, false, false, || {
+                Err("window unavailable".into())
+            })
+            .is_err()
+        );
+        assert!(recovery_markers::show_panel_after_recovery(&paths).unwrap());
+    }
+
+    #[test]
+    fn quarantine_never_starts_before_the_recovery_marker_is_armed() {
+        let paths = AppPaths::with_root("/data");
+        let quarantine_called = std::cell::Cell::new(false);
+        let result = quarantine_after_recovery_marker(
+            &paths,
+            |_| Err(std::io::Error::other("marker write failed")),
+            || {
+                quarantine_called.set(true);
+                true
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!quarantine_called.get());
+    }
+
     /// In-memory [`FileOps`] over a set of present paths, with per-path rename
     /// failures so each ordering can be forced. Renaming a path that is not
     /// there reports `NotFound`, exactly as the real filesystem does — which is
@@ -1423,7 +1683,15 @@ mod tests {
     fn a_pristine_database_seeds_and_counts_as_a_first_run() {
         let db = Database::open_in_memory().unwrap();
 
-        assert!(seed_first_run_defaults(&db));
+        assert!(
+            !db.has_persisted_data().unwrap(),
+            "migrated schema and user_version are not persisted app data"
+        );
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::FirstRun
+        );
+        assert!(db.has_persisted_data().unwrap());
         assert!(db.settings_exist().unwrap());
         assert!(db.count_hotkeys().unwrap() > 0);
         assert!(db.count_modifier_rules().unwrap() > 0);
@@ -1432,10 +1700,48 @@ mod tests {
     #[test]
     fn an_initialized_database_is_not_a_first_run() {
         let db = Database::open_in_memory().unwrap();
-        seed_first_run_defaults(&db);
+        seed_first_run_defaults(&db).unwrap();
 
         // The same database on its next launch: settings row present.
-        assert!(!seed_first_run_defaults(&db));
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::Existing
+        );
+    }
+
+    #[test]
+    fn startup_preflight_requires_metadata_and_placement_tables() {
+        for table in ["meta", "window_placements"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("settings.sqlite");
+            {
+                let db = Database::open(&path).unwrap();
+                seed_first_run_defaults(&db).unwrap();
+            }
+            {
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+            }
+            let db = Database::open(&path).unwrap();
+
+            let error = match load_startup_configuration(&db) {
+                Err(error) => error,
+                Ok(_) => panic!("{table}: incomplete schema must not become ready"),
+            };
+            assert!(matches!(error, tomari_core::Error::Database(_)));
+
+            let state = recovery_state(db, crate::state::ConfigurationRecovery::DatabaseReadFailed);
+            assert_eq!(
+                startup_automation_plan(&state),
+                StartupAutomationPlan {
+                    keyboard: false,
+                    drag_to_snap: false,
+                    drag_to_move: false,
+                    menu_bar_tidy: false,
+                },
+                "{table}: structural recovery must remain fail-closed"
+            );
+        }
     }
 
     #[test]
@@ -1443,7 +1749,10 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.upsert_hotkey(&defaults::default_hotkeys()[0]).unwrap();
 
-        assert!(!seed_first_run_defaults(&db));
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::MissingSettingsWithData
+        );
         assert!(!db.settings_exist().unwrap(), "nothing was seeded");
         assert_eq!(db.count_hotkeys().unwrap(), 1, "the stray row was kept");
     }
@@ -1454,7 +1763,225 @@ mod tests {
         db.upsert_modifier_rule(&defaults::default_modifier_rules()[0])
             .unwrap();
 
-        assert!(!seed_first_run_defaults(&db));
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::MissingSettingsWithData
+        );
         assert!(!db.settings_exist().unwrap(), "nothing was seeded");
+    }
+
+    #[test]
+    fn metadata_without_settings_enters_recovery_without_overwriting_data() {
+        let db = Database::open_in_memory().unwrap();
+        db.set_meta("permission_snapshot", "preserve-me").unwrap();
+
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::MissingSettingsWithData
+        );
+        let recovery = match load_startup_configuration(&db).unwrap() {
+            StartupConfiguration::RecoveryRequired(recovery) => recovery,
+            StartupConfiguration::Ready(_) => {
+                panic!("metadata without settings must not initialize automation")
+            }
+        };
+        assert_eq!(
+            recovery,
+            crate::state::ConfigurationRecovery::SettingsUnreadable
+        );
+
+        let state = recovery_state(db, recovery);
+        assert_eq!(*state.settings.lock_safe(), AppSettings::fail_closed());
+        assert_eq!(
+            startup_automation_plan(&state),
+            StartupAutomationPlan {
+                keyboard: false,
+                drag_to_snap: false,
+                drag_to_move: false,
+                menu_bar_tidy: false,
+            }
+        );
+        assert!(!state.db.settings_exist().unwrap(), "nothing was seeded");
+        assert_eq!(state.db.count_hotkeys().unwrap(), 0);
+        assert_eq!(state.db.count_modifier_rules().unwrap(), 0);
+        assert_eq!(
+            state.db.get_meta("permission_snapshot").unwrap().as_deref(),
+            Some("preserve-me")
+        );
+    }
+
+    #[test]
+    fn placement_without_settings_enters_recovery_without_overwriting_data() {
+        let db = Database::open_in_memory().unwrap();
+        let placement = tomari_core::WindowPlacement {
+            application: tomari_core::WindowApplication {
+                bundle_id: "com.example.Editor".into(),
+                name: "Editor".into(),
+            },
+            slot: tomari_core::PlacementSlot::Primary,
+            frame: tomari_core::NormalizedRect::new(0.1, 0.2, 0.6, 0.7),
+        };
+        db.save_window_placement(&placement).unwrap();
+
+        assert_eq!(
+            seed_first_run_defaults(&db).unwrap(),
+            Initialization::MissingSettingsWithData
+        );
+        let recovery = match load_startup_configuration(&db).unwrap() {
+            StartupConfiguration::RecoveryRequired(recovery) => recovery,
+            StartupConfiguration::Ready(_) => {
+                panic!("placement without settings must not initialize automation")
+            }
+        };
+        assert_eq!(
+            recovery,
+            crate::state::ConfigurationRecovery::SettingsUnreadable
+        );
+
+        let state = recovery_state(db, recovery);
+        assert_eq!(*state.settings.lock_safe(), AppSettings::fail_closed());
+        assert_eq!(
+            startup_automation_plan(&state),
+            StartupAutomationPlan {
+                keyboard: false,
+                drag_to_snap: false,
+                drag_to_move: false,
+                menu_bar_tidy: false,
+            }
+        );
+        assert!(!state.db.settings_exist().unwrap(), "nothing was seeded");
+        assert_eq!(state.db.count_hotkeys().unwrap(), 0);
+        assert_eq!(state.db.count_modifier_rules().unwrap(), 0);
+        assert_eq!(
+            state
+                .db
+                .list_window_placements("com.example.Editor")
+                .unwrap(),
+            vec![placement]
+        );
+    }
+
+    #[test]
+    fn invalid_settings_json_keeps_every_startup_automation_path_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tomari.sqlite");
+        {
+            let db = Database::open(&path).unwrap();
+            db.seed_defaults(
+                &defaults::default_hotkeys(),
+                &defaults::default_modifier_rules(),
+                &AppSettings::fail_closed(),
+            )
+            .unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE settings SET data = ?1 WHERE id = 1",
+                ["{not valid settings json"],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let recovery = match load_startup_configuration(&db).unwrap() {
+            StartupConfiguration::RecoveryRequired(recovery) => recovery,
+            StartupConfiguration::Ready(_) => {
+                panic!("invalid settings JSON must not produce a runtime snapshot")
+            }
+        };
+        assert_eq!(
+            recovery,
+            crate::state::ConfigurationRecovery::SettingsUnreadable
+        );
+
+        let state = recovery_state(db, recovery);
+        assert_eq!(*state.settings.lock_safe(), AppSettings::fail_closed());
+        assert_eq!(
+            state.configuration_recovery(),
+            Some(crate::state::ConfigurationRecovery::SettingsUnreadable)
+        );
+        assert_eq!(
+            startup_automation_plan(&state),
+            StartupAutomationPlan {
+                keyboard: false,
+                drag_to_snap: false,
+                drag_to_move: false,
+                menu_bar_tidy: false,
+            }
+        );
+        assert!(state.shortcuts.lock_safe().is_empty());
+        let engine = state.engine.lock_safe();
+        assert!(!engine.has_caps_lock_rule());
+        for rule in defaults::command_ime_rules() {
+            assert!(!engine.contains_rule_id(&rule.id));
+        }
+        drop(engine);
+        assert!(
+            state.db.get_settings().is_err(),
+            "entering recovery must not overwrite the unreadable row"
+        );
+        assert!(state.db.count_hotkeys().unwrap() > 0);
+        assert!(state.db.count_modifier_rules().unwrap() > 0);
+    }
+
+    #[test]
+    fn central_corruption_recovery_returns_an_unseeded_fail_closed_store() {
+        use std::cell::Cell;
+
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_root(directory.path());
+        paths.ensure().unwrap();
+        {
+            let db = Database::open(&paths.db_path).unwrap();
+            db.seed_defaults(
+                &defaults::default_hotkeys(),
+                &defaults::default_modifier_rules(),
+                &AppSettings::default(),
+            )
+            .unwrap();
+        }
+
+        let notified = Cell::new(false);
+        let fresh = recover_corrupt_database_with(
+            &paths,
+            &tomari_core::Error::DatabaseIntegrity("test fixture".into()),
+            |_| notified.set(true),
+        );
+        assert!(notified.get());
+        assert!(!fresh.settings_exist().unwrap());
+        assert_eq!(fresh.count_hotkeys().unwrap(), 0);
+        assert_eq!(fresh.count_modifier_rules().unwrap(), 0);
+        assert!(recovery_markers::database_reset_required(&paths).unwrap());
+        assert!(std::fs::read_dir(&paths.data_dir).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("tomari.sqlite.broken-")
+        }));
+
+        // The process can exit on the recovery screen. Re-open from disk and
+        // prove the write-ahead marker still wins over first-run seeding.
+        drop(fresh);
+        let state = build_state(&paths);
+        assert!(!state.first_run);
+        assert_eq!(
+            state.configuration_recovery(),
+            Some(crate::state::ConfigurationRecovery::DatabaseReset)
+        );
+        assert!(!state.db.settings_exist().unwrap());
+        assert_eq!(state.db.count_hotkeys().unwrap(), 0);
+        assert_eq!(state.db.count_modifier_rules().unwrap(), 0);
+        assert_eq!(*state.settings.lock_safe(), AppSettings::fail_closed());
+        assert_eq!(
+            startup_automation_plan(&state),
+            StartupAutomationPlan {
+                keyboard: false,
+                drag_to_snap: false,
+                drag_to_move: false,
+                menu_bar_tidy: false,
+            }
+        );
     }
 }

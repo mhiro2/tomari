@@ -31,6 +31,7 @@ const en = {
   'common.on': 'On',
   'common.off': 'Off',
   'common.enable': 'Enable {label}',
+  'common.loadFailedTitle': 'Settings unavailable',
   'common.loadFailed': 'Could not load settings: {error}',
   'common.retry': 'Retry',
   'common.refresh': 'Refresh',
@@ -127,6 +128,35 @@ const en = {
   'error.windowTargetChanged': 'The focused window changed. The panel has been refreshed.',
   'error.windowNotResponding':
     "The app didn't respond to window control. Wait a moment, then refresh.",
+  'error.settingsRecoveryRequired': 'Settings must be repaired before changes can be saved.',
+  'error.databaseResetRequired':
+    'The quarantined settings database must be reset before Tomari can continue.',
+
+  'recovery.eyebrow': 'Safety interlock',
+  'recovery.title': 'Settings need repair',
+  'recovery.intro':
+    "Tomari couldn't safely read its saved settings. Nothing unreadable has been replaced.",
+  'recovery.databaseResetIntro':
+    'Tomari found a damaged settings database and preserved it for manual recovery.',
+  'recovery.pausedTitle': 'Automation is paused',
+  'recovery.pausedBody':
+    'Keyboard gestures, shortcuts, window controls, and menu bar automation are not running.',
+  'recovery.optionsTitle': 'Choose how to continue',
+  'recovery.optionsBody':
+    'Try again without changing anything. Reset may replace affected preferences, shortcuts, or modifier rules with safe defaults. Readable window positions are kept unless the database itself is unusable.',
+  'recovery.databaseResetOptionsTitle': 'Reset to continue',
+  'recovery.databaseResetOptionsBody':
+    'The damaged database cannot be retried safely. Confirm a reset to initialize its replacement with automation-off defaults.',
+  'recovery.retry': 'Try Again',
+  'recovery.retrying': 'Trying Again…',
+  'recovery.reset': 'Reset Settings…',
+  'recovery.confirmTitle': 'Reset unreadable settings?',
+  'recovery.confirmBody':
+    'Tomari will reset affected data to safe defaults. Shortcuts or rules may be replaced, and readable window positions are kept unless the database must be quarantined. Automation stays off until you turn each feature back on.',
+  'recovery.confirmAction': 'Reset and Continue',
+  'recovery.resetting': 'Resetting…',
+  'recovery.retryFailed': 'Tomari still could not read the settings: {error}',
+  'recovery.resetFailed': 'Tomari could not reset the settings: {error}',
 
   'setup.title': 'Get Tomari ready',
   'setup.intro':
@@ -438,6 +468,7 @@ const ja: Record<MessageKey, string> = {
   'common.on': 'オン',
   'common.off': 'オフ',
   'common.enable': '{label}を有効化',
+  'common.loadFailedTitle': '設定を利用できません',
   'common.loadFailed': '設定を読み込めませんでした: {error}',
   'common.retry': '再試行',
   'common.refresh': '更新',
@@ -534,6 +565,35 @@ const ja: Record<MessageKey, string> = {
   'error.windowTargetChanged': '操作対象のウィンドウが変わったため、表示を更新しました。',
   'error.windowNotResponding':
     '対象アプリがウィンドウ操作に応答しませんでした。少し待ってから更新してください。',
+  'error.settingsRecoveryRequired': '設定を修復するまで変更を保存できません。',
+  'error.databaseResetRequired':
+    '隔離された設定データベースをリセットするまで Tomari を続行できません。',
+
+  'recovery.eyebrow': '安全インターロック',
+  'recovery.title': '設定の修復が必要です',
+  'recovery.intro':
+    '保存された設定を安全に読み込めませんでした。読み取れない設定はまだ置き換えていません。',
+  'recovery.databaseResetIntro':
+    '破損した設定データベースを検出し、手動で復旧できるよう別の場所に保管しました。',
+  'recovery.pausedTitle': '自動操作を停止しています',
+  'recovery.pausedBody':
+    'キー操作、ショートカット、ウィンドウ操作、メニューバーの自動操作は動作していません。',
+  'recovery.optionsTitle': '続ける方法を選択',
+  'recovery.optionsBody':
+    '再読み込みは内容を変更しません。リセットすると、影響を受けた基本設定、ショートカット、修飾キールールが安全な初期値に戻る場合があります。読み取れるウィンドウ位置は、データベース自体を利用できない場合を除いて残ります。',
+  'recovery.databaseResetOptionsTitle': 'リセットして続ける',
+  'recovery.databaseResetOptionsBody':
+    '破損したデータベースは安全に再読み込みできません。リセットを確認すると、自動操作を停止した初期値で代替データベースを初期化します。',
+  'recovery.retry': 'もう一度読み込む',
+  'recovery.retrying': '再読み込み中…',
+  'recovery.reset': '設定をリセット…',
+  'recovery.confirmTitle': '読み取れない設定をリセットしますか？',
+  'recovery.confirmBody':
+    '影響を受けたデータを安全な初期値に戻します。ショートカットやルールも置き換わる場合があり、読み取れるウィンドウ位置はデータベース全体の隔離が必要でない限り残ります。各機能を再びオンにするまで自動操作は停止したままです。',
+  'recovery.confirmAction': 'リセットして続ける',
+  'recovery.resetting': 'リセット中…',
+  'recovery.retryFailed': '設定をまだ読み込めませんでした: {error}',
+  'recovery.resetFailed': '設定をリセットできませんでした: {error}',
 
   'setup.title': 'Tomari を使う準備',
   'setup.intro':

@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
 import type { AppSettings, PermissionsChanged, SetupStatus } from './lib/types';
@@ -36,51 +36,105 @@ const ALL_GRANTED: SetupStatus = {
   revision: 0,
 };
 
+const RECOVERY_ERROR = {
+  code: 'settingsRecoveryRequired',
+  message: 'settings row does not decode',
+};
+
+const DATABASE_RESET_ERROR = {
+  code: 'databaseResetRequired',
+  message: 'settings database was quarantined',
+};
+
+function defaultCommand(cmd: string): Promise<unknown> {
+  switch (cmd) {
+    case 'get_settings':
+      return Promise.resolve(SETTINGS);
+    case 'setup_status':
+      return Promise.resolve(ALL_GRANTED);
+    case 'save_settings':
+      return Promise.resolve({ applyWarnings: [] });
+    case 'list_modifier_rules':
+    case 'list_hotkeys':
+      return Promise.resolve([]);
+    case 'get_window_history_status':
+      return Promise.resolve({ canUndo: false, canRedo: false });
+    case 'input_monitoring_status':
+    case 'accessibility_status':
+      return Promise.resolve(true);
+    case 'get_keep_awake':
+      return Promise.resolve({
+        active: false,
+        lidClose: 'off',
+        phase: 'off',
+        options: {
+          durationSecs: null,
+          endsAtMs: null,
+          acOnly: false,
+          lowBatteryAction: 'warn',
+        },
+        notice: null,
+        powerSource: 'ac',
+        batteryPercent: 80,
+        kernelSleepDisabled: false,
+        ownsLidClose: false,
+        leftoverUndecided: false,
+        longRunningProcesses: [],
+        revision: 1,
+      });
+    default:
+      return Promise.resolve(null);
+  }
+}
+
 function mockCommands(overrides: Record<string, unknown> = {}) {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd in overrides) {
       const value = overrides[cmd];
       return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
     }
-    switch (cmd) {
-      case 'get_settings':
-        return Promise.resolve(SETTINGS);
-      case 'setup_status':
-        return Promise.resolve(ALL_GRANTED);
-      case 'save_settings':
-        return Promise.resolve({ applyWarnings: [] });
-      case 'list_modifier_rules':
-      case 'list_hotkeys':
-        return Promise.resolve([]);
-      case 'get_window_history_status':
-        return Promise.resolve({ canUndo: false, canRedo: false });
-      case 'input_monitoring_status':
-      case 'accessibility_status':
-        return Promise.resolve(true);
-      case 'get_keep_awake':
-        return Promise.resolve({
-          active: false,
-          lidClose: 'off',
-          phase: 'off',
-          options: {
-            durationSecs: null,
-            endsAtMs: null,
-            acOnly: false,
-            lowBatteryAction: 'warn',
-          },
-          notice: null,
-          powerSource: 'ac',
-          batteryPercent: 80,
-          kernelSleepDisabled: false,
-          ownsLidClose: false,
-          leftoverUndecided: false,
-          longRunningProcesses: [],
-          revision: 1,
-        });
-      default:
-        return Promise.resolve(null);
-    }
+    return defaultCommand(cmd);
   });
+}
+
+function mockRecoveryCommands({
+  retry,
+  reset,
+  recoveredSettings = SETTINGS,
+  initialError = RECOVERY_ERROR,
+}: {
+  retry?: Error | 'recover';
+  reset?: Error | 'recover';
+  recoveredSettings?: AppSettings;
+  initialError?: unknown;
+} = {}) {
+  let recovered = false;
+  mockInvoke.mockImplementation((cmd: string) => {
+    if (cmd === 'get_settings') {
+      return recovered ? Promise.resolve(recoveredSettings) : Promise.reject(initialError);
+    }
+    if (cmd === 'retry_settings_recovery') {
+      if (retry instanceof Error) return Promise.reject(retry);
+      if (retry === 'recover') {
+        recovered = true;
+        return Promise.resolve();
+      }
+      return new Promise<void>(() => {});
+    }
+    if (cmd === 'reset_settings_recovery') {
+      if (reset instanceof Error) return Promise.reject(reset);
+      if (reset === 'recover') {
+        recovered = true;
+        return Promise.resolve();
+      }
+      return new Promise<void>(() => {});
+    }
+    return defaultCommand(cmd);
+  });
+}
+
+function setNavigatorLanguage(value: string) {
+  Object.defineProperty(window.navigator, 'language', { value, configurable: true });
 }
 
 function sidebar() {
@@ -90,6 +144,186 @@ function sidebar() {
 function nav(name: string) {
   return within(sidebar()).getByRole('button', { name });
 }
+
+describe('App settings recovery', () => {
+  const originalLanguage = window.navigator.language;
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    mockInvoke.mockReset();
+    mockRecoveryCommands();
+    mockListen.mockReset();
+    mockListen.mockImplementation(() => Promise.resolve(() => {}));
+    setNavigatorLanguage('en-US');
+  });
+
+  afterEach(() => {
+    setNavigatorLanguage(originalLanguage);
+  });
+
+  it('keeps the operational shell unmounted while the initial settings read is pending', () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === 'get_settings' ? new Promise<AppSettings>(() => {}) : defaultCommand(cmd),
+    );
+
+    render(<App />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading…');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.map(([cmd]) => cmd)).toEqual(['get_settings']);
+  });
+
+  it('mounts only the focused recovery surface when the initial settings read requires repair', async () => {
+    render(<App />);
+
+    const heading = await screen.findByRole('heading', { name: 'Settings need repair', level: 1 });
+    expect(heading).toHaveFocus();
+    expect(screen.getByRole('alert')).toHaveTextContent('Automation is paused');
+    expect(screen.getByRole('main').parentElement).toHaveAttribute('aria-busy', 'false');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Get Tomari ready' })).not.toBeInTheDocument();
+
+    const commands = mockInvoke.mock.calls.map(([cmd]) => cmd);
+    expect(commands).toEqual(['get_settings']);
+    expect(commands).not.toContain('setup_status');
+    expect(commands).not.toContain('list_hotkeys');
+    expect(commands).not.toContain('get_apply_warnings');
+  });
+
+  it('keeps recovery active and reports a retry failure locally', async () => {
+    mockRecoveryCommands({ retry: new Error('read still failed') });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings need repair' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+
+    expect(
+      await screen.findByText('Tomari still could not read the settings: read still failed'),
+    ).toHaveAttribute('role', 'alert');
+    expect(screen.getByRole('heading', { name: 'Settings need repair' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  });
+
+  it('offers only an explicit reset after a damaged database was quarantined', async () => {
+    mockRecoveryCommands({
+      initialError: DATABASE_RESET_ERROR,
+      reset: new Error('replacement failed'),
+    });
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Settings need repair' });
+    expect(
+      screen.getByText(
+        'Tomari found a damaged settings database and preserved it for manual recovery.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Reset to continue' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try Again' })).not.toBeInTheDocument();
+
+    const reset = screen.getByRole('button', { name: 'Reset Settings…' });
+    expect(reset).toHaveClass('btn--primary');
+    fireEvent.click(reset);
+    const confirmation = screen.getByRole('group', { name: 'Reset unreadable settings?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset and Continue' }));
+    expect(
+      await screen.findByText('Tomari could not reset the settings: replacement failed'),
+    ).toHaveAttribute('role', 'alert');
+    expect(screen.queryByRole('button', { name: 'Try Again' })).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'retry_settings_recovery')).toBe(false);
+  });
+
+  it('requires confirmation and supports both Escape and Cancel without resetting', async () => {
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings need repair' });
+
+    const reset = screen.getByRole('button', { name: 'Reset Settings…' });
+    fireEvent.click(reset);
+
+    let confirmation = screen.getByRole('group', { name: 'Reset unreadable settings?' });
+    expect(
+      within(confirmation).getByText(/Shortcuts or rules may be replaced/),
+    ).toBeInTheDocument();
+    expect(
+      within(confirmation).getByText(/Automation stays off until you turn each feature back on/),
+    ).toBeInTheDocument();
+    const confirmReset = within(confirmation).getByRole('button', {
+      name: 'Reset and Continue',
+    });
+    expect(confirmReset).toHaveFocus();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'reset_settings_recovery')).toBe(false);
+
+    // The confirmation stays dismissible after focus moves back outside its
+    // own controls, for example via Shift+Tab.
+    reset.focus();
+    fireEvent.keyDown(reset, { key: 'Escape' });
+    expect(
+      screen.queryByRole('group', { name: 'Reset unreadable settings?' }),
+    ).not.toBeInTheDocument();
+    expect(reset).toHaveFocus();
+
+    fireEvent.click(reset);
+    confirmation = screen.getByRole('group', { name: 'Reset unreadable settings?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Cancel' }));
+    expect(
+      screen.queryByRole('group', { name: 'Reset unreadable settings?' }),
+    ).not.toBeInTheDocument();
+    expect(reset).toHaveFocus();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'reset_settings_recovery')).toBe(false);
+  });
+
+  it('keeps the confirmation visible and reports a reset failure locally', async () => {
+    mockRecoveryCommands({ reset: new Error('replacement failed') });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings need repair' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset Settings…' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset and Continue' }));
+
+    expect(
+      await screen.findByText('Tomari could not reset the settings: replacement failed'),
+    ).toHaveAttribute('role', 'alert');
+    expect(screen.getByRole('group', { name: 'Reset unreadable settings?' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  });
+
+  it('reloads a healthy snapshot when a mocked reset command resolves', async () => {
+    const safeSettings: AppSettings = {
+      ...SETTINGS,
+      keyboardEnabled: false,
+      windowManagementEnabled: false,
+      commandImeSwitchEnabled: false,
+    };
+    mockRecoveryCommands({ reset: 'recover', recoveredSettings: safeSettings });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings need repair' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset Settings…' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset and Continue' }));
+
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Settings need repair' })).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_settings')).toHaveLength(2);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'reset_settings_recovery')).toHaveLength(
+      1,
+    );
+    expect(
+      mockInvoke.mock.calls.find(([cmd]) => cmd === 'reset_settings_recovery')?.[1],
+    ).toBeUndefined();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'save_settings')).toBe(false);
+  });
+
+  it('renders the recovery contract in Japanese for a Japanese system locale', async () => {
+    setNavigatorLanguage('ja-JP');
+    render(<App />);
+
+    expect(
+      await screen.findByRole('heading', { name: '設定の修復が必要です', level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('自動操作を停止しています');
+    expect(screen.getByRole('button', { name: 'もう一度読み込む' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '設定をリセット…' })).toBeInTheDocument();
+  });
+});
 
 describe('App setup and permission status', () => {
   let permissionHandlers: ((event: { event: string; id: number; payload: unknown }) => void)[] = [];
@@ -134,6 +368,29 @@ describe('App setup and permission status', () => {
     expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
     expect(screen.getByText('Accessibility')).toBeInTheDocument();
     expect(nav('Permissions: Needs attention')).toBeInTheDocument();
+  });
+
+  it('keeps the operational loading state centered while setup status is pending', async () => {
+    let resolveSetup: ((status: SetupStatus) => void) | undefined;
+    const pendingSetup = new Promise<SetupStatus>((resolve) => {
+      resolveSetup = resolve;
+    });
+    mockCommands({ setup_status: pendingSetup });
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'setup_status')).toBe(true),
+    );
+    const loading = screen.getByRole('status');
+    expect(loading).toHaveClass('app', 'app--loading');
+    expect(loading).toHaveTextContent('Loading…');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSetup?.(ALL_GRANTED);
+    });
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
   });
 
   it('keeps a normal launch on the current page and opens setup from the permission footer', async () => {

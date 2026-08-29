@@ -97,7 +97,17 @@ pub enum SnapBehavior {
 
 /// Whether window management is enabled; window ops silently no-op when off.
 fn enabled(state: &AppState) -> bool {
-    state.settings.lock_safe().window_management_enabled
+    !state.configuration_recovery_required() && state.settings.lock_safe().window_management_enabled
+}
+
+/// Persistent placement edits stay blocked until recovery repairs and
+/// relaunches the process. This immutable flag is safe to read on the main
+/// thread; taking `config_mutation` here could deadlock shortcut registration.
+fn require_trusted_configuration(state: &AppState) -> Result<(), CmdError> {
+    if state.configuration_recovery_required() {
+        return Err(CmdError::settings_recovery_required());
+    }
+    Ok(())
 }
 
 /// Resolve the focused window, or fail like the platform implementations do
@@ -202,6 +212,9 @@ where
     H: WindowHandle + Clone + 'static,
 {
     let _op = state.lock_window_mutation();
+    if !enabled(state) {
+        return false;
+    }
     let Some(frame) = decide() else {
         return false;
     };
@@ -337,6 +350,7 @@ pub fn capture_placement(
     target: &WindowTarget,
     slot: PlacementSlot,
 ) -> Result<PlacementEditResult, CmdError> {
+    require_trusted_configuration(state)?;
     let _op = state.lock_window_mutation();
     let (focused, frame, area) = focused_context(state, Some(target))?;
     let frame = geometry::normalize_frame(frame, area)
@@ -379,6 +393,7 @@ pub fn forget_placement(
     target: &WindowTarget,
     slot: PlacementSlot,
 ) -> Result<PlacementEditResult, CmdError> {
+    require_trusted_configuration(state)?;
     let _op = state.lock_window_mutation();
     let (focused, _, _) = focused_context(state, Some(target))?;
     // Placement edits are serialized by `window_mutation` (held above), not
@@ -421,6 +436,7 @@ pub fn forget_placement(
 /// capture or forget. The current row must still match that edit's result;
 /// otherwise a newer/outside write wins rather than being overwritten.
 pub fn undo_placement_edit(state: &AppState) -> Result<HistoryActionResult, CmdError> {
+    require_trusted_configuration(state)?;
     let _op = state.lock_window_mutation();
     // Placement edits are serialized by `window_mutation` (held above), not
     // by `config_mutation`: that lock is held across a main-thread hop by the
@@ -677,6 +693,7 @@ mod tests {
     use tomari_window::{MockWindowManager, compute_frame};
 
     use super::*;
+    use crate::state::ConfigurationRecovery;
 
     fn area() -> Rect {
         Rect::new(0.0, 25.0, 1600.0, 975.0)
@@ -698,6 +715,17 @@ mod tests {
 
     fn default_state() -> AppState {
         state_with(MockWindowManager::new(area()), AppSettings::default())
+    }
+
+    fn recovery_state() -> AppState {
+        AppState::new_with_configuration_recovery(
+            Database::open_in_memory().unwrap(),
+            ModifierEngine::new(Vec::new()),
+            Box::new(MockWindowManager::new(area())),
+            AppSettings::default(),
+            false,
+            Some(ConfigurationRecovery::SettingsUnreadable),
+        )
     }
 
     fn remember(state: &AppState, slot: PlacementSlot, frame: NormalizedRect) {
@@ -1051,6 +1079,56 @@ mod tests {
     }
 
     #[test]
+    fn recovery_interlock_rejects_placement_edits_without_mutating_state() {
+        let state = recovery_state();
+        let stored = WindowPlacement {
+            application: WindowApplication {
+                bundle_id: "com.example.Mock".into(),
+                name: "Mock App".into(),
+            },
+            slot: PlacementSlot::Primary,
+            frame: NormalizedRect::new(0.0, 0.0, 0.5, 1.0),
+        };
+        state.db.save_window_placement(&stored).unwrap();
+        state.push_placement_edit(PlacementEdit {
+            before: None,
+            after: Some(stored.clone()),
+        });
+        let target = focused_target(&state);
+        let initial_frame = focused_frame(&state);
+
+        let capture_error = capture_placement(&state, &target, PlacementSlot::Primary).unwrap_err();
+        assert_eq!(
+            capture_error.code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+        let forget_error = forget_placement(&state, &target, PlacementSlot::Primary).unwrap_err();
+        assert_eq!(
+            forget_error.code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+        let undo_error = undo_placement_edit(&state).unwrap_err();
+        assert_eq!(
+            undo_error.code,
+            crate::error::ErrorCode::SettingsRecoveryRequired
+        );
+
+        assert_eq!(
+            state
+                .db
+                .get_window_placement("com.example.Mock", PlacementSlot::Primary)
+                .unwrap(),
+            Some(stored.clone())
+        );
+        assert_eq!(focused_frame(&state), initial_frame);
+        assert_eq!(state.window_history_status(), (false, false));
+        let retained_edit = state.pop_placement_edit().unwrap();
+        assert_eq!(retained_edit.before, None);
+        assert_eq!(retained_edit.after, Some(stored));
+        assert!(state.pop_placement_edit().is_none());
+    }
+
+    #[test]
     fn remembered_position_replacement_and_forget_are_undoable() {
         let state = default_state();
         let old = NormalizedRect::new(0.0, 0.0, 0.5, 1.0);
@@ -1226,6 +1304,28 @@ mod tests {
         let handle = SharedHandle(Arc::new(Mutex::new(released_at_edge)));
 
         assert!(!apply_dragged(&state, &handle, start, || None));
+        assert_eq!(handle.frame().unwrap(), released_at_edge);
+        assert_eq!(state.window_history_status(), (false, false));
+    }
+
+    #[test]
+    fn recovery_interlock_blocks_window_side_effects_with_enabled_runtime_settings() {
+        let state = recovery_state();
+        let start = Rect::new(240.0, 180.0, 700.0, 500.0);
+        let released_at_edge = Rect::new(0.0, 25.0, 700.0, 500.0);
+        let handle = SharedHandle(Arc::new(Mutex::new(released_at_edge)));
+        let decision_called = Cell::new(false);
+
+        assert_eq!(
+            snap(&state, WindowPreset::LeftHalf, SnapBehavior::Cycle).unwrap(),
+            None
+        );
+        assert!(!apply_dragged(&state, &handle, start, || {
+            decision_called.set(true);
+            Some(compute_frame(WindowPreset::LeftHalf, area()))
+        }));
+
+        assert!(!decision_called.get());
         assert_eq!(handle.frame().unwrap(), released_at_edge);
         assert_eq!(state.window_history_status(), (false, false));
     }

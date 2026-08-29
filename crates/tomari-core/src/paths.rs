@@ -11,6 +11,8 @@ use crate::error::{Error, Result};
 pub struct AppPaths {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
+    pub database_reset_required_path: PathBuf,
+    pub show_panel_after_recovery_path: PathBuf,
 }
 
 impl AppPaths {
@@ -24,7 +26,14 @@ impl AppPaths {
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         let data_dir = root.into();
         let db_path = data_dir.join("tomari.sqlite");
-        Self { data_dir, db_path }
+        let database_reset_required_path = data_dir.join("database-reset-required");
+        let show_panel_after_recovery_path = data_dir.join("show-panel-after-recovery");
+        Self {
+            data_dir,
+            db_path,
+            database_reset_required_path,
+            show_panel_after_recovery_path,
+        }
     }
 
     /// Create the data directory if it does not already exist.

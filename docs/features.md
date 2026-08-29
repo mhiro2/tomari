@@ -259,9 +259,22 @@ objects such as saved window positions.
 
 On the very first launch the settings window opens automatically (the main
 features need permissions you have not granted yet); after that Tomari starts
-silently in the menu bar. The same happens on the rare launch where Tomari had
-to reset an unreadable settings database — your settings are back at their
-defaults, so the window shows you what state you are in.
+silently in the menu bar. If Tomari cannot establish one trustworthy settings
+snapshot, it opens a dedicated recovery screen instead of the ordinary feature
+pages. Keyboard gestures, shortcuts, window controls, and menu-bar automation
+remain off, and ordinary settings writes are blocked. **Try Again** only
+re-reads the saved configuration. **Reset Settings** requires a second
+confirmation, replaces the unreadable startup configuration with a safe
+automation-off profile, and relaunches Tomari; affected shortcut or modifier
+rows may return to defaults, while readable saved window positions are kept.
+A physically damaged database is retained beside the replacement with a
+`.broken-<timestamp>` suffix for manual recovery. Its reset requirement
+survives quitting or a crash, so an empty replacement is never mistaken for a
+first launch. Because retrying cannot make that empty replacement trustworthy,
+this case offers only the confirmed reset action. After a successful retry or
+reset, the settings panel opens again automatically. Reset leaves automation
+off until you re-enable it, while Try Again preserves the repaired saved
+settings.
 
 On the first launch, or after an update invalidates a previously granted
 permission, Settings opens with a focused Setup dialog over the current page
