@@ -232,6 +232,9 @@ export interface AcceleratorCheck {
 export interface PermissionsChanged {
   accessibility: boolean;
   inputMonitoring: boolean;
+  // Monotonic ordering stamp shared with `SetupStatus.revision`: the snapshot
+  // with the higher revision is the newer one. Not for display.
+  revision: number;
 }
 
 // Result of the setup_status command, pulled once at startup to populate the
@@ -243,6 +246,8 @@ export interface SetupStatus {
   updateRegrant: boolean;
   accessibility: boolean;
   inputMonitoring: boolean;
+  // See `PermissionsChanged.revision`.
+  revision: number;
 }
 
 // Error shape a #[tauri::command] rejects with. `code` classifies the frequent,

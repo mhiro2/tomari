@@ -18,6 +18,7 @@ const en = {
   'app.app': 'App',
   'app.permissionsReady': 'Permissions: Ready',
   'app.permissionsAttention': 'Permissions: Needs attention',
+  'app.permissionsUnknown': 'Permissions: Checking…',
 
   'common.add': 'Add',
   'common.delete': 'Delete',
@@ -424,6 +425,7 @@ const ja: Record<MessageKey, string> = {
   'app.app': 'アプリ',
   'app.permissionsReady': '権限: 準備完了',
   'app.permissionsAttention': '権限: 要確認',
+  'app.permissionsUnknown': '権限: 確認中',
 
   'common.add': '追加',
   'common.delete': '削除',

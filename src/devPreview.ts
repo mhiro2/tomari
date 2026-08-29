@@ -34,6 +34,7 @@ export async function installDevPreview() {
     updateRegrant: false,
     accessibility: !permissionsMissing,
     inputMonitoring: !permissionsMissing,
+    revision: 0,
   };
   const keepAwake: KeepAwakeStatus = {
     active: false,

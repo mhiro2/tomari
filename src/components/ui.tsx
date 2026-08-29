@@ -249,23 +249,45 @@ export function SettingsRow({
   );
 }
 
+// `state`: `ready` (both granted), `attention` (a permission is missing), or
+// `unknown` (the status could not be read yet or the read failed). Unknown is
+// deliberately not shown as ready — the one thing this must never do is say
+// "Ready" over a permission that is missing — and, like attention, it is a
+// button: clicking it retries the read.
 export function PermissionStatus({
-  ready,
+  state,
   readyLabel,
   attentionLabel,
+  unknownLabel,
   onClick,
 }: {
-  ready: boolean;
+  state: 'ready' | 'attention' | 'unknown';
   readyLabel: string;
   attentionLabel: string;
+  unknownLabel: string;
   onClick: () => void;
 }) {
-  if (ready) {
+  if (state === 'ready') {
     return (
       <div className="permission-status permission-status--ready">
         <span className="permission-status__dot" aria-hidden="true" />
         <span>{readyLabel}</span>
       </div>
+    );
+  }
+  if (state === 'unknown') {
+    return (
+      <button
+        type="button"
+        className="permission-status permission-status--unknown"
+        onClick={onClick}
+      >
+        <span className="permission-status__dot" aria-hidden="true" />
+        <span>{unknownLabel}</span>
+        <span className="permission-status__chevron" aria-hidden="true">
+          ›
+        </span>
+      </button>
     );
   }
 

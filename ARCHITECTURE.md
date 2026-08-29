@@ -627,8 +627,14 @@ and applies none of them.
   Input Monitoring is newly granted, the dead taps are restarted (a tap
   created without the permission is null and never revives on its own). Every
   transition also emits `tomari:permissions-changed` (`{ accessibility,
-  inputMonitoring }`), which updates the centralized sidebar permission status
-  and any open Setup dialog without the window needing to be reopened.
+  inputMonitoring, revision }`), which updates the centralized sidebar
+  permission status and any open Setup dialog without the window needing to be
+  reopened. The `revision` is a monotonic stamp shared with the `setup_status`
+  pull: the frontend registers the listener first, pulls only once it is in
+  place, and applies whichever snapshot is strictly newer — so a transition
+  landing during the pull is neither lost nor overwritten. Until a snapshot has
+  arrived the permissions are *unknown*, shown as "checking" (never as ready),
+  and a failed pull leaves a retry on the status control.
 - **Tray** (`tray.rs`): setup items for missing permissions (at the very top),
   explicitly named Undo/Redo Window Change recovery actions, live Prevent
   Sleep and menu-bar-icon state, Settings, and Check for Updates. It does not

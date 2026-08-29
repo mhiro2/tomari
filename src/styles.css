@@ -242,6 +242,11 @@ button {
   background: var(--warning);
 }
 
+/* Not yet known (the status could not be read): neither green nor amber. */
+.permission-status--unknown .permission-status__dot {
+  background: var(--faint);
+}
+
 .permission-status__chevron {
   color: var(--faint);
   font-size: 16px;

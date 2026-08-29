@@ -33,6 +33,7 @@ const ALL_GRANTED: SetupStatus = {
   updateRegrant: false,
   accessibility: true,
   inputMonitoring: true,
+  revision: 0,
 };
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
@@ -160,12 +161,12 @@ describe('App setup and permission status', () => {
     render(<App />);
     expect(await screen.findByText('Permissions: Ready')).toBeInTheDocument();
 
-    permissionsChanged({ accessibility: true, inputMonitoring: false });
+    permissionsChanged({ accessibility: true, inputMonitoring: false, revision: 1 });
     expect(
       await screen.findByRole('button', { name: 'Permissions: Needs attention' }),
     ).toBeInTheDocument();
 
-    permissionsChanged({ accessibility: true, inputMonitoring: true });
+    permissionsChanged({ accessibility: true, inputMonitoring: true, revision: 2 });
     expect(await screen.findByText('Permissions: Ready')).toBeInTheDocument();
   });
 
@@ -177,10 +178,10 @@ describe('App setup and permission status', () => {
     render(<App />);
     expect(await screen.findByText(/went missing after the update/)).toBeInTheDocument();
 
-    permissionsChanged({ accessibility: true, inputMonitoring: true });
+    permissionsChanged({ accessibility: true, inputMonitoring: true, revision: 3 });
     fireEvent.click(await screen.findByRole('button', { name: 'Start using Tomari' }));
 
-    permissionsChanged({ accessibility: false, inputMonitoring: true });
+    permissionsChanged({ accessibility: false, inputMonitoring: true, revision: 4 });
     fireEvent.click(await screen.findByRole('button', { name: 'Permissions: Needs attention' }));
 
     expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
@@ -195,7 +196,122 @@ describe('App setup and permission status', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    // Unknown is not ready: the status says so and offers a retry.
+    const status = within(sidebar()).getByRole('button', { name: 'Permissions: Checking…' });
+    mockCommands();
+    fireEvent.click(status);
+    expect(await within(sidebar()).findByText('Permissions: Ready')).toBeInTheDocument();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'setup_status')).toHaveLength(2);
+  });
+
+  it('does not pull the status until the transition listener is registered', async () => {
+    let finishListen: (() => void) | undefined;
+    mockListen.mockImplementation((event, handler) => {
+      if (event === 'tomari:permissions-changed') {
+        permissionHandlers.push(handler);
+        return new Promise<() => void>((resolve) => {
+          finishListen = () => resolve(() => {});
+        });
+      }
+      return Promise.resolve(() => {});
+    });
+    render(<App />);
+    await waitFor(() => expect(permissionHandlers).toHaveLength(1));
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'setup_status')).toHaveLength(0);
+
+    await act(async () => {
+      finishListen?.();
+    });
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'setup_status')).toHaveLength(1),
+    );
+  });
+
+  it('still loads and pulls the status once when the listener cannot be registered', async () => {
+    mockListen.mockImplementation((event) =>
+      event === 'tomari:permissions-changed'
+        ? Promise.reject(new Error('no event bridge'))
+        : Promise.resolve(() => {}),
+    );
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
     expect(within(sidebar()).getByText('Permissions: Ready')).toBeInTheDocument();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'setup_status')).toHaveLength(1);
+  });
+
+  it('keeps the first snapshot of a revision and ignores a later one with the same revision', async () => {
+    let resolveStatus: ((status: SetupStatus) => void) | undefined;
+    mockCommands({
+      setup_status: new Promise<SetupStatus>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    });
+    render(<App />);
+    await waitFor(() => expect(permissionHandlers).toHaveLength(1));
+
+    permissionsChanged({ accessibility: false, inputMonitoring: true, revision: 3 });
+    await act(async () => {
+      resolveStatus?.({ ...ALL_GRANTED, revision: 3 });
+    });
+    expect(
+      within(sidebar()).getByRole('button', { name: 'Permissions: Needs attention' }),
+    ).toBeInTheDocument();
+  });
+
+  it('decides the setup dialog from the winning snapshot, not the losing pull', async () => {
+    // First run: the pull says everything is missing, but a newer event says
+    // it has all been granted meanwhile — no dialog.
+    let resolveStatus: ((status: SetupStatus) => void) | undefined;
+    mockCommands({
+      setup_status: new Promise<SetupStatus>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    });
+    render(<App />);
+    await waitFor(() => expect(permissionHandlers).toHaveLength(1));
+    permissionsChanged({ accessibility: true, inputMonitoring: true, revision: 9 });
+    await act(async () => {
+      resolveStatus?.({
+        ...ALL_GRANTED,
+        firstRun: true,
+        accessibility: false,
+        inputMonitoring: false,
+        revision: 8,
+      });
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(within(sidebar()).getByText('Permissions: Ready')).toBeInTheDocument();
+
+    // A later, unrelated revoke opens the dialog without the stale "lost after
+    // the update" explanation the losing pull carried.
+    permissionsChanged({ accessibility: false, inputMonitoring: true, revision: 10 });
+    fireEvent.click(
+      within(sidebar()).getByRole('button', { name: 'Permissions: Needs attention' }),
+    );
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.queryByText(/went missing after the update/)).not.toBeInTheDocument();
+  });
+
+  it('lets a transition that lands during the initial pull win over the pull', async () => {
+    // The listener is registered before the pull, so an event arriving while
+    // the pull is in flight is seen; its higher revision means it is newer
+    // than the pull's snapshot, which must not overwrite it when it lands.
+    let resolveStatus: ((status: SetupStatus) => void) | undefined;
+    mockCommands({
+      setup_status: new Promise<SetupStatus>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    });
+    render(<App />);
+    await waitFor(() => expect(permissionHandlers).toHaveLength(1));
+
+    permissionsChanged({ accessibility: false, inputMonitoring: true, revision: 5 });
+    await act(async () => {
+      resolveStatus?.({ ...ALL_GRANTED, revision: 4 });
+    });
+    expect(
+      within(sidebar()).getByRole('button', { name: 'Permissions: Needs attention' }),
+    ).toBeInTheDocument();
   });
 });
 

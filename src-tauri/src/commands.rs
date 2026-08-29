@@ -46,6 +46,26 @@ pub struct UpdateInfo {
 pub struct PermissionsChanged {
     pub accessibility: bool,
     pub input_monitoring: bool,
+    /// See [`permission_revision`]. Ordering stamp, not a value to render.
+    pub revision: u64,
+}
+
+/// Monotonic stamp on every published permission snapshot — each
+/// `tomari:permissions-changed` event and each `setup_status` pull. The
+/// frontend registers its listener first, then pulls, and applies whichever
+/// snapshot carries the higher revision, so a transition that lands between the
+/// two (or a pull answered late) can neither be lost nor overwrite newer state.
+static PERMISSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The revision of the permission state as it stands now (for a pull).
+pub fn permission_revision() -> u64 {
+    PERMISSION_REVISION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Stamp a newly observed permission transition; returns its revision (for an
+/// event).
+pub fn next_permission_revision() -> u64 {
+    PERMISSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
 /// An update found by [`check_for_update`], held until [`install_update`]
@@ -912,15 +932,25 @@ pub struct SetupStatus {
     pub update_regrant: bool,
     pub accessibility: bool,
     pub input_monitoring: bool,
+    /// See [`permission_revision`]: lets the frontend order this pull against
+    /// the `tomari:permissions-changed` events it is already subscribed to.
+    pub revision: u64,
 }
 
 #[tauri::command]
 pub fn setup_status(state: State<'_, AppState>) -> SetupStatus {
+    // Read the revision *before* the permission bits: a transition observed in
+    // between then produces an event with a higher revision than this pull, and
+    // the frontend lets the event win — the safe direction. The reverse order
+    // could stamp stale bits with a revision newer than the event describing
+    // the change.
+    let revision = permission_revision();
     SetupStatus {
         first_run: state.first_run,
         update_regrant: state.update_regrant(),
         accessibility: state.windows.permission_granted(),
         input_monitoring: input_monitoring_status(),
+        revision,
     }
 }
 

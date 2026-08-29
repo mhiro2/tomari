@@ -160,9 +160,10 @@ describe('PermissionStatus', () => {
     const onClick = vi.fn();
     const { rerender } = render(
       <PermissionStatus
-        ready
+        state="ready"
         readyLabel="Permissions: Ready"
         attentionLabel="Permissions: Needs attention"
+        unknownLabel="Permissions: Checking…"
         onClick={onClick}
       />,
     );
@@ -172,13 +173,28 @@ describe('PermissionStatus', () => {
 
     rerender(
       <PermissionStatus
-        ready={false}
+        state="attention"
         readyLabel="Permissions: Ready"
         attentionLabel="Permissions: Needs attention"
+        unknownLabel="Permissions: Checking…"
         onClick={onClick}
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Permissions: Needs attention' }));
     expect(onClick).toHaveBeenCalledOnce();
+
+    // Unknown is never rendered as ready; it is a retry control.
+    rerender(
+      <PermissionStatus
+        state="unknown"
+        readyLabel="Permissions: Ready"
+        attentionLabel="Permissions: Needs attention"
+        unknownLabel="Permissions: Checking…"
+        onClick={onClick}
+      />,
+    );
+    expect(screen.queryByText('Permissions: Ready')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions: Checking…' }));
+    expect(onClick).toHaveBeenCalledTimes(2);
   });
 });

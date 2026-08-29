@@ -348,6 +348,7 @@ fn main() {
                                 commands::PermissionsChanged {
                                     accessibility: current.0,
                                     input_monitoring: current.1,
+                                    revision: commands::next_permission_revision(),
                                 },
                             );
                             // Keep the stored snapshot tracking every observed

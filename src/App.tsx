@@ -62,11 +62,48 @@ function AppShell() {
   const [setupLoaded, setSetupLoaded] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [updateRegrant, setUpdateRegrant] = useState(false);
+  // Fail closed: until a snapshot has arrived the permissions are *unknown*,
+  // never assumed granted — the status shows "checking", not "ready".
   const [permissions, setPermissions] = useState<SetupPermissions>({
-    accessibility: true,
-    inputMonitoring: true,
+    accessibility: false,
+    inputMonitoring: false,
   });
+  const [permissionsKnown, setPermissionsKnown] = useState(false);
+  const [setupAttempt, setSetupAttempt] = useState(0);
+  // Set once the `tomari:permissions-changed` listener is registered; the
+  // status pull waits for it, so no transition can land unobserved between
+  // the two.
+  const [permissionListenerReady, setPermissionListenerReady] = useState(false);
+  // Revision of the newest permission snapshot applied, from either the event
+  // stream or the pull, and that snapshot's values. A snapshot whose revision
+  // is not strictly newer is discarded: the event and a pull can carry the
+  // same revision while reading the bits at different moments, and letting
+  // the later arrival win would let state run backwards.
+  const permissionRevisionRef = useRef(-1);
+  const permissionsRef = useRef<SetupPermissions>({ accessibility: false, inputMonitoring: false });
   const mainRef = useRef<HTMLElement>(null);
+
+  // Apply a snapshot if it is newer than what is shown; returns the effective
+  // permissions afterwards (the winner, whichever that is).
+  const applyPermissionSnapshot = useCallback(
+    (snapshot: {
+      accessibility: boolean;
+      inputMonitoring: boolean;
+      revision: number;
+    }): SetupPermissions => {
+      if (snapshot.revision > permissionRevisionRef.current) {
+        permissionRevisionRef.current = snapshot.revision;
+        permissionsRef.current = {
+          accessibility: snapshot.accessibility,
+          inputMonitoring: snapshot.inputMonitoring,
+        };
+        setPermissions(permissionsRef.current);
+        setPermissionsKnown(true);
+      }
+      return permissionsRef.current;
+    },
+    [],
+  );
 
   useEffect(() => {
     try {
@@ -84,38 +121,60 @@ function AppShell() {
     return () => void unlisten.then((fn) => fn());
   }, []);
 
+  // Subscribe to permission transitions for the app's lifetime. Registered
+  // once and awaited, so the pull below cannot start until the listener is
+  // actually in place — a transition in that window would otherwise be lost.
   useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (event) => {
+      applyPermissionSnapshot(event.payload);
+    });
+    void unlisten
+      .then(() => {
+        if (!cancelled) setPermissionListenerReady(true);
+        return null;
+      })
+      .catch(() => {
+        // Registration failed: transitions will not be observed this session,
+        // but the app must still load and read the status once — the status
+        // control's retry re-pulls. Better a status that can go stale than a
+        // window stuck on Loading.
+        if (!cancelled) setPermissionListenerReady(true);
+      });
+    return () => {
+      cancelled = true;
+      void unlisten.then((fn) => fn());
+    };
+  }, [applyPermissionSnapshot]);
+
+  // The status pull: after the listener is ready, and again on every retry.
+  useEffect(() => {
+    if (!permissionListenerReady) return;
     let cancelled = false;
     void (async () => {
       try {
         const status = await api.setupStatus();
         if (cancelled) return;
-        const nextPermissions = {
-          accessibility: status.accessibility,
-          inputMonitoring: status.inputMonitoring,
-        };
-        const missing = !nextPermissions.accessibility || !nextPermissions.inputMonitoring;
-        setPermissions(nextPermissions);
-        setUpdateRegrant(status.updateRegrant);
+        // Applied only if no newer event has landed meanwhile; the setup
+        // dialog is decided from the effective snapshot, whichever won.
+        const effective = applyPermissionSnapshot(status);
+        const missing = !effective.accessibility || !effective.inputMonitoring;
+        // The update-regrant explanation is about permissions that are
+        // missing *now*; if a newer snapshot says they are all back, that
+        // context is over and must not resurface on a later, unrelated revoke.
+        setUpdateRegrant(status.updateRegrant && missing);
         setSetupOpen(missing && (status.firstRun || status.updateRegrant));
       } catch {
-        // Settings remain usable if the optional setup status pull fails.
+        // The status stays unknown — shown as such, never as ready — and the
+        // status control offers a retry. Settings remain usable meanwhile.
       } finally {
         if (!cancelled) setSetupLoaded(true);
       }
     })();
-
-    const unlisten = listen<PermissionsChanged>('tomari:permissions-changed', (event) =>
-      setPermissions({
-        accessibility: event.payload.accessibility,
-        inputMonitoring: event.payload.inputMonitoring,
-      }),
-    );
     return () => {
       cancelled = true;
-      void unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [applyPermissionSnapshot, permissionListenerReady, setupAttempt]);
 
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0;
@@ -132,6 +191,12 @@ function AppShell() {
     [],
   );
   const permissionsReady = permissions.accessibility && permissions.inputMonitoring;
+  const permissionState: 'ready' | 'attention' | 'unknown' = !permissionsKnown
+    ? 'unknown'
+    : permissionsReady
+      ? 'ready'
+      : 'attention';
+  const retrySetupStatus = useCallback(() => setSetupAttempt((n) => n + 1), []);
 
   if (!setupLoaded) {
     return (
@@ -165,10 +230,11 @@ function AppShell() {
 
         <div className="sidebar__footer">
           <PermissionStatus
-            ready={permissionsReady}
+            state={permissionState}
             readyLabel={t('app.permissionsReady')}
             attentionLabel={t('app.permissionsAttention')}
-            onClick={openSetup}
+            unknownLabel={t('app.permissionsUnknown')}
+            onClick={permissionState === 'unknown' ? retrySetupStatus : openSetup}
           />
         </div>
       </nav>
