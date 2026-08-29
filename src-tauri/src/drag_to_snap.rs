@@ -44,7 +44,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use core_graphics::event::{CGEvent, CGEventTapOptions, CGEventType, CallbackResult};
+use core_graphics::event::{
+    CGEvent, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult,
+};
 use tauri::{AppHandle, Manager};
 use tomari_core::{Rect, WindowPreset};
 use tomari_window::{DragWindow, WindowHandle, compute_frame, edge_snap_preset, screen_at_cursor};
@@ -877,6 +879,9 @@ fn start(app: AppHandle) -> Result<RunningTap, String> {
     tap::spawn(
         "tomari-dragtosnap",
         "drag-to-snap tap",
+        // Modifier remap and Hyper flags must be normalized before this tap
+        // decides whether the pointer chord belongs to a gesture.
+        CGEventTapPlacement::TailAppendEventTap,
         CGEventTapOptions::ListenOnly,
         vec![
             CGEventType::LeftMouseDown,

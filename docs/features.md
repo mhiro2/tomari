@@ -33,7 +33,9 @@ modifier table.
 Remapping rewrites event flags and key codes at the event-tap level. Control,
 Option, Command, Shift, and fn can be tracked per side for both press and
 release, so they remap correctly as momentary modifiers (active only while
-held).
+held). Their remapped or Hyper flags apply to clicks, drags, and scrolling as
+well as keystrokes; using the pointer also prevents a held modifier from being
+mistaken for a solo tap action.
 
 Caps Lock is special. macOS delivers it as a _lock_ — one event per press, no
 key release, and the upper-case lock applied below the event tap — so the event

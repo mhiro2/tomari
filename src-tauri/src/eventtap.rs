@@ -2,21 +2,23 @@
 //! [`ModifierEngine`](tomari_keyboard::ModifierEngine).
 //!
 //! A dedicated thread owns the tap and runs a `CFRunLoop`, since
-//! `CFRunLoopRun` blocks. The callback observes `flagsChanged` / `keyDown` /
-//! `keyUp` events, feeds the engines, and:
+//! `CFRunLoopRun` blocks. The callback observes keyboard events plus pointer
+//! button, drag, and scroll events, feeds the engines, and:
 //!
 //! * **remaps** an ordinary modifier (Control/Option/Command/Shift/fn) by
 //!   rewriting its `flagsChanged` flags and keycode in place; while it is held,
-//!   its target modifier is also stamped onto the keystrokes typed through it so
-//!   a chord lands as the target (e.g. Control→Command + C registers as Cmd+C);
+//!   its target modifier is also stamped onto keyboard and pointer operations
+//!   performed through it so a chord lands as the target (e.g.
+//!   Control→Command + C registers as Cmd+C, and Control→Command + click
+//!   registers as Cmd-click);
 //! * handles **Caps Lock** specially: macOS gives it no usable key-up and lets
 //!   it lock, so it is first remapped to F18 at the HID level
 //!   ([`crate::capsmap`]) and arrives here as F18 key-down/up, which the tap
 //!   drives as the Caps Lock modifier (dropping the F18 event). Tapped it fires
-//!   its action (e.g. Esc); held it stamps its target (e.g. Control) onto the
-//!   following keystrokes;
-//! * stamps the **hyper** combo (⌃⌥⇧⌘) onto keystrokes typed while a hyper key
-//!   is held;
+//!   its action (e.g. Esc); held it stamps its target (e.g. Control) onto
+//!   following keyboard and pointer events;
+//! * stamps the **hyper** combo (⌃⌥⇧⌘) onto keyboard and pointer events while a
+//!   hyper key is held;
 //! * dispatches a modifier's **tap** action (IME switch, snap, …) on release.
 //!
 //! Creating the tap requires the *Input Monitoring* permission; if it is not
@@ -27,7 +29,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use core_graphics::event::{
-    CGEvent, CGEventTapOptions, CGEventTapProxy, CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventField, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CallbackResult, EventField,
 };
 use tauri::{AppHandle, Manager};
 use tomari_core::{AppAction, KeySide, ModifierKey};
@@ -393,16 +396,68 @@ struct TapState {
     remap_stamp: (Vec<ModifierKey>, Vec<ModifierKey>),
 }
 
+const EVENT_TYPES: [CGEventType; 13] = [
+    CGEventType::KeyDown,
+    CGEventType::KeyUp,
+    CGEventType::FlagsChanged,
+    CGEventType::LeftMouseDown,
+    CGEventType::LeftMouseUp,
+    CGEventType::LeftMouseDragged,
+    CGEventType::RightMouseDown,
+    CGEventType::RightMouseUp,
+    CGEventType::RightMouseDragged,
+    CGEventType::OtherMouseDown,
+    CGEventType::OtherMouseUp,
+    CGEventType::OtherMouseDragged,
+    CGEventType::ScrollWheel,
+];
+
+// core-graphics 0.25 omits the third-axis and momentum fields from its
+// EventField constants. These are the stable public CGEventField values from
+// CGEventTypes.h.
+const SCROLL_DELTA_AXIS_3: CGEventField = 13;
+const SCROLL_FIXED_POINT_DELTA_AXIS_3: CGEventField = 95;
+const SCROLL_POINT_DELTA_AXIS_3: CGEventField = 98;
+const SCROLL_MOMENTUM_PHASE: CGEventField = 123;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerEventKind {
+    Button,
+    Drag,
+    Scroll,
+}
+
+fn pointer_event_kind(etype: CGEventType) -> Option<PointerEventKind> {
+    match etype {
+        CGEventType::LeftMouseDown
+        | CGEventType::LeftMouseUp
+        | CGEventType::RightMouseDown
+        | CGEventType::RightMouseUp
+        | CGEventType::OtherMouseDown
+        | CGEventType::OtherMouseUp => Some(PointerEventKind::Button),
+        CGEventType::LeftMouseDragged
+        | CGEventType::RightMouseDragged
+        | CGEventType::OtherMouseDragged => Some(PointerEventKind::Drag),
+        CGEventType::ScrollWheel => Some(PointerEventKind::Scroll),
+        _ => None,
+    }
+}
+
+fn pointer_event_interrupts_tap(
+    kind: PointerEventKind,
+    scroll_has_delta: bool,
+    scroll_is_momentum: bool,
+) -> bool {
+    kind != PointerEventKind::Scroll || (scroll_has_delta && !scroll_is_momentum)
+}
+
 fn start(app: AppHandle) -> Result<RunningTap, String> {
     tap::spawn(
         "tomari-eventtap",
         "event tap",
+        CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::Default,
-        vec![
-            CGEventType::KeyDown,
-            CGEventType::KeyUp,
-            CGEventType::FlagsChanged,
-        ],
+        EVENT_TYPES.to_vec(),
         move |port_holder| {
             let state = Arc::new(Mutex::new(TapState::default()));
             // The generation this tap is started under; its health reports
@@ -459,7 +514,7 @@ fn handle_event(
         return CallbackResult::Keep;
     }
 
-    // Ignore keystrokes Tomari itself synthesized.
+    // Ignore input Tomari itself synthesized.
     if is_synthetic(event) {
         return CallbackResult::Keep;
     }
@@ -479,7 +534,7 @@ fn handle_event(
         CGEventType::FlagsChanged => on_flags_changed(app, app_state, state, proxy, event, now),
         CGEventType::KeyDown => on_key_down(app, app_state, state, proxy, event, now),
         CGEventType::KeyUp => on_key_up(app, app_state, state, proxy, event, now),
-        _ => CallbackResult::Keep,
+        _ => on_pointer_event(app_state, state, etype, event, now),
     }
 }
 
@@ -517,7 +572,7 @@ fn tracks_native_modifier(modkey: ModifierKey) -> bool {
 /// ordinary key-down, which turns a modifier tap in progress into a chord
 /// without leaving any "held" belief behind.
 fn native_lock_key_event(now: u64) -> KeyEvent {
-    KeyEvent::OtherKeyDown { at_ms: now }
+    KeyEvent::OtherInput { at_ms: now }
 }
 
 /// A managed modifier's down/up transition fed to [`drive_modifier`].
@@ -727,7 +782,7 @@ fn on_key_down(
     app_state
         .engine
         .lock_safe()
-        .process(KeyEvent::OtherKeyDown { at_ms: now });
+        .process(KeyEvent::OtherInput { at_ms: now });
 
     stamp_held_modifiers(state, event);
     CallbackResult::Keep
@@ -767,13 +822,74 @@ fn on_key_up(
     CallbackResult::Keep
 }
 
-/// Stamp onto a keystroke the modifier flags contributed by keys held in a
+fn on_pointer_event(
+    app_state: &AppState,
+    state: &Arc<Mutex<TapState>>,
+    etype: CGEventType,
+    event: &CGEvent,
+    now: u64,
+) -> CallbackResult {
+    let Some(kind) = pointer_event_kind(etype) else {
+        return CallbackResult::Keep;
+    };
+
+    // A button or drag event is always evidence that the held modifier was
+    // used with the pointer. Scroll events can carry phase-only packets with no
+    // movement, and momentum can continue after the user's fingers have left
+    // the trackpad, so only a real, non-momentum delta interrupts a pending tap.
+    let has_scroll_delta = kind == PointerEventKind::Scroll && scroll_has_delta(event);
+    let is_momentum = kind == PointerEventKind::Scroll && scroll_is_momentum(event);
+    let interrupts_tap = pointer_event_interrupts_tap(kind, has_scroll_delta, is_momentum);
+    if interrupts_tap {
+        app_state
+            .engine
+            .lock_safe()
+            .process(KeyEvent::OtherInput { at_ms: now });
+    }
+
+    stamp_held_modifiers(state, event);
+    CallbackResult::Keep
+}
+
+fn scroll_has_delta(event: &CGEvent) -> bool {
+    let discrete = [
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+        SCROLL_DELTA_AXIS_3,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+        SCROLL_POINT_DELTA_AXIS_3,
+    ]
+    .map(|field| event.get_integer_value_field(field));
+    let continuous = [
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        SCROLL_FIXED_POINT_DELTA_AXIS_3,
+    ]
+    .map(|field| event.get_double_value_field(field));
+    scroll_delta_is_non_zero(discrete, continuous)
+}
+
+fn scroll_delta_is_non_zero(discrete: [i64; 6], continuous: [f64; 3]) -> bool {
+    discrete.into_iter().any(|delta| delta != 0) || continuous.into_iter().any(|delta| delta != 0.0)
+}
+
+fn scroll_is_momentum(event: &CGEvent) -> bool {
+    momentum_phase_is_active(event.get_integer_value_field(SCROLL_MOMENTUM_PHASE))
+}
+
+fn momentum_phase_is_active(phase: i64) -> bool {
+    phase != 0
+}
+
+/// Stamp onto an input event the modifier flags contributed by keys held in a
 /// special role: the hyper combo (⌃⌥⇧⌘) while a hyper key is held, and a
 /// remapped key's target modifier while it is held. The latter makes a chord
-/// through a remapped key behave as that modifier (so holding Caps Lock→Control
-/// and pressing C yields Ctrl+C) even where the OS does not carry the rewritten
-/// `flagsChanged` flag forward onto following keystrokes. The OS does not carry
-/// it for Caps Lock, which as a lock key leaves it with no held-modifier state.
+/// through a remapped key behave as that modifier for both keyboard and pointer
+/// operations (so holding Caps Lock→Control and clicking yields Ctrl-click)
+/// even where the OS does not carry the rewritten `flagsChanged` flag forward.
+/// The OS does not carry it for Caps Lock, which as a lock key leaves it with no
+/// held-modifier state.
 fn stamp_held_modifiers(state: &Arc<Mutex<TapState>>, event: &CGEvent) {
     let (hyper_active, (remove, add)) = {
         let ts = state.lock_safe();
@@ -782,15 +898,28 @@ fn stamp_held_modifiers(state: &Arc<Mutex<TapState>>, event: &CGEvent) {
     if !hyper_active && remove.is_empty() && add.is_empty() {
         return;
     }
-    let mut flags = event.get_flags();
+    event.set_flags(stamped_modifier_flags(
+        event.get_flags(),
+        hyper_active,
+        &remove,
+        &add,
+    ));
+}
+
+fn stamped_modifier_flags(
+    mut flags: core_graphics::event::CGEventFlags,
+    hyper_active: bool,
+    remove: &[ModifierKey],
+    add: &[ModifierKey],
+) -> core_graphics::event::CGEventFlags {
     // Replace held remapped keys' source modifiers with their targets, so a
     // chord through them carries only the target (a remapped momentary modifier
     // must not leave both set, e.g. Control→Control+Command). Remove first,
     // then add, so a target that coincides with a removed source still lands.
-    for modifier in &remove {
+    for modifier in remove {
         flags.remove(keycodes::flag_for(*modifier));
     }
-    for modifier in &add {
+    for modifier in add {
         flags.insert(keycodes::flag_for(*modifier));
     }
     // Hyper forces the full ⌃⌥⇧⌘ combo, so apply it last — it must win over a
@@ -800,7 +929,7 @@ fn stamp_held_modifiers(state: &Arc<Mutex<TapState>>, event: &CGEvent) {
             flags.insert(keycodes::flag_for(modifier));
         }
     }
-    event.set_flags(flags);
+    flags
 }
 
 /// Perform a completed tap's action.
@@ -903,6 +1032,84 @@ mod tests {
             ModifierKey::Function,
         ] {
             assert!(tracks_native_modifier(modkey), "{modkey:?}");
+        }
+    }
+
+    #[test]
+    fn every_subscribed_pointer_event_is_classified() {
+        for etype in EVENT_TYPES.into_iter().skip(3) {
+            assert!(pointer_event_kind(etype).is_some(), "{etype:?}");
+        }
+        for etype in [
+            CGEventType::KeyDown,
+            CGEventType::KeyUp,
+            CGEventType::FlagsChanged,
+            CGEventType::MouseMoved,
+        ] {
+            assert!(pointer_event_kind(etype).is_none(), "{etype:?}");
+        }
+    }
+
+    #[test]
+    fn pointer_buttons_drags_and_real_scroll_interrupt_a_pending_tap() {
+        assert!(pointer_event_interrupts_tap(
+            PointerEventKind::Button,
+            false,
+            false,
+        ));
+        assert!(pointer_event_interrupts_tap(
+            PointerEventKind::Drag,
+            false,
+            false,
+        ));
+        assert!(pointer_event_interrupts_tap(
+            PointerEventKind::Scroll,
+            true,
+            false,
+        ));
+        assert!(!pointer_event_interrupts_tap(
+            PointerEventKind::Scroll,
+            false,
+            false,
+        ));
+        assert!(!pointer_event_interrupts_tap(
+            PointerEventKind::Scroll,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn phase_only_scroll_is_not_input_but_scroll_with_a_delta_is() {
+        assert!(!scroll_delta_is_non_zero([0; 6], [0.0; 3]));
+        assert!(scroll_delta_is_non_zero([0, 0, 1, 0, 0, 0], [0.0; 3]));
+        assert!(scroll_delta_is_non_zero([0; 6], [0.0, 0.0, 0.25]));
+    }
+
+    #[test]
+    fn every_momentum_phase_is_excluded_from_tap_interruption() {
+        assert!(!momentum_phase_is_active(0));
+        for phase in [1, 2, 3] {
+            assert!(momentum_phase_is_active(phase));
+        }
+    }
+
+    #[test]
+    fn held_remap_and_hyper_flags_can_be_stamped_onto_pointer_events() {
+        use core_graphics::event::CGEventFlags;
+
+        let flags = stamped_modifier_flags(
+            CGEventFlags::CGEventFlagControl,
+            false,
+            &[ModifierKey::Control],
+            &[ModifierKey::Command],
+        );
+        assert!(!flags.contains(CGEventFlags::CGEventFlagControl));
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+
+        let hyper = stamped_modifier_flags(CGEventFlags::empty(), true, &[], &[]);
+        for modifier in HYPER_MODIFIERS {
+            assert!(hyper.contains(keycodes::flag_for(modifier)), "{modifier:?}");
         }
     }
 

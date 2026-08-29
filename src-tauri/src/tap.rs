@@ -388,7 +388,7 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
 }
 
-/// (Re)start scaffolding shared by all three taps: spawn a dedicated thread
+/// (Re)start scaffolding shared by the event taps: spawn a dedicated thread
 /// that creates the `CGEventTap`, attaches its run-loop source, and enters
 /// `CFRunLoopRun`, then wait for it to signal either a running [`RunningTap`]
 /// or a startup failure (e.g. the *Input Monitoring* permission is missing).
@@ -397,10 +397,13 @@ unsafe extern "C" {
 /// receives the `port_holder` the callback should publish its tap's mach port
 /// into (for [`reenable`]) and returns the `Fn` callback itself — all
 /// tap-specific state (the modifier engine, drag state machines, …) is
-/// captured there, untouched by this helper.
+/// captured there, untouched by this helper. `placement` is explicit because
+/// the modifier tap normalizes flags at the head while gesture taps consume the
+/// normalized events at the tail; restart order must not reverse that pipeline.
 pub fn spawn<F>(
     thread_name: &'static str,
     tap_label: &'static str,
+    placement: CGEventTapPlacement,
     options: CGEventTapOptions,
     events: Vec<CGEventType>,
     make_callback: F,
@@ -415,7 +418,17 @@ where
         let live = Arc::clone(&live);
         std::thread::Builder::new()
             .name(thread_name.into())
-            .spawn(move || run_tap(tap_label, options, events, make_callback, &handshake, live))
+            .spawn(move || {
+                run_tap(
+                    tap_label,
+                    placement,
+                    options,
+                    events,
+                    make_callback,
+                    &handshake,
+                    live,
+                )
+            })
             .map_err(|e| e.to_string())?
     };
 
@@ -538,6 +551,7 @@ extern "C" fn on_run_loop_entry(
 
 fn run_tap<F>(
     tap_label: &'static str,
+    placement: CGEventTapPlacement,
     options: CGEventTapOptions,
     events: Vec<CGEventType>,
     make_callback: F,
@@ -552,7 +566,7 @@ fn run_tap<F>(
     let callback_live = Arc::clone(&live);
     let tap = match CGEventTap::new(
         CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
+        placement,
         options,
         events,
         move |proxy, etype, event| {

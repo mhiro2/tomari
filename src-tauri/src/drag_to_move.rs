@@ -53,7 +53,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapOptions, CGEventType, CallbackResult};
+use core_graphics::event::{
+    CGEvent, CGEventFlags, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult,
+};
 use tauri::{AppHandle, Manager};
 use tomari_core::Rect;
 use tomari_window::{
@@ -582,6 +584,9 @@ fn start() -> Result<RunningTap, String> {
     tap::spawn(
         "tomari-dragtomove",
         "drag-to-move tap",
+        // Modifier remap and Hyper flags must be normalized before this tap
+        // decides whether to claim and consume a pointer chord.
+        CGEventTapPlacement::TailAppendEventTap,
         CGEventTapOptions::Default,
         vec![
             CGEventType::LeftMouseDown,

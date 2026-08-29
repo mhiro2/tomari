@@ -21,7 +21,7 @@ pub const HYPER_MODIFIERS: [ModifierKey; 4] = [
     ModifierKey::Command,
 ];
 
-/// A low-level keyboard event handed to the engine.
+/// A low-level input event handed to the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyEvent {
     /// A managed modifier went down.
@@ -36,8 +36,9 @@ pub enum KeyEvent {
         side: KeySide,
         at_ms: u64,
     },
-    /// Any other key went down (turns a pending tap into a chord).
-    OtherKeyDown { at_ms: u64 },
+    /// A non-modifier key or pointer operation occurred, so a pending modifier
+    /// press was not a solo tap.
+    OtherInput { at_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -294,7 +295,7 @@ impl ModifierEngine {
                 }
                 None
             }
-            KeyEvent::OtherKeyDown { .. } => {
+            KeyEvent::OtherInput { .. } => {
                 if let Some(p) = self.press.as_mut() {
                     p.interrupted = true;
                 }
@@ -408,7 +409,7 @@ mod tests {
             side: KeySide::Left,
             at_ms: 0,
         });
-        e.process(KeyEvent::OtherKeyDown { at_ms: 10 });
+        e.process(KeyEvent::OtherInput { at_ms: 10 });
         assert_eq!(
             e.process(KeyEvent::ModifierUp {
                 key: ModifierKey::Control,

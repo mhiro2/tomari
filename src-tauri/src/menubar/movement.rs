@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventType, CGMouseButton,
-    CallbackResult, EventField,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    CGMouseButton, CallbackResult, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
@@ -197,6 +197,7 @@ impl InterferenceGuard {
         let tap = tap::spawn(
             "tomari-menubar-guard",
             "menu bar drag guard",
+            CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::ListenOnly,
             vec![
                 CGEventType::LeftMouseDown,
