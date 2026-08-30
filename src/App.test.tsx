@@ -202,7 +202,9 @@ describe('App settings recovery', () => {
     render(<App />);
 
     const heading = await screen.findByRole('heading', { name: 'Settings need repair', level: 1 });
-    expect(heading).toHaveFocus();
+    // The heading is committed before the effect that focuses it runs, so the
+    // node can be found a tick early on a loaded machine.
+    await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByRole('alert')).toHaveTextContent('Automation is paused');
     expect(screen.getByRole('main').parentElement).toHaveAttribute('aria-busy', 'false');
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
