@@ -460,13 +460,13 @@ const en = {
   'settings.applyWarning.menuBar':
     'The menu bar setting was saved but could not be applied. Toggle it off and on to try again.',
   'settings.applyWarning.keyboardTap':
-    'Keyboard customization was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+    'Keyboard customization was saved but its event tap could not start. Check Accessibility and Input Monitoring access, then toggle it off and on.',
   'settings.applyWarning.globalShortcuts':
     'Keyboard customization was saved, but live shortcuts could not be updated. Toggle Keyboard off and on to try again.',
   'settings.applyWarning.dragToSnapTap':
     'Drag to snap was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
   'settings.applyWarning.dragToMoveTap':
-    'Drag to move was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+    'Drag to move was saved but its event tap could not start. Check Accessibility and Input Monitoring access, then toggle it off and on.',
   'settings.applyWarning.capsLockRemap':
     'The setting was saved, but the Caps Lock remap could not be updated. Toggle it off and on to try again.',
   'settings.applyWarning.commandImeRules':
@@ -511,7 +511,8 @@ const en = {
   'health.tapState.stopped': 'The feature is on, but Tomari is not receiving input for it.',
   'health.tapState.starting': 'Starting up. Refresh in a moment.',
   'health.tapState.disabledByTimeout': 'macOS paused input monitoring. Tomari is restarting it.',
-  'health.tapState.permissionDenied': 'Input Monitoring is not granted. Open Setup to grant it.',
+  'health.tapState.permissionDenied':
+    'Input Monitoring or Accessibility is not granted. Open Setup to grant it.',
   'health.tapState.failed':
     'Input monitoring could not start. Turn the feature off and on again in its settings.',
   'health.capsLock': 'Caps Lock remap',
@@ -1030,13 +1031,13 @@ const ja: Record<MessageKey, string> = {
   'settings.applyWarning.menuBar':
     'メニューバーの設定は保存しましたが、適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.keyboardTap':
-    'キーボードカスタマイズは保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+    'キーボードカスタマイズは保存しましたが、イベントタップを開始できませんでした。アクセシビリティと入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
   'settings.applyWarning.globalShortcuts':
     'キーボードカスタマイズは保存しましたが、実行中のショートカットを更新できませんでした。キーボードをオフにしてからもう一度オンにしてください。',
   'settings.applyWarning.dragToSnapTap':
     'ドラッグでスナップは保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
   'settings.applyWarning.dragToMoveTap':
-    'ドラッグで移動は保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+    'ドラッグで移動は保存しましたが、イベントタップを開始できませんでした。アクセシビリティと入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
   'settings.applyWarning.capsLockRemap':
     '設定は保存しましたが、Caps Lock の割り当てを更新できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.commandImeRules':
@@ -1083,7 +1084,7 @@ const ja: Record<MessageKey, string> = {
   'health.tapState.disabledByTimeout':
     'macOS により入力の監視が停止されました。Tomari が再開しています。',
   'health.tapState.permissionDenied':
-    '入力監視が許可されていません。セットアップから許可してください。',
+    '入力監視またはアクセシビリティが許可されていません。セットアップから許可してください。',
   'health.tapState.failed':
     '入力の監視を開始できませんでした。設定で機能をオフにしてから、もう一度オンにしてください。',
   'health.capsLock': 'Caps Lock の割り当て',

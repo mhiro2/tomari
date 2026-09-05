@@ -252,7 +252,15 @@ rather than closing it.
   state rather than the presence of a handle. The permission poller rebuilds
   the taps on *every* Input Monitoring transition, so a revoke lands as
   `PermissionDenied` (and the `keyboardTap`-style warnings) instead of a handle
-  to a tap the system no longer feeds.
+  to a tap the system no longer feeds. The two active taps (this one and
+  drag-to-move, `CGEventTapOptions::Default`) are additionally never run
+  without the Accessibility grant: `restart_result` records `PermissionDenied`
+  instead of starting, and the poller rebuilds them on every Accessibility
+  transition too. Revoking Accessibility from a process whose active tap is
+  still running has been reported to stop input delivery system-wide,
+  outliving the process (Apple Developer Forums thread 844416); the invariant
+  "active tap ⇒ Accessibility granted" keeps Tomari out of that state, up to
+  the poll interval.
 - Neither half of that lifecycle waits forever: starting waits at most
   `START_DEADLINE` for the run loop to report in, stopping at most
   `STOP_DEADLINE` for the thread to return. The callers are the settings save,
@@ -733,11 +741,15 @@ and applies none of them.
   a verified configuration.
 - **Permission polling**: Accessibility / Input Monitoring change in System
   Settings, outside the app, so a tracked worker runs only the cheap status
-  checks every two seconds while a grant is missing and every 30 seconds once
-  both are stable. It rebuilds the tray menu on the main thread only on a
-  change. When Input Monitoring is newly granted, the dead taps are restarted
-  (a tap
-  created without the permission is null and never revives on its own). Every
+  checks every two seconds while a grant is missing and every five seconds once
+  both are stable — short even then, because the one thing left to catch is a
+  revocation, and an Accessibility revoke under a running active tap must be
+  answered by tearing the tap down quickly (below). It rebuilds the tray menu
+  on the main thread only on a change. On an Input Monitoring transition all
+  three taps are restarted (a tap created without the permission is null and
+  never revives on its own); on an Accessibility transition the two *active*
+  taps (keyboard, drag-to-move) are, whose `restart_result` refuses to run
+  without the grant — so a revoke stops them and a grant brings them up. Every
   transition also emits `tomari:permissions-changed` (`{ accessibility,
   inputMonitoring, revision }`), which updates the centralized sidebar
   permission status and any open Setup dialog without the window needing to be

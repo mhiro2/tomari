@@ -24,6 +24,16 @@
 //! Creating the tap requires the *Input Monitoring* permission; if it is not
 //! granted the OS returns a null tap (and adds Tomari to the Input Monitoring
 //! list so the user can enable it).
+//!
+//! It is an *active* tap (`CGEventTapOptions::Default`: it rewrites and
+//! swallows events), and an active tap is started only while *Accessibility*
+//! is granted as well. Losing Accessibility underneath a running active tap has
+//! been reported to stop input delivery system-wide, persisting past the
+//! process's exit (Apple Developer Forums thread 844416), so [`restart_result`]
+//! refuses to start without the grant and the permission poller in `main`
+//! tears the tap down within its poll interval of seeing the grant gone — the
+//! tap's own event-posting needs the grant anyway. Polling cannot make the
+//! teardown instantaneous; it bounds how long the tap can outlive the grant.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -107,7 +117,7 @@ pub fn restart(app: &AppHandle) {
 /// Same as [`restart`], but reports whether the tap ended up matching the
 /// setting: `true` when the feature is off (nothing to start) or the tap
 /// started successfully, `false` when it is on but failed to start (typically
-/// a missing Input Monitoring grant).
+/// a missing Input Monitoring or Accessibility grant).
 ///
 /// The Caps Lock HID remap is reconciled alongside the tap — it must never
 /// outlive a tap that handles F18 — but its outcome is deliberately *not*
@@ -157,6 +167,20 @@ pub fn restart_result(app: &AppHandle) -> bool {
         // Feature off: take the Caps Lock HID remap down along with the tap.
         reconcile_caps(false);
         return true;
+    }
+
+    // An active tap is never run without Accessibility (see the module doc):
+    // a revoke underneath it can take system-wide input down with it, and the
+    // poller calls back here on every permission change, so the tap comes up
+    // on its own once the grant arrives.
+    if !accessibility {
+        HEALTH.record_start_failure(false);
+        tracing::warn!(
+            "keyboard event tap not started: Accessibility is not granted (an active tap must not run without it)"
+        );
+        // No tap to handle F18 — keep Caps Lock native.
+        reconcile_caps(false);
+        return false;
     }
 
     match start(app.clone()) {

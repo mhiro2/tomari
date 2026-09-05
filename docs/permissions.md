@@ -38,13 +38,26 @@ Required for **moving windows**, **switching the IME**, **sending keys**, and
 of these is used. Grant it under
 **System Settings → Privacy & Security → Accessibility**.
 
+It is also a precondition for the two event taps that *modify* input —
+**keyboard customization** (modifier tap/hold, remapping, the hyper key) and
+**drag to move**. Tomari does not start either of these taps until
+Accessibility is granted, and stops them within a few seconds of the grant
+being revoked, then starts them again once it is back. This is deliberate:
+macOS has been observed to stop delivering input system-wide — persisting even
+after the app quits, until you log out or restart — when Accessibility is taken
+away from an app whose event tap is still active. Keeping the taps strictly
+inside the window in which the grant exists avoids that state. Drag to snap
+only *listens* and is unaffected; it needs Input Monitoring alone.
+
 Global shortcuts work regardless of this permission.
 
 ## Input Monitoring
 
-Required for **modifier tap/hold, remapping, the hyper key, and drag-to-snap**.
-These rely on a resident `CGEventTap` connected to real keyboard and mouse
-events, which macOS gates behind **Input Monitoring**.
+Required for **modifier tap/hold, remapping, the hyper key, drag-to-snap, and
+drag to move**. These rely on a resident `CGEventTap` connected to real
+keyboard and mouse events, which macOS gates behind **Input Monitoring**.
+Keyboard customization and drag to move additionally wait for Accessibility
+(see above).
 
 If you start Tomari without granting it, creating the event tap fails and
 Tomari is added to the Input Monitoring list. Enable it from the setup

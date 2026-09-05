@@ -10,7 +10,16 @@
 //! gesture modifiers passes straight through, untouched.
 //!
 //! Listening requires *Input Monitoring*; moving the window requires
-//! *Accessibility*.
+//! *Accessibility*. As this is an *active* tap (it swallows the claimed press),
+//! it is started only while Accessibility is granted: losing the grant
+//! underneath a running active tap has been reported to stop input delivery
+//! system-wide, persisting past the process's exit (Apple Developer Forums
+//! thread 844416). [`restart_result`] refuses to start without it and the
+//! permission poller in `main` tears the tap down within its poll interval of
+//! the grant going — a bound on how long the tap outlives the grant, not an
+//! instant teardown.
+//! Nothing is lost by waiting: without Accessibility no window could be moved,
+//! so the callback would pass every press through anyway.
 //!
 //! ## Nothing slow on the callback
 //!
@@ -132,7 +141,7 @@ pub fn restart(app: &AppHandle) {
 /// Same as [`restart`], but reports whether the tap ended up matching the
 /// setting: `true` when the feature is off (nothing to start) or the tap
 /// started successfully, `false` when it is on but failed to start (typically
-/// a missing Input Monitoring grant).
+/// a missing Input Monitoring or Accessibility grant).
 pub fn restart_result(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<AppState>() else {
         return true;
@@ -149,13 +158,21 @@ pub fn restart_result(app: &AppHandle) -> bool {
     HEALTH.begin_start(enabled);
     *guard = None; // Drop stops the previous tap.
 
-    if let Some(state) = app.try_state::<AppState>() {
-        set_accessibility_granted(state.windows.permission_granted());
-    }
+    let accessibility = state.windows.permission_granted();
+    set_accessibility_granted(accessibility);
     ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
         HEALTH.set(TapHealth::Stopped);
         return true;
+    }
+
+    // An active tap is never run without Accessibility (see the module doc).
+    if !accessibility {
+        HEALTH.record_start_failure(false);
+        tracing::warn!(
+            "drag-to-move event tap not started: Accessibility is not granted (an active tap must not run without it)"
+        );
+        return false;
     }
 
     match start() {

@@ -173,7 +173,7 @@ pub fn reenable(port_holder: &AtomicUsize) -> bool {
 /// Where a tap stands, as a state rather than the presence of a handle. A
 /// handle says only that a start once succeeded; it does not say that the
 /// system has since disabled the tap, or *why* a start failed — which is what
-/// decides whether the fix is "grant Input Monitoring" or "something broke".
+/// decides whether the fix is "grant a permission" or "something broke".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 #[repr(u8)]
@@ -187,7 +187,9 @@ pub enum TapHealth {
     /// The system disabled the tap (timeout or heavy input) and the callback
     /// has asked for it back; events are missed until that lands.
     DisabledByTimeout = 3,
-    /// The start failed with Input Monitoring not granted — the tap cannot
+    /// The start failed, or was not attempted, because a permission the tap
+    /// needs is not granted — Input Monitoring for every tap, Accessibility
+    /// as well for the active ones (see `record_start_failure`). The tap cannot
     /// exist until the user grants it (or grants it again after a revoke).
     PermissionDenied = 4,
     /// The start failed for some other reason.
@@ -358,13 +360,18 @@ impl TapHealthCell {
         self.advance(TapHealth::Stopped);
     }
 
-    /// The start failed. With Input Monitoring not granted that is
-    /// [`TapHealth::PermissionDenied`]; any other failure is
-    /// [`TapHealth::Failed`]. Success is published by the caller with
-    /// `set(Healthy)` once the running tap's handle is stored, so the state
-    /// never says "running" ahead of the handle.
-    pub fn record_start_failure(&self, input_monitoring_granted: bool) {
-        self.set(if input_monitoring_granted {
+    /// The start failed. With a permission the tap needs not granted
+    /// (`permissions_granted == false`) that is [`TapHealth::PermissionDenied`];
+    /// any other failure is [`TapHealth::Failed`]. Success is published by the
+    /// caller with `set(Healthy)` once the running tap's handle is stored, so
+    /// the state never says "running" ahead of the handle.
+    ///
+    /// Which permissions count is the caller's: Input Monitoring for every
+    /// tap, and Accessibility too for an active (`CGEventTapOptions::Default`)
+    /// tap — an active tap must never run without it, so those callers also
+    /// skip the start outright and record the denial here.
+    pub fn record_start_failure(&self, permissions_granted: bool) {
+        self.set(if permissions_granted {
             TapHealth::Failed
         } else {
             TapHealth::PermissionDenied

@@ -269,10 +269,27 @@ fn main() {
                 tracing::error!(error = %e, "failed to register global shortcuts");
             }
 
+            // The permission baseline the poller below compares against. It is
+            // sampled *before* any tap starts: each `restart` re-reads the
+            // grants itself, so a revoke that lands between this sample and a
+            // start keeps the tap from being created, and one that lands
+            // between a start and the first poll shows up as a transition. If
+            // the sample were taken after the taps had started, a revoke in
+            // that gap would be adopted as the baseline and an active tap left
+            // running under it for good.
+            let initial = tray::permission_state(&handle);
+            #[cfg(target_os = "macos")]
+            drag_to_move::set_accessibility_granted(initial.0);
+            #[cfg(target_os = "macos")]
+            eventtap::set_accessibility_granted(initial.0);
+
             // Start the keyboard event tap (Input Monitoring) only for a
             // trusted, enabled configuration. On an ordinary launch this is
-            // attempted even before permission is granted so Tomari appears in
-            // the Input Monitoring list; recovery never attempts the tap.
+            // attempted even before Input Monitoring is granted so Tomari
+            // appears in the Input Monitoring list; `restart` itself declines
+            // to create this active tap until Accessibility is granted too
+            // (see `eventtap`), and the permission poller below brings it up
+            // once it is. Recovery never attempts the tap.
             #[cfg(target_os = "macos")]
             if startup_automation.keyboard {
                 eventtap::restart(&handle);
@@ -327,11 +344,6 @@ fn main() {
             // silently stopped working. Same-version losses are the user's own
             // revocation and stay quiet. All of it is best-effort UX — a
             // snapshot that fails to read or write never affects startup.
-            let initial = tray::permission_state(&handle);
-            #[cfg(target_os = "macos")]
-            drag_to_move::set_accessibility_granted(initial.0);
-            #[cfg(target_os = "macos")]
-            eventtap::set_accessibility_granted(initial.0);
             let app_version = app.package_info().version.to_string();
             if !configuration_recovery {
                 let prev = regrant::load_snapshot(&state.db);
@@ -364,11 +376,15 @@ fn main() {
                 let spawned =
                     poll_lifecycle.spawn_tracked("tomari-permission-poller", move |lifecycle| {
                         // Poll responsively while a permission is still missing, then
-                        // ease off to a slow heartbeat once both are granted and
-                        // stable — there is nothing left to react to but the rare
-                        // revocation, so a 2 s spin would be pure waste.
+                        // ease off once both are granted and stable. The heartbeat
+                        // stays short even then: the one thing left to react to is
+                        // a revocation, and an Accessibility revoke underneath a
+                        // running *active* tap has been reported to stop input
+                        // system-wide (see `eventtap`), so the window between the
+                        // revoke and the teardown below is kept to a few seconds.
+                        // Each tick is two cheap TCC status calls.
                         const FAST: std::time::Duration = std::time::Duration::from_secs(2);
-                        const SLOW: std::time::Duration = std::time::Duration::from_secs(30);
+                        const SLOW: std::time::Duration = std::time::Duration::from_secs(5);
                         let mut last = Some(initial);
                         let mut interval = if initial == (true, true) { SLOW } else { FAST };
                         loop {
@@ -400,6 +416,15 @@ fn main() {
                             // state — instead of a handle to a tap the system
                             // will no longer feed, which the settings check would
                             // otherwise keep reporting as running.
+                            //
+                            // The two *active* taps (keyboard, drag-to-move) are
+                            // rebuilt on an Accessibility transition as well: their
+                            // `restart_result` refuses to run without the grant, so
+                            // a revoke tears a running active tap down at once
+                            // (rather than leaving it up under a permission the
+                            // system no longer recognizes — see `eventtap`), and a
+                            // grant brings it back. The listen-only drag-to-snap tap
+                            // depends on Input Monitoring alone.
                             let input_monitoring_changed =
                                 matches!(last, Some((_, was_im)) if was_im != current.1);
                             last = Some(current);
@@ -412,12 +437,12 @@ fn main() {
                                 let _ = apply_permission_transition_if_running(
                                     &state.lifecycle,
                                     || {
-                                        if input_monitoring_changed
-                                            && !state.configuration_recovery_required()
-                                        {
+                                        if !state.configuration_recovery_required() {
                                             eventtap::restart(&refresh_handle);
-                                            drag_to_snap::restart(&refresh_handle);
                                             drag_to_move::restart(&refresh_handle);
+                                            if input_monitoring_changed {
+                                                drag_to_snap::restart(&refresh_handle);
+                                            }
                                         }
                                         tray::refresh(&refresh_handle);
                                         let _ = refresh_handle.emit(
