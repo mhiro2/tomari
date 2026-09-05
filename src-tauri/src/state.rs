@@ -2,11 +2,10 @@
 //! tray, the global-shortcut handler and the keyboard event tap.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use tauri_plugin_global_shortcut::Shortcut;
@@ -99,6 +98,30 @@ struct ScreenGeometry {
     screens: Vec<(Rect, Rect)>,
 }
 
+/// A serialized configuration operation. Dropping the guard publishes one
+/// new generation after all database and live-runtime changes are complete.
+pub struct ConfigurationMutationGuard<'a> {
+    _guard: MutexGuard<'a, ()>,
+    revision: &'a AtomicU64,
+    publish_revision: bool,
+}
+
+impl ConfigurationMutationGuard<'_> {
+    /// Release a gate that rejected the operation without publishing a
+    /// configuration change.
+    pub fn discard(mut self) {
+        self.publish_revision = false;
+    }
+}
+
+impl Drop for ConfigurationMutationGuard<'_> {
+    fn drop(&mut self) {
+        if self.publish_revision {
+            self.revision.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 pub struct AppState {
     /// One-way process lifecycle and gates for work that could recreate an OS
     /// side effect after shutdown has begun.
@@ -148,6 +171,9 @@ pub struct AppState {
     /// they never interleave. It guards the *sequence* of operations, not a
     /// value, hence `Mutex<()>`.
     config_mutation: Mutex<()>,
+    /// Advances after every operation serialized by `config_mutation`,
+    /// including hotkey and modifier-rule changes that do not alter settings.
+    config_revision: AtomicU64,
     /// Present while startup could not establish one trustworthy, complete
     /// configuration snapshot. Runtime settings are fail-closed in this state,
     /// and every ordinary config mutation is rejected until the dedicated
@@ -220,6 +246,7 @@ impl AppState {
             last_placement: Mutex::new(None),
             screen_geometry: Mutex::new(ScreenGeometry::default()),
             config_mutation: Mutex::new(()),
+            config_revision: AtomicU64::new(0),
             configuration_recovery,
             #[cfg(test)]
             config_mutation_waiters: AtomicUsize::new(0),
@@ -264,13 +291,39 @@ impl AppState {
     /// plugin performs *on* the main thread, waiting for it — so a main-thread
     /// caller blocked here would deadlock the app. Window operations use
     /// [`Self::lock_window_mutation`] instead.
-    pub fn lock_config_mutation(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+    pub fn lock_config_mutation(&self) -> Option<ConfigurationMutationGuard<'_>> {
         #[cfg(test)]
         self.config_mutation_waiters.fetch_add(1, Ordering::SeqCst);
         let guard = self.config_mutation.lock_safe();
         #[cfg(test)]
         self.config_mutation_waiters.fetch_sub(1, Ordering::SeqCst);
-        self.lifecycle.is_running().then_some(guard)
+        if !self.lifecycle.is_running() {
+            return None;
+        }
+        Some(ConfigurationMutationGuard {
+            _guard: guard,
+            revision: &self.config_revision,
+            publish_revision: true,
+        })
+    }
+
+    /// Wait for any in-flight configuration operation, then atomically capture
+    /// its published generation and settings. Diagnostics calls this before
+    /// and after OS probes without holding the lock during an AppKit hop.
+    pub fn configuration_snapshot(&self) -> (u64, AppSettings) {
+        let _guard = self.config_mutation.lock_safe();
+        (
+            self.config_revision.load(Ordering::SeqCst),
+            self.settings.lock_safe().clone(),
+        )
+    }
+
+    /// Wait for any in-flight configuration operation and return only its
+    /// published revision. Diagnostics uses this after a probe so it does not
+    /// clone and deeply compare settings a second time.
+    pub fn configuration_revision(&self) -> u64 {
+        let _guard = self.config_mutation.lock_safe();
+        self.config_revision.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -300,6 +353,10 @@ impl AppState {
     pub(crate) fn shortcut_registration_incomplete(&self) -> bool {
         self.shortcut_registration_incomplete
             .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn registered_shortcut_count(&self) -> usize {
+        self.shortcuts.lock_safe().len()
     }
 
     /// The cached display geometry for drag-to-snap (`(full_frame, work_area)`
@@ -430,7 +487,7 @@ impl AppState {
 
     /// Whether keyboard customization is currently enabled.
     pub fn keyboard_enabled(&self) -> bool {
-        self.settings.lock_safe().keyboard_enabled
+        self.settings.lock_safe().keyboard_tap_enabled()
     }
 }
 
@@ -457,6 +514,38 @@ mod tests {
         state.set_screen_geometry(vec![display]);
         assert_ne!(state.screen_geometry_generation(), g1);
     }
+
+    #[test]
+    fn completed_config_operations_advance_the_diagnostics_generation() {
+        let state = state();
+        let (before, _) = state.configuration_snapshot();
+
+        drop(state.lock_config_mutation().unwrap());
+
+        let (after, _) = state.configuration_snapshot();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn discarded_config_operations_do_not_advance_the_diagnostics_generation() {
+        let state = state();
+        let (before, _) = state.configuration_snapshot();
+
+        state.lock_config_mutation().unwrap().discard();
+
+        assert_eq!(state.configuration_revision(), before);
+    }
+
+    #[test]
+    fn terminally_rejected_config_operations_do_not_advance_the_revision() {
+        let state = state();
+        let before = state.configuration_revision();
+        state.lifecycle.stop_for_test();
+
+        assert!(state.lock_config_mutation().is_none());
+        assert_eq!(state.configuration_revision(), before);
+    }
+
     use tomari_core::WindowPreset;
     use tomari_keyboard::ModifierEngine;
     use tomari_window::MockWindowManager;

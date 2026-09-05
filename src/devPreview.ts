@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   ConfigurationWarnings,
+  DiagnosticsSnapshot,
   Hotkey,
   KeepAwakeStatus,
   MenuBarInventory,
@@ -86,6 +87,68 @@ export async function installDevPreview() {
       { pid: 4330, name: 'cargo', elapsedSecs: 694 },
     ],
     revision: 1,
+  };
+  const diagnostics: DiagnosticsSnapshot = {
+    generatedAtMs: Date.now(),
+    app: { version: '0.0.1', os: 'macos', architecture: 'aarch64' },
+    permissions: {
+      accessibility: !permissionsMissing,
+      inputMonitoring: !permissionsMissing,
+    },
+    taps: [
+      {
+        kind: 'keyboard',
+        enabled: true,
+        state: permissionsMissing ? 'permissionDenied' : 'healthy',
+        restartCount: 1,
+        disableCount: 2,
+        recoveryCount: 2,
+      },
+      {
+        kind: 'dragToSnap',
+        enabled: true,
+        state: permissionsMissing ? 'permissionDenied' : 'healthy',
+        restartCount: 0,
+        disableCount: 0,
+        recoveryCount: 0,
+      },
+      {
+        kind: 'dragToMove',
+        enabled: false,
+        state: 'stopped',
+        restartCount: 0,
+        disableCount: 0,
+        recoveryCount: 0,
+      },
+    ],
+    capsLock: { ownership: 'held', mappingActive: true, reconciled: true },
+    shortcuts: {
+      enabled: true,
+      registrationIncomplete: false,
+      registeredCount: 6,
+      invalidCount: configurationWarnings.invalidHotkeys.length,
+    },
+    menuBar: {
+      enabled: true,
+      supported: true,
+      permissionGranted: !permissionsMissing,
+      dividerAvailable: !permissionsMissing,
+    },
+    keepAwake: {
+      active: false,
+      phase: 'off',
+      markerPresent: false,
+      kernelSleepDisabled: false,
+      ownsLidClose: false,
+    },
+    database: { integrityOk: true, schemaVersion: 3, latestSchemaVersion: 3 },
+    updater: { signatureConfigured: true },
+    privacy: {
+      rawInputIncluded: false,
+      accessibilityLabelsIncluded: false,
+      processDetailsIncluded: false,
+      filesystemPathsIncluded: false,
+    },
   };
   const modifierRules: ModifierRule[] = [
     {
@@ -250,6 +313,13 @@ export async function installDevPreview() {
       }
       case 'get_configuration_warnings':
         return configurationWarnings;
+      case 'get_diagnostics':
+        return diagnostics;
+      case 'export_support_bundle':
+        return {
+          path: '/Users/preview/Library/Application Support/Tomari/support/tomari-support.json',
+          generatedAtMs: diagnostics.generatedAtMs,
+        };
       case 'retry_settings_recovery':
         recoveryKind = null;
         return null;

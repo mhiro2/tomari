@@ -28,6 +28,9 @@ mod status {
 
     pub fn apply(_app: &AppHandle, _enabled: bool, _collapsed: bool) {}
     pub fn teardown(_app: &AppHandle) {}
+    pub fn divider_available() -> bool {
+        false
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -174,6 +177,12 @@ pub fn status(state: &AppState) -> MenuBarStatus {
         enabled: state.settings.lock_safe().menu_bar_tidy_enabled,
         collapsed: state.menu_bar.lock_safe().is_collapsed(),
     }
+}
+
+/// Read the divider's cached runtime availability without expanding it or
+/// publishing a new Accessibility inventory generation.
+pub fn diagnostics_divider_available() -> bool {
+    status::divider_available()
 }
 
 /// Inspect the real menu bar layout. The divider is expanded only for the scan

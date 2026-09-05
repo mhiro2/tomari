@@ -12,10 +12,11 @@ use tomari_keyboard::{accelerator, validation as keyboard_validation};
 use crate::configuration_warnings::{
     ConfigurationWarnings, publish_hotkey_issues, publish_modifier_rule_issues,
 };
+use crate::diagnostics::{DiagnosticsSnapshot, SupportBundleExport};
 use crate::error::CmdError;
 use crate::locks::MutexExt;
 use crate::shortcuts;
-use crate::state::{AppState, ConfigurationRecovery};
+use crate::state::{AppState, ConfigurationMutationGuard, ConfigurationRecovery};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,7 +99,7 @@ pub struct PendingUpdateSlot {
 /// for the rest.
 type CmdResult<T> = Result<T, CmdError>;
 
-fn lock_config_mutation(state: &AppState) -> CmdResult<std::sync::MutexGuard<'_, ()>> {
+fn lock_config_mutation(state: &AppState) -> CmdResult<ConfigurationMutationGuard<'_>> {
     // Reject before waiting as well as after acquiring the lock. A settings
     // autosave issued while the recovery screen is up must not queue behind
     // the explicit reset and then land on the freshly repaired row after the
@@ -110,6 +111,7 @@ fn lock_config_mutation(state: &AppState) -> CmdResult<std::sync::MutexGuard<'_,
         .lock_config_mutation()
         .ok_or_else(|| CmdError::other("Tomari is shutting down"))?;
     if state.configuration_recovery_required() {
+        guard.discard();
         return Err(CmdError::settings_recovery_required());
     }
     Ok(guard)
@@ -159,6 +161,26 @@ pub fn get_settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
 #[tauri::command]
 pub fn get_configuration_warnings(state: State<'_, AppState>) -> ConfigurationWarnings {
     state.configuration_warnings.snapshot()
+}
+
+/// Collect health probes off the AppKit thread. Menu Bar availability comes
+/// from cached runtime state, so diagnostics never expands the divider or
+/// invalidates item ids; database integrity and support-file I/O never freeze
+/// the panel.
+#[tauri::command]
+pub async fn get_diagnostics(app: AppHandle) -> CmdResult<DiagnosticsSnapshot> {
+    off_main(app, |app, state| {
+        Ok(crate::diagnostics::collect(app, state))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn export_support_bundle(app: AppHandle) -> CmdResult<SupportBundleExport> {
+    off_main(app, |app, state| {
+        crate::diagnostics::export(app, state).map_err(CmdError::other)
+    })
+    .await
 }
 
 fn settings_for_frontend(state: &AppState) -> CmdResult<AppSettings> {
@@ -387,9 +409,9 @@ fn save_settings_locked(
     // Whether each restartable tap should be running per the just-saved
     // settings, independent of whether this save actually restarted it — the
     // baseline `compose_apply_warnings` falls back to when no restart ran.
-    let keyboard_should_run = settings.keyboard_enabled;
-    let drag_should_run = settings.window_management_enabled && settings.drag_to_snap_enabled;
-    let move_should_run = settings.window_management_enabled && settings.drag_to_move_enabled;
+    let keyboard_should_run = settings.keyboard_tap_enabled();
+    let drag_should_run = settings.drag_to_snap_tap_enabled();
+    let move_should_run = settings.drag_to_move_tap_enabled();
 
     // The left/right ⌘ IME toggle is not a stored rule, so flipping it has to
     // reassemble the engine's rule set from the new setting. Reconcile it every
@@ -531,13 +553,16 @@ pub async fn get_apply_warnings(
             running,
         };
         warnings.extend(compose_apply_warnings(&ApplyWarningInputs {
-            keyboard: live(settings.keyboard_enabled, crate::eventtap::is_running()),
+            keyboard: live(
+                settings.keyboard_tap_enabled(),
+                crate::eventtap::is_running(),
+            ),
             drag_to_snap: live(
-                settings.window_management_enabled && settings.drag_to_snap_enabled,
+                settings.drag_to_snap_tap_enabled(),
                 crate::drag_to_snap::is_running(),
             ),
             drag_to_move: live(
-                settings.window_management_enabled && settings.drag_to_move_enabled,
+                settings.drag_to_move_tap_enabled(),
                 crate::drag_to_move::is_running(),
             ),
             caps_remap_ok: crate::eventtap::caps_mapping_in_step(&state),

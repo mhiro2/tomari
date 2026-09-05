@@ -44,6 +44,18 @@ pub struct PersistedRowCounts {
     pub skipped: usize,
 }
 
+/// Read-only database health used by the app's diagnostics surface.
+///
+/// It deliberately exposes only structural facts. No table names, paths, row
+/// contents, or SQLite error text cross the support-bundle boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseHealth {
+    pub integrity_ok: bool,
+    pub schema_version: i32,
+    pub latest_schema_version: i32,
+}
+
 impl PersistedRowCounts {
     fn accepted(self) -> usize {
         self.stored.saturating_sub(self.skipped)
@@ -203,6 +215,21 @@ impl Database {
             let report = preflight_persisted_state(&tx)?;
             tx.commit()?;
             Ok(report)
+        })
+    }
+
+    /// Verify the open store without mutating it and report its migration
+    /// position. Diagnostics keeps the error itself local and emits only the
+    /// boolean result so support bundles cannot leak database contents.
+    pub fn health(&self) -> Result<DatabaseHealth> {
+        self.with_conn(|conn| {
+            let integrity_ok = quick_check(conn).is_ok();
+            let schema_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            Ok(DatabaseHealth {
+                integrity_ok,
+                schema_version,
+                latest_schema_version: MIGRATIONS.len() as i32,
+            })
         })
     }
 
@@ -711,6 +738,20 @@ PRAGMA user_version = 3;
     fn quick_check_accepts_a_clean_empty_database() {
         let conn = Connection::open_in_memory().expect("open");
         quick_check(&conn).expect("clean database");
+    }
+
+    #[test]
+    fn database_health_reports_integrity_and_current_schema_without_rows() {
+        let db = Database::open_in_memory().expect("open database");
+
+        assert_eq!(
+            db.health().expect("read health"),
+            DatabaseHealth {
+                integrity_ok: true,
+                schema_version: SCHEMA_VERSION,
+                latest_schema_version: SCHEMA_VERSION,
+            }
+        );
     }
 
     #[test]

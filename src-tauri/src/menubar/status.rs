@@ -61,6 +61,9 @@ thread_local! {
 /// applies itself only while its generation is still current, so whichever call
 /// was made last in program order wins no matter what order the hops land in.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Cheap, read-only availability for Diagnostics. Unlike `scan_context`, this
+/// never expands the divider or invalidates an inventory snapshot.
+static DIVIDER_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Once quit begins, queued reconciliation and scan restoration must never
 /// recreate status items behind teardown's unconditional removal.
 static TERMINATING: AtomicBool = AtomicBool::new(false);
@@ -133,17 +136,24 @@ fn apply_on_main(app: &AppHandle, enabled: bool, collapsed: bool, generation: u6
     ITEMS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let items = slot.get_or_insert_with(|| make_items(mtm, app.clone()));
+        DIVIDER_AVAILABLE.store(true, Ordering::SeqCst);
         set_collapsed(items, collapsed, mtm);
     });
 }
 
 fn remove_items() {
     let Some(items) = ITEMS.with(|cell| cell.borrow_mut().take()) else {
+        DIVIDER_AVAILABLE.store(false, Ordering::SeqCst);
         return;
     };
+    DIVIDER_AVAILABLE.store(false, Ordering::SeqCst);
     let bar = NSStatusBar::systemStatusBar();
     bar.removeStatusItem(&items.divider);
     bar.removeStatusItem(&items.controller);
+}
+
+pub fn divider_available() -> bool {
+    DIVIDER_AVAILABLE.load(Ordering::SeqCst)
 }
 
 /// Stretch or restore the divider, and point the controller's chevron the way

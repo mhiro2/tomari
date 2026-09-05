@@ -13,7 +13,7 @@ pub mod external;
 pub mod paths;
 
 pub use db::{
-    Database, PersistedRowCounts, PersistedSettings, PersistedStatePreflight,
+    Database, DatabaseHealth, PersistedRowCounts, PersistedSettings, PersistedStatePreflight,
     StartupConfigurationReset,
 };
 pub use error::{Error, Result};

@@ -174,7 +174,8 @@ pub fn reenable(port_holder: &AtomicUsize) -> bool {
 /// handle says only that a start once succeeded; it does not say that the
 /// system has since disabled the tap, or *why* a start failed — which is what
 /// decides whether the fix is "grant Input Monitoring" or "something broke".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[repr(u8)]
 pub enum TapHealth {
     /// Not meant to be running: the feature is off, or the app is quitting.
@@ -191,6 +192,18 @@ pub enum TapHealth {
     PermissionDenied = 4,
     /// The start failed for some other reason.
     Failed = 5,
+}
+
+/// Sanitized, lock-free tap telemetry for Diagnostics. Counts reveal only
+/// lifecycle transitions; no key code, pointer position, or event payload is
+/// ever retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TapHealthSnapshot {
+    pub state: TapHealth,
+    pub restart_count: u64,
+    pub disable_count: u32,
+    pub recovery_count: u32,
 }
 
 impl TapHealth {
@@ -225,6 +238,7 @@ pub struct TapHealthCell {
     label: &'static str,
     /// `generation << 8 | state`.
     word: AtomicU64,
+    starts: AtomicU64,
     disables: AtomicU32,
     recoveries: AtomicU32,
 }
@@ -242,6 +256,7 @@ impl TapHealthCell {
         Self {
             label,
             word: AtomicU64::new(0),
+            starts: AtomicU64::new(0),
             disables: AtomicU32::new(0),
             recoveries: AtomicU32::new(0),
         }
@@ -255,6 +270,19 @@ impl TapHealthCell {
     /// to stamp the callback it builds.
     pub fn generation(&self) -> u64 {
         unpack(self.word.load(Ordering::SeqCst)).0
+    }
+
+    /// One coherent-enough diagnostics read. Callback generations also advance
+    /// for shutdown and disabled-feature reconciliation, so restart telemetry
+    /// is tracked separately from that safety mechanism.
+    pub fn snapshot(&self) -> TapHealthSnapshot {
+        let (_, state) = unpack(self.word.load(Ordering::SeqCst));
+        TapHealthSnapshot {
+            state,
+            restart_count: self.starts.load(Ordering::SeqCst).saturating_sub(1),
+            disable_count: self.disables.load(Ordering::SeqCst),
+            recovery_count: self.recoveries.load(Ordering::SeqCst),
+        }
     }
 
     fn log_transition(&self, generation: u64, prev: TapHealth, next: TapHealth) {
@@ -316,7 +344,10 @@ impl TapHealthCell {
     /// generation, retiring every callback of the previous one. Called *before*
     /// the old tap is dropped, so no window shows the old `Healthy` over a tap
     /// that is being torn down.
-    pub fn begin_start(&self) -> u64 {
+    pub fn begin_start(&self, enabled: bool) -> u64 {
+        if enabled {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+        }
         self.advance(TapHealth::Starting)
     }
 
@@ -666,13 +697,22 @@ mod tests {
     fn tap_health_records_start_disable_and_recovery() {
         let cell = TapHealthCell::new("test");
         assert_eq!(cell.state(), TapHealth::Stopped);
-        let first = cell.begin_start();
+        let first = cell.begin_start(true);
         assert_eq!(cell.state(), TapHealth::Starting);
         cell.record_start_failure(false);
         assert_eq!(cell.state(), TapHealth::PermissionDenied);
         cell.record_start_failure(true);
         assert_eq!(cell.state(), TapHealth::Failed);
         cell.set(TapHealth::Healthy);
+        assert_eq!(
+            cell.snapshot(),
+            TapHealthSnapshot {
+                state: TapHealth::Healthy,
+                restart_count: 0,
+                disable_count: 0,
+                recovery_count: 0,
+            }
+        );
         cell.record_disabled(first);
         assert_eq!(cell.state(), TapHealth::DisabledByTimeout);
         // A re-enable that found no port yet leaves the tap marked disabled.
@@ -692,9 +732,9 @@ mod tests {
         // detached thread) and keeps reporting: none of it may touch the state
         // the new start recorded, nor the counters.
         let cell = TapHealthCell::new("test");
-        let old = cell.begin_start();
+        let old = cell.begin_start(true);
         cell.set(TapHealth::Healthy);
-        let new = cell.begin_start();
+        let new = cell.begin_start(true);
         assert_ne!(old, new);
         cell.record_start_failure(false);
         assert_eq!(cell.state(), TapHealth::PermissionDenied);
@@ -710,7 +750,7 @@ mod tests {
         // Quit: the callback's thread may still be winding down; a report it
         // makes after `stop` must not revive the state.
         let cell = TapHealthCell::new("test");
-        let running = cell.begin_start();
+        let running = cell.begin_start(true);
         cell.set(TapHealth::Healthy);
         cell.stop();
         assert_eq!(cell.state(), TapHealth::Stopped);
@@ -718,6 +758,24 @@ mod tests {
         cell.record_reenable(running, true);
         assert_eq!(cell.state(), TapHealth::Stopped);
         assert_ne!(cell.generation(), running);
+        assert_eq!(cell.snapshot().restart_count, 0);
+    }
+
+    #[test]
+    fn disabled_reconciliation_does_not_count_as_a_restart() {
+        let cell = TapHealthCell::new("test");
+        cell.begin_start(false);
+        cell.set(TapHealth::Stopped);
+        cell.begin_start(false);
+        cell.set(TapHealth::Stopped);
+
+        assert_eq!(cell.snapshot().restart_count, 0);
+
+        cell.begin_start(true);
+        cell.set(TapHealth::Healthy);
+        cell.begin_start(true);
+        cell.set(TapHealth::Healthy);
+        assert_eq!(cell.snapshot().restart_count, 1);
     }
 
     #[test]
@@ -728,7 +786,7 @@ mod tests {
         // stale report that slipped in after the generation moved on.
         use std::sync::Arc;
         let cell = Arc::new(TapHealthCell::new("test"));
-        let start = cell.begin_start();
+        let start = cell.begin_start(true);
         cell.set(TapHealth::Healthy);
         let reporters: Vec<_> = (0..4)
             .map(|_| {
@@ -745,7 +803,7 @@ mod tests {
             let cell = Arc::clone(&cell);
             std::thread::spawn(move || {
                 for _ in 0..200 {
-                    cell.begin_start();
+                    cell.begin_start(true);
                     cell.record_start_failure(false);
                 }
             })

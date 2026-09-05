@@ -143,15 +143,15 @@ pub fn restart_result(app: &AppHandle) -> bool {
         return true;
     };
     let mut guard = MOVE_TAP.lock_safe();
+    let enabled = drag_to_move_enabled_for(app);
     // Published before the old tap goes down, so no reader sees `Healthy` over
     // a tap being torn down; also retires the old callback's generation.
-    HEALTH.begin_start();
+    HEALTH.begin_start(enabled);
     *guard = None; // Drop stops the previous tap.
 
     if let Some(state) = app.try_state::<AppState>() {
         set_accessibility_granted(state.windows.permission_granted());
     }
-    let enabled = drag_to_move_enabled_for(app);
     ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
         HEALTH.set(TapHealth::Stopped);
@@ -203,12 +203,13 @@ pub fn is_running() -> bool {
     )
 }
 
+pub fn health_snapshot() -> crate::tap::TapHealthSnapshot {
+    HEALTH.snapshot()
+}
+
 fn drag_to_move_enabled_for(app: &AppHandle) -> bool {
     app.try_state::<AppState>()
-        .map(|s| {
-            let settings = s.settings.lock_safe();
-            settings.window_management_enabled && settings.drag_to_move_enabled
-        })
+        .map(|s| s.settings.lock_safe().drag_to_move_tap_enabled())
         .unwrap_or(false)
 }
 

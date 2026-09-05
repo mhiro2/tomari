@@ -51,6 +51,18 @@ same foundation over time.
   AC-only operation, low-battery protection, a live countdown, kernel/ownership
   diagnostics, and long-running developer-job detection keep the session bounded.
 
+### Diagnostics
+
+- Inspect permission grants, event-tap health and restart counters, Caps Lock
+  HID ownership, global shortcut registration, Menu Bar Accessibility, Prevent
+  Sleep ownership, database migrations, and updater signature configuration in
+  one read-only report.
+- Open the relevant Setup step or settings tab directly from an actionable
+  diagnostic, while transient operations remain clearly marked as in progress.
+- Export a sanitized JSON support bundle containing those structural facts. It
+  excludes raw input, shortcut bindings, menu bar labels, process details,
+  database rows, error text, and filesystem paths.
+
 ### And more
 
 - **Localized UI** in English and Japanese (follows your system language by

@@ -2147,6 +2147,18 @@ fn marker_exists() -> bool {
     marker_path().is_some_and(|p| p.exists())
 }
 
+/// Whether the write-ahead marker that guards a possible lid-close override
+/// exists. Only the boolean crosses Diagnostics; its per-user path does not.
+#[cfg(target_os = "macos")]
+pub fn diagnostics_marker_present() -> bool {
+    marker_exists()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn diagnostics_marker_present() -> bool {
+    false
+}
+
 /// Write the failsafe marker, returning whether it is now durably on disk. The
 /// override is only enabled when this succeeds, so a marker always guards a live
 /// override.

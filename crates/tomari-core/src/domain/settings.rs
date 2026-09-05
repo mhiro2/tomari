@@ -71,6 +71,21 @@ fn default_command_ime_switch_enabled() -> bool {
 }
 
 impl AppSettings {
+    /// Whether the keyboard event tap should be running.
+    pub fn keyboard_tap_enabled(&self) -> bool {
+        self.keyboard_enabled
+    }
+
+    /// Whether the drag-to-snap event tap should be running.
+    pub fn drag_to_snap_tap_enabled(&self) -> bool {
+        self.window_management_enabled && self.drag_to_snap_enabled
+    }
+
+    /// Whether the drag-to-move event tap should be running.
+    pub fn drag_to_move_tap_enabled(&self) -> bool {
+        self.window_management_enabled && self.drag_to_move_enabled
+    }
+
     /// Settings for a session whose persisted configuration could not be read.
     /// Every feature that can alter system or application state is disabled;
     /// the tray stays visible so the user cannot lose the recovery path.
@@ -125,6 +140,24 @@ mod tests {
         // The left/right ⌘ IME toggle is on out of the box, matching the
         // bindings a fresh install ships with.
         assert!(AppSettings::default().command_ime_switch_enabled);
+    }
+
+    #[test]
+    fn tap_enablement_respects_each_master_switch() {
+        let mut settings = AppSettings {
+            drag_to_snap_enabled: true,
+            drag_to_move_enabled: true,
+            ..AppSettings::default()
+        };
+        assert!(settings.keyboard_tap_enabled());
+        assert!(settings.drag_to_snap_tap_enabled());
+        assert!(settings.drag_to_move_tap_enabled());
+
+        settings.window_management_enabled = false;
+        assert!(!settings.drag_to_snap_tap_enabled());
+        assert!(!settings.drag_to_move_tap_enabled());
+        settings.keyboard_enabled = false;
+        assert!(!settings.keyboard_tap_enabled());
     }
 
     #[test]

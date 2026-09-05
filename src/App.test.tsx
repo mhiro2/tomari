@@ -5,6 +5,7 @@ import { App } from './App';
 import type {
   AppSettings,
   ConfigurationWarnings,
+  DiagnosticsSnapshot,
   PermissionsChanged,
   SetupStatus,
 } from './lib/types';
@@ -39,6 +40,41 @@ const ALL_GRANTED: SetupStatus = {
   accessibility: true,
   inputMonitoring: true,
   revision: 0,
+};
+
+const SHORTCUT_DIAGNOSTICS: DiagnosticsSnapshot = {
+  generatedAtMs: 1,
+  app: { version: '1.2.3', os: 'macos', architecture: 'aarch64' },
+  permissions: { accessibility: true, inputMonitoring: true },
+  taps: [],
+  capsLock: { ownership: 'unowned', mappingActive: false, reconciled: true },
+  shortcuts: {
+    enabled: true,
+    registrationIncomplete: true,
+    registeredCount: 3,
+    invalidCount: 0,
+  },
+  menuBar: {
+    enabled: false,
+    supported: true,
+    permissionGranted: true,
+    dividerAvailable: false,
+  },
+  keepAwake: {
+    active: false,
+    phase: 'off',
+    markerPresent: false,
+    kernelSleepDisabled: false,
+    ownsLidClose: false,
+  },
+  database: { integrityOk: true, schemaVersion: 3, latestSchemaVersion: 3 },
+  updater: { signatureConfigured: true },
+  privacy: {
+    rawInputIncluded: false,
+    accessibilityLabelsIncluded: false,
+    processDetailsIncluded: false,
+    filesystemPathsIncluded: false,
+  },
 };
 
 const CONFIGURATION_WARNINGS: ConfigurationWarnings = {
@@ -624,7 +660,7 @@ describe('App sidebar and page persistence', () => {
       within(app)
         .getAllByRole('button')
         .map((button) => button.textContent),
-    ).toEqual(['General']);
+    ).toEqual(['General', 'Diagnostics']);
     expect(within(sidebar()).queryByRole('button', { name: 'Home' })).not.toBeInTheDocument();
   });
 
@@ -681,6 +717,19 @@ describe('App sidebar and page persistence', () => {
     fireEvent.click(nav('General'));
     expect(await screen.findByRole('heading', { name: 'General', level: 1 })).toBeInTheDocument();
     expect(nav('General')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('opens the exact settings tab requested by Diagnostics', async () => {
+    mockCommands({ get_diagnostics: SHORTCUT_DIAGNOSTICS });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+
+    fireEvent.click(nav('Diagnostics'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Shortcuts' }));
+
+    expect(await screen.findByRole('heading', { name: 'Keyboard', level: 1 })).toBeInTheDocument();
+    expect(nav('Keyboard')).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('tab', { name: 'Shortcuts' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('keeps a partial-apply warning visible outside General', async () => {

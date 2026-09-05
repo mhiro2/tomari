@@ -95,15 +95,15 @@ pub fn restart_result(app: &AppHandle) -> bool {
         return true;
     };
     let mut guard = DRAG_TAP.lock_safe();
+    let enabled = drag_to_snap_enabled_for(app);
     // Published before the old tap goes down, so no reader sees `Healthy` over
     // a tap being torn down; also retires the old callback's generation.
-    HEALTH.begin_start();
+    HEALTH.begin_start(enabled);
     *guard = None; // Drop stops the previous tap and joins its worker.
     // Any snap preview on screen belongs to the tap we just dropped; a restart
     // (settings change, wake, permission grant) must not leave it stuck.
     overlay::hide(app);
 
-    let enabled = drag_to_snap_enabled_for(app);
     ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
         HEALTH.set(TapHealth::Stopped);
@@ -156,14 +156,15 @@ pub fn is_running() -> bool {
     )
 }
 
+pub fn health_snapshot() -> crate::tap::TapHealthSnapshot {
+    HEALTH.snapshot()
+}
+
 /// Whether drag-to-snap should run: it shares the window-management master
 /// switch and has its own opt-in toggle.
 fn drag_to_snap_enabled_for(app: &AppHandle) -> bool {
     app.try_state::<AppState>()
-        .map(|s| {
-            let settings = s.settings.lock_safe();
-            settings.window_management_enabled && settings.drag_to_snap_enabled
-        })
+        .map(|s| s.settings.lock_safe().drag_to_snap_tap_enabled())
         .unwrap_or(false)
 }
 

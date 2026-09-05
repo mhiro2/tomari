@@ -35,11 +35,11 @@ with the lid closed).
 ```text
 ┌─────────────────────────────────────────────┐
 │ src/            React + TypeScript UI       │
-│                 (one window, five direct    │
+│                 (one window, six direct     │
 │                  sidebar destinations:      │
 │                  Windows / Keyboard /       │
 │                  Menu Bar / Prevent Sleep / │
-│                  General)                   │
+│                  General / Diagnostics)     │
 └──────────────────────┬──────────────────────┘
                        │ Tauri invoke (camelCase JSON)
 ┌──────────────────────▼──────────────────────┐
@@ -64,7 +64,7 @@ with the lid closed).
 | `tomari-core`              | Domain types (`domain/`), `Error`, `AppPaths`, the SQLite `Database`, and `defaults` for first-run seeding. No OS dependencies                                                                               |
 | `tomari-keyboard`          | `accelerator`, persisted hotkey/modifier-rule validation and canonicalization, and `ModifierEngine` (tap/hold detection). All pure                                                                            |
 | `tomari-window`            | `geometry` (pure preset → frame computation), the `WindowManager` / `WindowHandle` traits plus `MockWindowManager` for tests, and `macos` (the Accessibility API implementation, `cfg(target_os = "macos")`) |
-| `src-tauri` (`tomari-app`) | The menu-bar-resident Tauri v2 app. Tray, Tauri commands, global shortcuts, CGEventTap, action dispatch                                                                                                      |
+| `src-tauri` (`tomari-app`) | The menu-bar-resident Tauri v2 app. Tray, Tauri commands, global shortcuts, CGEventTap, action dispatch, and sanitized runtime diagnostics                                                                 |
 | `src/`                     | React 19 + TypeScript window UI (pnpm workspace, Vite build)                                                                                                                                                 |
 
 Dependencies point one way: `src-tauri` → `tomari-keyboard` / `tomari-window`
@@ -72,6 +72,14 @@ Dependencies point one way: `src-tauri` → `tomari-keyboard` / `tomari-window`
 `tomari-window`'s macOS dependency is isolated in its `macos` module; on other
 platforms `MockWindowManager` is plugged in instead (`make_window_manager` in
 `main.rs`).
+
+`src-tauri/src/diagnostics.rs` is a read-only aggregation boundary. OS-facing
+modules expose only health enums, booleans, counters, and aggregate counts; the
+aggregator reads cached Menu Bar permission/divider flags and never starts an AX
+inventory scan. The same DTO drives the Diagnostics screen and the versioned
+support bundle, preventing the export path from quietly gaining raw input, AX
+labels, process details, configured shortcuts or actions, database rows, error
+prose, or local filesystem paths.
 
 ## 3. Domain model (`tomari-core::domain`)
 

@@ -61,7 +61,7 @@ function heldModifierLabel(rule: ModifierRule, t: Translator): string {
   });
 }
 
-type KeyboardTab = 'modifiers' | 'shortcuts';
+export type KeyboardTab = 'modifiers' | 'shortcuts';
 
 type TapActionKey = 'none' | 'panel' | 'restoreWindow' | 'preventSleep' | 'menuBar';
 
@@ -114,7 +114,7 @@ function clearSaving(
 // shared warning state replaces exactly these.
 const RULE_MUTATION_PROBES = ['capsLockRemap'] as const;
 
-export function KeyboardView() {
+export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: KeyboardTab }) {
   const t = useT();
   const { settings, configurationWarnings, update, reportApplyOutcome } = useSettings();
   const [rules, setRules] = useState<ModifierRule[]>([]);
@@ -124,7 +124,7 @@ export function KeyboardView() {
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [modifierError, setModifierError] = useState<string | null>(null);
   const [configurationError, setConfigurationError] = useState<string | null>(null);
-  const [tab, setTab] = useState<KeyboardTab>('modifiers');
+  const [tab, setTab] = useState<KeyboardTab>(initialTab);
   const [addingShortcut, setAddingShortcut] = useState(false);
   // Ids with a save in flight, so their row's controls can be disabled — this
   // both prevents a second click racing the first save and, since the base

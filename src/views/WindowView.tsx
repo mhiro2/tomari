@@ -59,7 +59,7 @@ type Status = {
   undoPlacement: boolean;
   source: StatusSource;
 };
-type WindowTab = 'saved' | 'shortcuts' | 'mouse';
+export type WindowTab = 'saved' | 'shortcuts' | 'mouse';
 
 const WINDOW_TABS: WindowTab[] = ['saved', 'shortcuts', 'mouse'];
 
@@ -162,14 +162,20 @@ function clearSaving(
   });
 }
 
-export function WindowView({ onOpenKeyboard }: { onOpenKeyboard?: () => void }) {
+export function WindowView({
+  onOpenKeyboard,
+  initialTab = 'saved',
+}: {
+  onOpenKeyboard?: () => void;
+  initialTab?: WindowTab;
+}) {
   const t = useT();
   const { settings, update } = useSettings();
   const [context, setContext] = useState<PlacementContext | null>(null);
   const [history, setHistory] = useState<WindowHistoryStatus>(EMPTY_HISTORY);
   const [activeSlot, setActiveSlot] = useState<PlacementSlot | null>(null);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
-  const [tab, setTab] = useState<WindowTab>('saved');
+  const [tab, setTab] = useState<WindowTab>(initialTab);
   const [showOtherShortcuts, setShowOtherShortcuts] = useState(false);
   const [showAddShortcut, setShowAddShortcut] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);

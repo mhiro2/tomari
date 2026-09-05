@@ -9,6 +9,7 @@ import { I18nProvider, resolveLang, useT } from './lib/i18n';
 import { SettingsProvider, useSettings } from './lib/settings';
 import type { PermissionsChanged } from './lib/types';
 import { GeneralView } from './views/GeneralView';
+import { HealthView, type HealthDestination } from './views/HealthView';
 import { KeyboardView } from './views/KeyboardView';
 import { MenuBarView } from './views/MenuBarView';
 import { SessionView } from './views/SessionView';
@@ -18,7 +19,7 @@ import { WindowView } from './views/WindowView';
 type Section = SectionName;
 
 const TOOL_SECTIONS = ['window', 'keyboard', 'menubar', 'session'] as const satisfies Section[];
-const APP_SECTIONS = ['general'] as const satisfies Section[];
+const APP_SECTIONS = ['general', 'health'] as const satisfies Section[];
 const SECTIONS = [...TOOL_SECTIONS, ...APP_SECTIONS] as const;
 const LAST_SECTION_KEY = 'tomari.settings.lastSection';
 
@@ -98,6 +99,7 @@ function OperationalShell() {
   const t = useT();
   const { saveError, applyWarnings, configurationWarnings } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
+  const [healthDestination, setHealthDestination] = useState<HealthDestination | null>(null);
   const [configurationFocusRequest, setConfigurationFocusRequest] = useState(0);
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
   const [setupLoaded, setSetupLoaded] = useState(false);
@@ -228,6 +230,14 @@ function OperationalShell() {
   }, [configurationFocusRequest, section]);
 
   const onAutoCheckHandled = useCallback(() => setAutoCheckUpdate(false), []);
+  const selectSection = useCallback((next: Section) => {
+    setHealthDestination(null);
+    setSection(next);
+  }, []);
+  const navigateFromHealth = useCallback((destination: HealthDestination) => {
+    setHealthDestination(destination);
+    setSection(destination.section);
+  }, []);
   const openSetup = useCallback(() => setSetupOpen(true), []);
   const closeSetup = useCallback(() => {
     setSetupOpen(false);
@@ -245,6 +255,7 @@ function OperationalShell() {
       : 'attention';
   const retrySetupStatus = useCallback(() => setSetupAttempt((n) => n + 1), []);
   const reviewConfigurationWarnings = useCallback(() => {
+    setHealthDestination(null);
     setSection('keyboard');
     setConfigurationFocusRequest((request) => request + 1);
   }, []);
@@ -273,13 +284,13 @@ function OperationalShell() {
           label={t('app.tools')}
           sections={TOOL_SECTIONS}
           selected={section}
-          onSelect={setSection}
+          onSelect={selectSection}
         />
         <SidebarGroup
           label={t('app.app')}
           sections={APP_SECTIONS}
           selected={section}
-          onSelect={setSection}
+          onSelect={selectSection}
         />
 
         <div className="sidebar__footer">
@@ -337,7 +348,10 @@ function OperationalShell() {
             section={section}
             autoCheckUpdate={autoCheckUpdate}
             onAutoCheckHandled={onAutoCheckHandled}
-            onOpenKeyboard={() => setSection('keyboard')}
+            healthDestination={healthDestination}
+            onNavigateFromHealth={navigateFromHealth}
+            onOpenPermissions={openSetup}
+            onOpenKeyboard={() => selectSection('keyboard')}
           />
         </main>
       </div>
@@ -589,18 +603,44 @@ function SelectedView({
   section,
   autoCheckUpdate,
   onAutoCheckHandled,
+  healthDestination,
+  onNavigateFromHealth,
+  onOpenPermissions,
   onOpenKeyboard,
 }: {
   section: Section;
   autoCheckUpdate: boolean;
   onAutoCheckHandled: () => void;
+  healthDestination: HealthDestination | null;
+  onNavigateFromHealth: (destination: HealthDestination) => void;
+  onOpenPermissions: () => void;
   onOpenKeyboard: () => void;
 }) {
-  if (section === 'keyboard') return <KeyboardView />;
-  if (section === 'window') {
-    return <WindowView onOpenKeyboard={onOpenKeyboard} />;
+  if (section === 'keyboard') {
+    return (
+      <KeyboardView
+        initialTab={healthDestination?.section === 'keyboard' ? healthDestination.tab : undefined}
+      />
+    );
   }
-  if (section === 'menubar') return <MenuBarView />;
+  if (section === 'window') {
+    return (
+      <WindowView
+        onOpenKeyboard={onOpenKeyboard}
+        initialTab={healthDestination?.section === 'window' ? healthDestination.tab : undefined}
+      />
+    );
+  }
+  if (section === 'menubar') {
+    return (
+      <MenuBarView
+        initialTab={healthDestination?.section === 'menubar' ? healthDestination.tab : undefined}
+      />
+    );
+  }
   if (section === 'session') return <SessionView />;
+  if (section === 'health') {
+    return <HealthView onNavigate={onNavigateFromHealth} onOpenPermissions={onOpenPermissions} />;
+  }
   return <GeneralView autoCheckUpdate={autoCheckUpdate} onAutoCheckHandled={onAutoCheckHandled} />;
 }

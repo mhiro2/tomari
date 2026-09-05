@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 /** The sections the sidebar can select. */
-export type SectionName = 'keyboard' | 'window' | 'menubar' | 'session' | 'general';
+export type SectionName = 'keyboard' | 'window' | 'menubar' | 'session' | 'general' | 'health';
 
 // One drawing standard for every section icon, so the sidebar reads as a single
 // column rather than four unrelated marks: a 16×16 box, a 1.5 stroke, no fill,
@@ -47,6 +47,14 @@ const SHAPES: Record<SectionName, ReactNode> = {
       <circle cx="10" cy="5.5" r="1.8" />
       <path d="M2 10.5h2.2M7.8 10.5h6.2" />
       <circle cx="6" cy="10.5" r="1.8" />
+    </>
+  ),
+  // A pulse crossing a stable baseline: runtime health rather than a generic
+  // settings cog or information mark.
+  health: (
+    <>
+      <path d="M1.5 8h3l1.4-3.2L8.4 11l1.8-4 1.1 1H14.5" />
+      <path d="M2.5 3.2h11M2.5 12.8h11" opacity=".35" />
     </>
   ),
 };

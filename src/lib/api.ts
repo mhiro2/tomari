@@ -8,6 +8,7 @@ import type {
   AppSettings,
   ConfigurationWarnings,
   DisplayDirection,
+  DiagnosticsSnapshot,
   Hotkey,
   KeepAwakeOptions,
   LiveApplyWarnings,
@@ -21,6 +22,7 @@ import type {
   SaveModifierRuleOutcome,
   SaveSettingsOutcome,
   SetupStatus,
+  SupportBundleExport,
   UpdateInfo,
   PlacementContext,
   PlacementEditResult,
@@ -38,6 +40,11 @@ export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 // event; its monotonic revision arbitrates event/pull races in SettingsProvider.
 export const getConfigurationWarnings = (): Promise<ConfigurationWarnings> =>
   invoke('get_configuration_warnings');
+
+export const getDiagnostics = (): Promise<DiagnosticsSnapshot> => invoke('get_diagnostics');
+
+export const exportSupportBundle = (): Promise<SupportBundleExport> =>
+  invoke('export_support_bundle');
 
 // Retry the unreadable persisted snapshot without changing it, or replace the
 // affected settings and automation rows with the backend's fixed fail-closed

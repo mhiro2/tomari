@@ -745,6 +745,25 @@ pub struct ReconcileOutcome {
     pub reconciled: bool,
 }
 
+/// What the durable Caps Lock claim says, without exposing the displaced HID
+/// destination or write-ahead payload it contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CapsOwnership {
+    Unowned,
+    Pending,
+    Held,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapsDiagnostics {
+    pub ownership: CapsOwnership,
+    pub mapping_active: bool,
+    pub reconciled: bool,
+}
+
 /// Bring the HID remap into line with whether Caps Lock should be managed:
 /// take the source over when it should be and we do not hold it, hand it back
 /// (restoring what we displaced) when it should not be. Both directions start
@@ -836,6 +855,27 @@ pub fn live_status() -> ReconcileOutcome {
     ReconcileOutcome {
         proxy_active: bits & STATUS_PROXY_ACTIVE != 0,
         reconciled: bits & STATUS_RECONCILED != 0,
+    }
+}
+
+/// Read-only ownership and live-state snapshot for Diagnostics. The claim's
+/// private payload is deliberately collapsed to its state before serialization.
+pub fn diagnostics() -> CapsDiagnostics {
+    let _serialized = RECONCILE.lock_safe();
+    let ownership = match read_claim() {
+        Ok(Claim::Unowned) => CapsOwnership::Unowned,
+        Ok(Claim::Pending(_)) => CapsOwnership::Pending,
+        Ok(Claim::Held(_)) => CapsOwnership::Held,
+        Err(error) => {
+            tracing::warn!(%error, "could not read Caps Lock ownership for diagnostics");
+            CapsOwnership::Unknown
+        }
+    };
+    let status = live_status();
+    CapsDiagnostics {
+        ownership,
+        mapping_active: status.proxy_active,
+        reconciled: status.reconciled,
     }
 }
 

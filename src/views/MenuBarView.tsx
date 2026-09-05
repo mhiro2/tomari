@@ -15,13 +15,13 @@ import { useSettings } from '../lib/settings';
 import type { MenuBarInventory, MenuBarItem, MenuBarItemZone, MenuBarStatus } from '../lib/types';
 
 const AUTO_COLLAPSE_CHOICES = [0, 5, 15, 30] as const;
-type MenuBarTab = 'items' | 'behavior';
+export type MenuBarTab = 'items' | 'behavior';
 type MoveFailure = { kind: 'stale' | 'failed'; itemName: string };
 
-export function MenuBarView() {
+export function MenuBarView({ initialTab = 'items' }: { initialTab?: MenuBarTab }) {
   const t = useT();
   const { settings, update } = useSettings();
-  const [tab, setTab] = useState<MenuBarTab>('items');
+  const [tab, setTab] = useState<MenuBarTab>(initialTab);
   const [collapsed, setCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
   const [inventory, setInventory] = useState<MenuBarInventory | null>(null);

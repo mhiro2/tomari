@@ -13,6 +13,7 @@ const en = {
   'app.nav.menubar': 'Menu Bar',
   'app.nav.session': 'Prevent Sleep',
   'app.nav.general': 'General',
+  'app.nav.health': 'Diagnostics',
   'app.sections': 'Sections',
   'app.tools': 'Tools',
   'app.app': 'App',
@@ -471,6 +472,106 @@ const en = {
   'settings.applyWarning.commandImeRules':
     'The Command-key IME switch was saved but could not be applied to the live keyboard. Toggle it off and on to try again.',
   'settings.applyWarning.generic': 'A setting was saved but could not be applied to the system.',
+
+  'health.title': 'Diagnostics',
+  'health.pageDescription':
+    'Check that each Tomari feature is working and that macOS has granted what it needs.',
+  'health.reading': 'Reading live system health…',
+  'health.loadFailed': 'Could not read diagnostics: {error}',
+  'health.allReady': 'No health issues detected',
+  'health.needsAttention': '{count} items need action',
+  'health.needsAttentionOne': '1 item needs action',
+  'health.pendingSummary': '{count} health checks are in progress',
+  'health.pendingSummaryOne': '1 health check is in progress',
+  'health.snapshotMeta': 'Tomari {version} · {architecture} · checked just now',
+  'health.refreshFailed': 'Refresh failed; showing the previous snapshot: {error}',
+  'health.refreshing': 'Refreshing…',
+  'health.tone.ready': 'Ready',
+  'health.tone.attention': 'Action needed',
+  'health.tone.pending': 'In progress',
+  'health.tone.inactive': 'Off',
+  'health.group.input': 'Keyboard and mouse',
+  'health.group.system': 'System',
+  'health.group.support': 'Support',
+  'health.permissions': 'macOS permissions',
+  'health.permissionsGranted': 'Accessibility and Input Monitoring are granted.',
+  'health.permissionsMissingBoth':
+    'Accessibility and Input Monitoring are not granted. Open Setup to grant them.',
+  'health.permissionsMissingAccessibility':
+    'Accessibility is not granted. Open Setup to grant it in System Settings.',
+  'health.permissionsMissingInputMonitoring':
+    'Input Monitoring is not granted. Open Setup to grant it in System Settings.',
+  'health.tap.keyboard': 'Keyboard monitoring',
+  'health.tap.dragToSnap': 'Drag-to-snap monitoring',
+  'health.tap.dragToMove': 'Drag-to-move monitoring',
+  'health.tapOff': 'Turned off in its settings.',
+  'health.tapRunning': 'Running.',
+  'health.tapCounters':
+    'Restarted {restarts} times · paused by macOS {disables} times · recovered {recoveries} times',
+  'health.tapState.stopped': 'The feature is on, but Tomari is not receiving input for it.',
+  'health.tapState.starting': 'Starting up. Refresh in a moment.',
+  'health.tapState.disabledByTimeout': 'macOS paused input monitoring. Tomari is restarting it.',
+  'health.tapState.permissionDenied': 'Input Monitoring is not granted. Open Setup to grant it.',
+  'health.tapState.failed':
+    'Input monitoring could not start. Turn the feature off and on again in its settings.',
+  'health.capsLock': 'Caps Lock remap',
+  'health.capsHeld': 'Caps Lock is remapped and working.',
+  'health.capsOff': 'Caps Lock is not remapped.',
+  'health.capsPending': 'Applying the Caps Lock setting. Wait, then refresh.',
+  'health.capsUnknown':
+    'Tomari cannot confirm which app controls Caps Lock right now. Open Modifier Keys.',
+  'health.capsMismatch': 'Caps Lock is not behaving as configured. Open Modifier Keys.',
+  'health.shortcuts': 'Global shortcuts',
+  'health.shortcutsOff': 'Keyboard customization is off.',
+  'health.shortcutsRegistered': '{registered} shortcuts registered.',
+  'health.shortcutsRegisteredOne': '1 shortcut registered.',
+  'health.shortcutsInvalid':
+    '{invalid} saved shortcuts could not be loaded. Open Shortcuts to review them.',
+  'health.shortcutsConflict':
+    'Some shortcuts could not be registered. Another app may be using the same keys; {registered} are active.',
+  'health.menuBar': 'Menu Bar organization',
+  'health.menuBarOff': 'Menu Bar organization is off.',
+  'health.menuBarReady': 'Accessibility is granted and the Menu Bar divider is in place.',
+  'health.menuBarUnsupported':
+    'Menu Bar organization is not supported in this environment, so it stays off.',
+  'health.menuBarPermissionMissing':
+    'Accessibility permission is required to organize Menu Bar items. Open Setup to grant it.',
+  'health.menuBarDividerMissing':
+    'Tomari cannot find its Menu Bar divider. Open Menu Bar Settings to restore it.',
+  'health.keepAwake': 'Prevent Sleep',
+  'health.keepAwake.off': 'Prevent Sleep is off.',
+  'health.keepAwake.on': 'Prevent Sleep is on and your Mac will stay awake.',
+  'health.keepAwake.enabling': 'Prevent Sleep is being enabled. Wait, then refresh.',
+  'health.keepAwake.disabling': 'Prevent Sleep is being disabled. Wait, then refresh.',
+  'health.keepAwake.failed': 'Prevent Sleep could not be applied. Open its settings and try again.',
+  'health.keepAwake.residual':
+    'Prevent Sleep is off, but your Mac may still be kept awake. Open its settings.',
+  'health.keepAwake.mismatch':
+    'Prevent Sleep is not behaving as configured. Open its settings and apply it again.',
+  'health.database': 'Saved data',
+  'health.databaseReady': 'Your saved data is up to date and intact.',
+  'health.databaseFailed': 'Your saved data may be damaged. Export a support bundle.',
+  'health.databaseOutdated':
+    'Your saved data is in an older format than this version expects. Export a support bundle.',
+  'health.databaseUnavailable':
+    'Your saved data could not be checked. Export a support bundle for troubleshooting.',
+  'health.updates': 'Update verification',
+  'health.updateSignatureReady': 'Updates are verified as genuine before they are installed.',
+  'health.updateSignatureMissing':
+    'This build cannot verify that updates are genuine. Export a support bundle.',
+  'health.action.permissions': 'Open Setup',
+  'health.action.modifiers': 'Open Modifier Keys',
+  'health.action.windowMouse': 'Open Mouse Settings',
+  'health.action.shortcuts': 'Open Shortcuts',
+  'health.action.menuBar': 'Open Menu Bar Settings',
+  'health.action.keepAwake': 'Open Prevent Sleep',
+  'health.supportBundle': 'Support bundle',
+  'health.supportBundleDescription':
+    'Saves this report to a file you can share with support. It does not include what you typed, your shortcuts, menu bar item names, your saved data, error details, or file paths.',
+  'health.export': 'Export Support Bundle',
+  'health.exporting': 'Exporting…',
+  'health.exported': 'Support bundle saved',
+  'health.exportFailed': 'Could not export the support bundle: {error}',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -481,6 +582,7 @@ const ja: Record<MessageKey, string> = {
   'app.nav.menubar': 'メニューバー',
   'app.nav.session': 'スリープ防止',
   'app.nav.general': '一般',
+  'app.nav.health': '診断',
   'app.sections': 'セクション',
   'app.tools': 'ツール',
   'app.app': 'アプリ',
@@ -940,6 +1042,109 @@ const ja: Record<MessageKey, string> = {
   'settings.applyWarning.commandImeRules':
     'Command キーでの IME 切り替えは保存しましたが、動作中のキーボードに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
   'settings.applyWarning.generic': '設定は保存しましたが、システムに適用できませんでした。',
+
+  'health.title': '診断',
+  'health.pageDescription':
+    'Tomari の各機能が正しく動作しているか、必要な macOS の権限がそろっているかを確認します。',
+  'health.reading': 'システムの状態を確認しています…',
+  'health.loadFailed': '診断情報を読み取れませんでした: {error}',
+  'health.allReady': '問題は検出されませんでした',
+  'health.needsAttention': '{count} 件の対応が必要です',
+  'health.needsAttentionOne': '1 件の対応が必要です',
+  'health.pendingSummary': '{count} 件を処理しています',
+  'health.pendingSummaryOne': '1 件を処理しています',
+  'health.snapshotMeta': 'Tomari {version} · {architecture} · 今確認した状態',
+  'health.refreshFailed': '更新に失敗したため、直前の状態を表示しています: {error}',
+  'health.refreshing': '更新中…',
+  'health.tone.ready': '正常',
+  'health.tone.attention': '対応が必要',
+  'health.tone.pending': '処理中',
+  'health.tone.inactive': 'オフ',
+  'health.group.input': 'キーボードとマウス',
+  'health.group.system': 'システム',
+  'health.group.support': 'サポート',
+  'health.permissions': 'macOS の権限',
+  'health.permissionsGranted': 'アクセシビリティと入力監視は許可されています。',
+  'health.permissionsMissingBoth':
+    'アクセシビリティと入力監視が許可されていません。セットアップから許可してください。',
+  'health.permissionsMissingAccessibility':
+    'アクセシビリティが許可されていません。セットアップからシステム設定を開いてください。',
+  'health.permissionsMissingInputMonitoring':
+    '入力監視が許可されていません。セットアップからシステム設定を開いてください。',
+  'health.tap.keyboard': 'キーボードの監視',
+  'health.tap.dragToSnap': 'ドラッグスナップの監視',
+  'health.tap.dragToMove': 'ドラッグ移動の監視',
+  'health.tapOff': '設定でオフになっています。',
+  'health.tapRunning': '動作しています。',
+  'health.tapCounters':
+    '再開 {restarts} 回 · macOS による停止 {disables} 回 · 復旧 {recoveries} 回',
+  'health.tapState.stopped': '機能はオンですが、Tomari が入力を受け取れていません。',
+  'health.tapState.starting': '起動しています。少し待ってから更新してください。',
+  'health.tapState.disabledByTimeout':
+    'macOS により入力の監視が停止されました。Tomari が再開しています。',
+  'health.tapState.permissionDenied':
+    '入力監視が許可されていません。セットアップから許可してください。',
+  'health.tapState.failed':
+    '入力の監視を開始できませんでした。設定で機能をオフにしてから、もう一度オンにしてください。',
+  'health.capsLock': 'Caps Lock の割り当て',
+  'health.capsHeld': 'Caps Lock の割り当ては有効で、正しく動作しています。',
+  'health.capsOff': 'Caps Lock の割り当ては変更されていません。',
+  'health.capsPending': 'Caps Lock の割り当てを反映しています。少し待ってから更新してください。',
+  'health.capsUnknown':
+    'Caps Lock を現在どのアプリが制御しているか確認できません。修飾キー設定を開いてください。',
+  'health.capsMismatch': 'Caps Lock が設定どおりに動作していません。修飾キー設定を開いてください。',
+  'health.shortcuts': 'グローバルショートカット',
+  'health.shortcutsOff': 'キーボードのカスタマイズはオフです。',
+  'health.shortcutsRegistered': '{registered} 件のショートカットを登録しています。',
+  'health.shortcutsRegisteredOne': '1 件のショートカットを登録しています。',
+  'health.shortcutsInvalid':
+    '保存済みショートカットのうち {invalid} 件を読み込めませんでした。ショートカット設定で確認してください。',
+  'health.shortcutsConflict':
+    '一部のショートカットを登録できませんでした。他のアプリとキーが競合している可能性があります（{registered} 件は有効）。',
+  'health.menuBar': 'メニューバーの整理',
+  'health.menuBarOff': 'メニューバーの整理はオフです。',
+  'health.menuBarReady': 'アクセシビリティは許可され、メニューバーの区切りも配置されています。',
+  'health.menuBarUnsupported':
+    'この環境ではメニューバーの整理機能を利用できないため、オフのままです。',
+  'health.menuBarPermissionMissing':
+    'メニューバーを整理するにはアクセシビリティ権限が必要です。セットアップから許可してください。',
+  'health.menuBarDividerMissing':
+    'Tomari のメニューバー区切りを確認できません。メニューバー設定から復元してください。',
+  'health.keepAwake': 'スリープ防止',
+  'health.keepAwake.off': 'スリープ防止はオフです。',
+  'health.keepAwake.on': 'スリープ防止はオンで、Mac はスリープしません。',
+  'health.keepAwake.enabling': 'スリープ防止を有効にしています。完了後に更新してください。',
+  'health.keepAwake.disabling': 'スリープ防止を無効にしています。完了後に更新してください。',
+  'health.keepAwake.failed': 'スリープ防止を適用できませんでした。設定を開いて再試行してください。',
+  'health.keepAwake.residual':
+    'スリープ防止はオフですが、Mac がスリープしない状態のまま残っている可能性があります。スリープ防止設定を開いてください。',
+  'health.keepAwake.mismatch':
+    'スリープ防止が設定どおりに動作していません。設定を開いて再適用してください。',
+  'health.database': '保存されたデータ',
+  'health.databaseReady': '保存されたデータは最新の形式で、破損もありません。',
+  'health.databaseFailed':
+    '保存されたデータが破損している可能性があります。サポートバンドルを出力してください。',
+  'health.databaseOutdated':
+    '保存されたデータが、このバージョンより古い形式のままです。サポートバンドルを出力してください。',
+  'health.databaseUnavailable':
+    '保存されたデータの状態を確認できませんでした。調査用のサポートバンドルを出力してください。',
+  'health.updates': 'アップデートの検証',
+  'health.updateSignatureReady': 'アップデートはインストール前に、正規のものかどうか検証されます。',
+  'health.updateSignatureMissing':
+    'このビルドではアップデートが正規のものかどうか検証できません。サポートバンドルを出力してください。',
+  'health.action.permissions': 'セットアップを開く',
+  'health.action.modifiers': '修飾キー設定を開く',
+  'health.action.windowMouse': 'マウス設定を開く',
+  'health.action.shortcuts': 'ショートカットを開く',
+  'health.action.menuBar': 'メニューバー設定を開く',
+  'health.action.keepAwake': 'スリープ防止を開く',
+  'health.supportBundle': 'サポートバンドル',
+  'health.supportBundleDescription':
+    'この診断結果を、サポートに共有できるファイルとして保存します。入力した内容、ショートカット設定、メニューバーの項目名、保存されたデータ、エラーの詳細、ファイルパスは含みません。',
+  'health.export': 'サポートバンドルを出力',
+  'health.exporting': '出力中…',
+  'health.exported': 'サポートバンドルを保存しました',
+  'health.exportFailed': 'サポートバンドルを出力できませんでした: {error}',
 };
 
 export type Lang = 'en' | 'ja';

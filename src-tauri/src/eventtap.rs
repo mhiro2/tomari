@@ -125,9 +125,10 @@ pub fn restart_result(app: &AppHandle) -> bool {
         return true;
     };
     let mut guard = EVENT_TAP.lock_safe();
+    let enabled = state.settings.lock_safe().keyboard_tap_enabled();
     // Published before the old tap goes down, so no reader sees `Healthy` over
     // a tap being torn down; also retires the old callback's generation.
-    HEALTH.begin_start();
+    HEALTH.begin_start(enabled);
     *guard = None; // Drop stops the previous tap.
     // The engine's hold state is dropped below and the remap reconciled right
     // here, so a reconcile put off for a Caps Lock hold has nothing to wait for.
@@ -151,7 +152,7 @@ pub fn restart_result(app: &AppHandle) -> bool {
         let _ = crate::capsmap::reconcile(manage);
     };
 
-    if !state.keyboard_enabled() {
+    if !enabled {
         HEALTH.set(TapHealth::Stopped);
         // Feature off: take the Caps Lock HID remap down along with the tap.
         reconcile_caps(false);
@@ -276,6 +277,10 @@ pub fn is_running() -> bool {
         HEALTH.state(),
         TapHealth::Healthy | TapHealth::DisabledByTimeout
     )
+}
+
+pub fn health_snapshot() -> crate::tap::TapHealthSnapshot {
+    HEALTH.snapshot()
 }
 
 /// Reconcile the Caps Lock HID remap (and the F18 proxy flag) with the current

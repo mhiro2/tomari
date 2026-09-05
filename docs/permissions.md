@@ -19,6 +19,15 @@ reopens Setup. Individual Windows, Keyboard, and Menu Bar pages do not repeat
 permission banners. Their settings remain visible, and the backend still
 reports a permission error if an action requiring a missing grant is attempted.
 
+The **Diagnostics** section provides the deeper read-only view: it shows both
+permission bits beside the health of the event taps and other macOS integrations.
+When a grant is missing, its action opens Setup, where the corresponding macOS
+System Settings pane can be opened directly.
+Its exported support bundle contains only status, version, and aggregate-count
+fields. Raw keyboard/pointer input, menu bar Accessibility labels, process
+details, configured shortcuts and actions, database rows, error text, and
+filesystem paths are excluded by construction.
+
 The administrator password for Prevent Sleep is deliberately not on the
 checklist — it is asked for each time rather than granted once (see below).
 

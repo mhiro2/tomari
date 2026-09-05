@@ -156,6 +156,80 @@ export interface ConfigurationWarnings {
   revision: number;
 }
 
+export type DiagnosticTapKind = 'keyboard' | 'dragToSnap' | 'dragToMove';
+export type DiagnosticTapState =
+  | 'stopped'
+  | 'starting'
+  | 'healthy'
+  | 'disabledByTimeout'
+  | 'permissionDenied'
+  | 'failed';
+export type CapsOwnership = 'unowned' | 'pending' | 'held' | 'unknown';
+
+export interface DiagnosticsSnapshot {
+  generatedAtMs: number;
+  app: {
+    version: string;
+    os: string;
+    architecture: string;
+  };
+  permissions: {
+    accessibility: boolean;
+    inputMonitoring: boolean;
+  };
+  taps: Array<{
+    kind: DiagnosticTapKind;
+    enabled: boolean;
+    state: DiagnosticTapState;
+    restartCount: number;
+    disableCount: number;
+    recoveryCount: number;
+  }>;
+  capsLock: {
+    ownership: CapsOwnership;
+    mappingActive: boolean;
+    reconciled: boolean;
+  };
+  shortcuts: {
+    enabled: boolean;
+    registrationIncomplete: boolean;
+    registeredCount: number;
+    invalidCount: number;
+  };
+  menuBar: {
+    enabled: boolean;
+    supported: boolean;
+    permissionGranted: boolean;
+    dividerAvailable: boolean;
+  };
+  keepAwake: {
+    active: boolean;
+    phase: KeepAwakePhase;
+    markerPresent: boolean;
+    kernelSleepDisabled: boolean | null;
+    ownsLidClose: boolean;
+  };
+  database: {
+    integrityOk: boolean;
+    schemaVersion: number;
+    latestSchemaVersion: number;
+  } | null;
+  updater: {
+    signatureConfigured: boolean;
+  };
+  privacy: {
+    rawInputIncluded: false;
+    accessibilityLabelsIncluded: false;
+    processDetailsIncluded: false;
+    filesystemPathsIncluded: false;
+  };
+}
+
+export interface SupportBundleExport {
+  path: string;
+  generatedAtMs: number;
+}
+
 export interface AppSettings {
   launchAtLogin: boolean;
   language: Language;

@@ -3,6 +3,31 @@
 A detailed look at everything Tomari can do. For a quick overview, see the
 [README](../README.md).
 
+## Diagnostics
+
+The **Diagnostics** section reads a fresh, read-only snapshot of every runtime
+boundary that can leave stored settings out of step with macOS: Accessibility
+and Input Monitoring, each event tap's state and restart/disable/recovery
+counters, the Caps Lock HID claim, global shortcut registration, Menu Bar
+Accessibility availability, Prevent Sleep's marker and kernel state, SQLite
+integrity and migration status, and updater signature configuration. Features that
+are deliberately switched off are shown as inactive rather than failed.
+Actionable failures explain the likely cause and link directly to the relevant
+Setup dialog or settings tab. Transient startup and shutdown states are shown
+as in progress and do not ask the user to intervene.
+
+Diagnostics never performs a Menu Bar Accessibility inventory scan. It reads
+only cached divider and permission state, leaving item IDs and the visible menu
+bar untouched; full inventory refreshes happen only from the Menu Bar settings
+screen.
+
+**Export Support Bundle** writes the same snapshot as versioned JSON under
+Tomari's per-user data directory. The bundle contains state names, booleans,
+versions, and aggregate counts only. It never includes key or pointer events,
+shortcut accelerators or labels, Accessibility labels, process names or PIDs,
+configured bindings or actions, database rows, error strings, or filesystem
+paths.
+
 ## Keyboard
 
 The **Keyboard** settings separate the two kinds of configuration into

@@ -6,6 +6,7 @@ mod capsmap;
 mod childproc;
 mod commands;
 mod configuration_warnings;
+mod diagnostics;
 #[cfg(target_os = "macos")]
 mod displays;
 #[cfg(target_os = "macos")]
@@ -145,6 +146,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::get_configuration_warnings,
+            commands::get_diagnostics,
+            commands::export_support_bundle,
             commands::retry_settings_recovery,
             commands::reset_settings_recovery,
             commands::save_settings,
