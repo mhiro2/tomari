@@ -90,7 +90,7 @@ export async function installDevPreview() {
   };
   const diagnostics: DiagnosticsSnapshot = {
     generatedAtMs: Date.now(),
-    app: { version: '0.0.1', os: 'macos', architecture: 'aarch64' },
+    app: { version: '0.0.2', os: 'macos', architecture: 'aarch64' },
     permissions: {
       accessibility: !permissionsMissing,
       inputMonitoring: !permissionsMissing,
@@ -417,7 +417,7 @@ export async function installDevPreview() {
         return { outcome, inventory: menuItems };
       }
       case 'plugin:app|version':
-        return '0.0.1';
+        return '0.0.2';
       default:
         return null;
     }
