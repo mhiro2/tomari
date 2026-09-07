@@ -39,21 +39,56 @@
 //! not turn any of those into a hang.
 //!
 //! Past a deadline the thread is *detached* rather than waited on, which means
-//! its `CGEventTap` can still be live when the next one starts. Two taps
+//! its `CGEventTap` can still exist when the next one starts. Two taps
 //! handling the same input would be worse than one late tap, so every tap
-//! carries a liveness flag: [`RunningTap::drop`] clears it before it stops the
-//! run loop, and the wrapper around the callback returns early once it is clear.
-//! A detached tap therefore still exists but handles nothing further — every
-//! event it has not already started on passes through untouched until its thread
-//! returns. An event it *had* started on runs to completion and its verdict
-//! stands: its side effects are already committed, so discarding only the
-//! verdict would hand the app an event whose consequences had happened anyway.
+//! carries a liveness flag: [`RunningTap::drop`] clears it (and disables the
+//! tap, see below) before it stops the run loop, and the wrapper around the
+//! callback returns early once it is clear. A detached tap therefore still
+//! exists but handles nothing further — the window server routes nothing more
+//! to it, and anything it had already been sent is answered untouched. An event
+//! it *had* started on runs to completion and its verdict stands: its side
+//! effects are already committed, so discarding only the verdict would hand the
+//! app an event whose consequences had happened anyway.
 //!
 //! The startup handshake takes the same care: the caller's deadline and the
 //! thread's hand-over go through one mutex, so a run loop that starts at the
 //! very moment the caller gives up is told to stop rather than left running
 //! with nobody holding it — and its liveness flag is cleared too, since no
 //! `RunningTap` will ever exist to do that later.
+//!
+//! ## Disable first, drain, then let the port go
+//!
+//! Stopping the run loop is not the same as stopping the tap. Until
+//! `CGEventTapEnable(false)` is called the window server keeps routing events
+//! to the tap's mach port, and once the loop has stopped nothing dequeues them.
+//! Dropping the `CGEventTap` then invalidates the port with those events still
+//! queued on it — and the window server does not simply pass them on. Measured
+//! on macOS 26: an event queued that way is held back until the port dies, and
+//! only part of the queue continues down the pipeline then; the rest surfaces
+//! seconds later, when the *next* tap is created, in front of whatever the user
+//! is doing by then. While the queue is held, other processes' tap calls (even
+//! `CGEventTapIsEnabled`) block inside the window server too. With the tap
+//! disabled first, an event posted into the same window passes at once, as if
+//! no tap existed. A press whose release goes missing or arrives late leaves
+//! the window server believing a drag is still in progress — with the trackpad's
+//! three-finger drag that showed up as three- and four-finger gestures not
+//! working after a tap restart or quit, until the next real window drag
+//! supplied a fresh press and release. Every restart (settings save, wake,
+//! permission change, quit) tears a tap down, and under three-finger drag the
+//! pointer stream is dense enough for the tiny stop→invalidate window to be hit
+//! now and then.
+//!
+//! So teardown runs in this order: retire the callback (`live`), *disable* the
+//! tap so the window server routes nothing further to it, stop the run loop,
+//! and — on the tap thread, after `CFRunLoopRun` returns — drain whatever the
+//! port still holds ([`drain_queued_events`]) so every queued event is answered,
+//! in order, before the port is invalidated. The retired callback answers each
+//! with `Keep`, so the drain can neither drop nor rewrite anything; it runs
+//! until the port is idle, which a disabled tap's finite queue always reaches
+//! ([`DRAIN_GUARD`] exists only against a run loop that never idles, and
+//! reaching it is logged). The abandoned-startup path keeps the same invariant:
+//! both the caller that gave up and the run-loop-entry observer disable the
+//! tap, so whichever runs after the thread's own `enable` turns it off.
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -61,7 +96,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
-use core_foundation::runloop::{CFRunLoop, CFRunLoopObserver, kCFRunLoopCommonModes};
+use core_foundation::runloop::{
+    CFRunLoop, CFRunLoopObserver, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+};
 use core_foundation_sys::mach_port::CFMachPortRef;
 use core_foundation_sys::runloop::{
     CFRunLoopActivity, CFRunLoopObserverContext, CFRunLoopObserverCreate, CFRunLoopObserverRef,
@@ -96,10 +133,20 @@ const STOP_DEADLINE: Duration = Duration::from_secs(2);
 /// perceptibly delayed, long enough not to spin.
 const JOIN_POLL: Duration = Duration::from_millis(5);
 
+/// A guard on the drain that runs after a tap's run loop has stopped. The drain
+/// ends on the first pass that finds nothing queued, and with the tap disabled
+/// the queue is finite — a dense pointer stream leaves at most a handful of
+/// events in the microseconds the window is open, each answered in
+/// microseconds — so this is never reached by events. It only stops a run loop
+/// that somehow never idles from holding teardown forever, and hitting it is
+/// logged as the anomaly it would be. See the module doc comment.
+const DRAIN_GUARD: Duration = Duration::from_secs(2);
+
 /// A running event tap: the run loop it is attached to (so it can be stopped),
-/// the thread driving it, and the flag that makes its callback inert. Shared by
-/// all three taps; dropping it stops the run loop and joins the thread —
-/// bounded by [`STOP_DEADLINE`] — invalidating the tap.
+/// the thread driving it, the mach port (so it can be disabled), and the flag
+/// that makes its callback inert. Shared by all three taps; dropping it
+/// disables the tap, stops the run loop and joins the thread — bounded by
+/// [`STOP_DEADLINE`] — which drains and invalidates the tap.
 pub struct RunningTap {
     label: &'static str,
     run_loop: CFRunLoop,
@@ -107,6 +154,9 @@ pub struct RunningTap {
     /// Cleared on the way down so a thread that outlives its bounded join
     /// stops handling events. See the module doc comment.
     live: Arc<AtomicBool>,
+    /// The tap's mach port, published by the tap thread once the tap exists
+    /// (the same holder the callback uses for [`reenable`]).
+    port: Arc<AtomicUsize>,
 }
 
 impl Drop for RunningTap {
@@ -116,11 +166,19 @@ impl Drop for RunningTap {
         // concerned — this is what keeps it from handling input alongside the
         // tap that replaces it.
         self.live.store(false, Ordering::SeqCst);
+        // Disable the tap before the run loop stops, so the window server routes
+        // nothing further to a port nobody is about to read. What it has already
+        // sent is drained by the tap thread on its way out (see the module doc
+        // comment). Retiring first matters: disabling delivers a
+        // `TapDisabledByUserInput` notification, and a live callback would
+        // answer it by re-enabling the tap.
+        disable(&self.port);
         // Stopping the run loop makes `CFRunLoopRun` return; the thread then
-        // drops the tap (invalidating it) and exits. Safe to call unconditionally
-        // because `spawn` only ever hands out a `RunningTap` whose run loop has
-        // already entered `CFRunLoopRun` (see the module doc comment) — so this
-        // `stop()` is never a no-op racing against a not-yet-running loop.
+        // drains and drops the tap (invalidating it) and exits. Safe to call
+        // unconditionally because `spawn` only ever hands out a `RunningTap`
+        // whose run loop has already entered `CFRunLoopRun` (see the module doc
+        // comment) — so this `stop()` is never a no-op racing against a
+        // not-yet-running loop.
         self.run_loop.stop();
         if let Some(handle) = self.thread.take() {
             join_bounded(handle, self.label, STOP_DEADLINE);
@@ -168,6 +226,49 @@ pub fn reenable(port_holder: &AtomicUsize) -> bool {
     // that leads here); `CGEventTapEnable` is safe to call from any thread.
     unsafe { CGEventTapEnable(port, true) };
     true
+}
+
+/// Disable a tap so the window server routes no further events to its port —
+/// the first step of teardown (see the module doc comment). A no-op if the port
+/// has not been published (the tap never came up). Idempotent.
+fn disable(port_holder: &AtomicUsize) {
+    let port = port_holder.load(Ordering::SeqCst) as CFMachPortRef;
+    if port.is_null() {
+        return;
+    }
+    // Safety: as in `reenable` — the port belongs to a `CGEventTap` the tap
+    // thread keeps alive until after its run loop has returned, which cannot
+    // happen before `RunningTap::drop` (the only other caller) has run this.
+    unsafe { CGEventTapEnable(port, false) };
+}
+
+/// Answer every event still queued on the current thread's tap port. Run on the
+/// tap thread after its run loop has stopped and the tap has been disabled, so
+/// nothing new can arrive: each pass through the loop dequeues one message and
+/// the retired callback answers it with `Keep`. Returns once a pass finds
+/// nothing to handle — the queue is finite, so this is when it is empty — with
+/// [`DRAIN_GUARD`] as the only other exit. Returns how many were drained.
+fn drain_queued_events(tap_label: &str) -> usize {
+    let give_up_at = Instant::now() + DRAIN_GUARD;
+    let mut drained = 0;
+    loop {
+        // Safety: `kCFRunLoopDefaultMode` is a valid static mode name.
+        let result = CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::ZERO, true);
+        if result != CFRunLoopRunResult::HandledSource {
+            break;
+        }
+        drained += 1;
+        if Instant::now() >= give_up_at {
+            tracing::warn!(
+                tap = tap_label,
+                drained,
+                "a disabled tap's run loop kept handling sources past the drain guard; \
+                 invalidating its port anyway"
+            );
+            break;
+        }
+    }
+    drained
 }
 
 /// Where a tap stands, as a state rather than the presence of a handle. A
@@ -449,26 +550,20 @@ pub fn spawn<F>(
 where
     F: FnOnce(Arc<AtomicUsize>) -> TapCallback + Send + 'static,
 {
-    let handshake = Arc::new(Handshake::default());
-    let live = Arc::new(AtomicBool::new(true));
-    let thread = {
-        let handshake = Arc::clone(&handshake);
-        let live = Arc::clone(&live);
-        std::thread::Builder::new()
-            .name(thread_name.into())
-            .spawn(move || {
-                run_tap(
-                    tap_label,
-                    placement,
-                    options,
-                    events,
-                    make_callback,
-                    &handshake,
-                    live,
-                )
-            })
-            .map_err(|e| e.to_string())?
+    let links = Links {
+        handshake: Arc::new(Handshake::default()),
+        live: Arc::new(AtomicBool::new(true)),
+        port: Arc::new(AtomicUsize::new(0)),
     };
+    let Links {
+        handshake,
+        live,
+        port,
+    } = links.clone();
+    let thread = std::thread::Builder::new()
+        .name(thread_name.into())
+        .spawn(move || run_tap(tap_label, placement, options, events, make_callback, links))
+        .map_err(|e| e.to_string())?;
 
     match handshake.wait(START_DEADLINE) {
         Startup::Running(run_loop) => Ok(RunningTap {
@@ -476,6 +571,7 @@ where
             run_loop,
             thread: Some(thread),
             live,
+            port,
         }),
         Startup::Failed(e) => {
             // The thread is already returning: it reported the failure instead
@@ -491,12 +587,29 @@ where
         // take and a tap handling input that nobody can turn off.
         Startup::Waiting | Startup::Abandoned => {
             live.store(false, Ordering::SeqCst);
+            // The thread may already have created and enabled the tap without
+            // reaching its run loop; disable it here if its port is published,
+            // and `on_run_loop_entry` disables it again when (if) the loop is
+            // entered — one of the two lands after the thread's own
+            // `enable`, so the window server does not keep routing input to a
+            // port nobody reads.
+            disable(&port);
             Err(format!(
                 "{tap_label} did not start within {} ms",
                 START_DEADLINE.as_millis()
             ))
         }
     }
+}
+
+/// What a tap thread and the [`RunningTap`] that owns it share: the startup
+/// hand-over, the liveness flag, and the holder the thread publishes its mach
+/// port into (so the handle can disable the tap, and the callback re-enable it).
+#[derive(Clone)]
+struct Links {
+    handshake: Arc<Handshake>,
+    live: Arc<AtomicBool>,
+    port: Arc<AtomicUsize>,
 }
 
 /// How far a starting tap thread has got, as the caller sees it.
@@ -560,6 +673,7 @@ impl Handshake {
 struct EntryContext {
     handshake: Arc<Handshake>,
     live: Arc<AtomicBool>,
+    port: Arc<AtomicUsize>,
 }
 
 extern "C" fn on_run_loop_entry(
@@ -583,6 +697,9 @@ extern "C" fn on_run_loop_entry(
         // and in the same place that learned it was abandoned, so there is no
         // window where a queued source could be handled by a tap with no owner.
         ctx.live.store(false, Ordering::SeqCst);
+        // And disable it, as `RunningTap::drop` would have: the caller's own
+        // disable may have run before this thread enabled the tap.
+        disable(&ctx.port);
         run_loop.stop();
     }
 }
@@ -593,12 +710,15 @@ fn run_tap<F>(
     options: CGEventTapOptions,
     events: Vec<CGEventType>,
     make_callback: F,
-    handshake: &Arc<Handshake>,
-    live: Arc<AtomicBool>,
+    links: Links,
 ) where
     F: FnOnce(Arc<AtomicUsize>) -> TapCallback + Send + 'static,
 {
-    let port_holder = Arc::new(AtomicUsize::new(0));
+    let Links {
+        handshake,
+        live,
+        port: port_holder,
+    } = links;
     let callback = make_callback(port_holder.clone());
 
     let callback_live = Arc::clone(&live);
@@ -661,8 +781,9 @@ fn run_tap<F>(
     // running — see the module doc comment for why sending it any earlier
     // would let a `stop()` race the loop's entry and go missing.
     let ctx = EntryContext {
-        handshake: Arc::clone(handshake),
+        handshake: Arc::clone(&handshake),
         live: Arc::clone(&live),
+        port: Arc::clone(&port_holder),
     };
     let mut observer_context = CFRunLoopObserverContext {
         version: 0,
@@ -690,9 +811,24 @@ fn run_tap<F>(
     run_loop.add_observer(&observer, unsafe { kCFRunLoopCommonModes });
 
     CFRunLoop::run_current();
-    // Run loop stopped: returning here drops the locals in reverse declaration
-    // order — `observer` (releasing it) before `ctx`, which is what keeps the
-    // observer from outliving the context its `info` points at, and `tap` last
+    // Run loop stopped. `RunningTap::drop` has disabled the tap already; the
+    // abandoned-startup path (`on_run_loop_entry`) has not, so disable here as
+    // well — idempotent — before draining, or the drain could chase a queue
+    // that keeps refilling. Then answer whatever the window server had already
+    // sent to the port, so that invalidating it below loses nothing (see the
+    // module doc comment).
+    disable(&port_holder);
+    let drained = drain_queued_events(tap_label);
+    if drained > 0 {
+        tracing::debug!(
+            tap = tap_label,
+            drained,
+            "answered events still queued on the tap port before invalidating it"
+        );
+    }
+    // Returning here drops the locals in reverse declaration order —
+    // `observer` (releasing it) before `ctx`, which is what keeps the observer
+    // from outliving the context its `info` points at, and `tap` last
     // (invalidating the port).
 }
 
@@ -852,6 +988,28 @@ mod tests {
         );
         // Let the thread go so it does not outlive the test.
         let _ = release.send(());
+    }
+
+    #[test]
+    fn draining_an_idle_port_returns_at_once() {
+        // Off the main thread, like the tap thread: a run loop with nothing
+        // queued must not be waited on until the deadline.
+        let handle = std::thread::spawn(|| {
+            let started = Instant::now();
+            let drained = drain_queued_events("test tap");
+            (drained, started.elapsed())
+        });
+        let (drained, elapsed) = handle.join().unwrap();
+        assert_eq!(drained, 0);
+        assert!(elapsed < DRAIN_GUARD, "nothing to drain: {elapsed:?}");
+    }
+
+    #[test]
+    fn disabling_an_unpublished_port_is_a_no_op() {
+        // The tap never came up (creation failed, or startup was abandoned
+        // before the port was published): there is nothing to disable, and
+        // `CGEventTapEnable` must not be handed a null port.
+        disable(&AtomicUsize::new(0));
     }
 
     #[test]

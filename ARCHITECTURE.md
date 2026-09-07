@@ -266,7 +266,7 @@ rather than closing it.
   `STOP_DEADLINE` for the thread to return. The callers are the settings save,
   the wake handler and quit, and a callback stuck in an OS call it cannot cancel
   must not turn any of those into a hang. Past a deadline the thread is
-  *detached*, so its `CGEventTap` can still be live when the next one starts —
+  *detached*, so its `CGEventTap` can still exist when the next one starts —
   which is why every tap carries a liveness flag that `RunningTap::drop` clears
   before stopping the run loop, and the wrapper around the callback returns
   early once it is clear. A detached tap still exists but handles nothing
@@ -276,6 +276,23 @@ rather than closing it.
   The startup hand-over and the caller's deadline go through one mutex, so a run
   loop that starts at the very moment the caller gives up is told to stop rather
   than left running with nobody holding it.
+- Teardown disables the tap before it stops the run loop, and the tap thread
+  drains its port before the tap is dropped. Stopping the loop alone leaves the
+  tap enabled: the window server keeps routing events to a port nobody reads,
+  and invalidating that port with events queued on it does not simply pass them
+  on — part of the queue is held back until the port dies and the rest surfaces
+  when the next tap is created, so a release could go missing or arrive late
+  and leave the window server believing a drag was still in progress (with
+  three-finger drag, this showed up as three- and four-finger trackpad gestures
+  not working after a restart or quit until the next real window drag). So
+  `RunningTap::drop` retires the callback, calls `CGEventTapEnable(false)`,
+  then stops the loop; after `CFRunLoopRun` returns, the thread answers every
+  event still queued (the retired callback returns them untouched, in order,
+  until the port is idle — a disabled tap's queue is finite, and the only other
+  exit is a logged guard against a run loop that never idles) and only then
+  lets the port go. A start the caller gave up on is disabled the same way,
+  from both the caller and the run-loop-entry observer, so the thread's own
+  `enable` cannot be the last word.
 
 Global shortcuts are a separate channel registered with Tauri's
 `global-shortcut` plugin (`shortcuts::register_all`). On fire, the handler
