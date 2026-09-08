@@ -2,10 +2,10 @@
   <img src="./assets/hero.jpg" alt="Tomari — Small macOS utilities. One quiet place." width="100%" />
 </p>
 
-Tomari gathers a handful of small macOS utilities under **a single menu bar
-icon**. Today it ships **keyboard customization**, **window management** and
-**menu bar tidying**, and it is built so that new tools can be added on the
-same foundation over time.
+<p align="center">
+  <b>Small macOS utilities under a single menu bar icon.</b><br/>
+  Keyboard customization, window management, menu bar tidying and keep awake — one quiet place, built to grow.
+</p>
 
 ## Features
 
