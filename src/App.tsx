@@ -218,10 +218,15 @@ function OperationalShell() {
     return () => {
       cancelled = true;
     };
+    // `setupAttempt` is the retry trigger: the body never reads it, but every
+    // bump has to re-run the pull.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [applyPermissionSnapshot, permissionListenerReady, setupAttempt]);
 
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0;
+    // The new section is what this effect reacts to; it only touches a ref.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [section]);
 
   useEffect(() => {

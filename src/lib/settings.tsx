@@ -131,6 +131,9 @@ function useConfigurationWarnings(settingsReady: boolean, recoveryRequired: Read
       revision.current = snapshot.revision;
       setWarnings(snapshot as ConfigurationWarnings);
     },
+    // The compiler infers `recoveryRequired.current` and would drop the ref,
+    // but it is a parameter here, so `react/exhaustive-deps` demands it.
+    // oxlint-disable-next-line react/preserve-manual-memoization
     [recoveryRequired],
   );
 
@@ -149,6 +152,8 @@ function useConfigurationWarnings(settingsReady: boolean, recoveryRequired: Read
         // Best effort. A panel-show retry or live event can still recover.
       }
     },
+    // Same parameter ref as above.
+    // oxlint-disable-next-line react/preserve-manual-memoization
     [applySnapshot, recoveryRequired, settingsReady],
   );
 
@@ -334,6 +339,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
+    // `loadAttempt` is the retry trigger, as in the permission pull.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [applySettings, loadAttempt, refreshApplyWarnings, requireSettingsRecovery]);
 
   const retryLoad = useCallback(() => {

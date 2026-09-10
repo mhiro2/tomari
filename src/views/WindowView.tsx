@@ -289,6 +289,8 @@ export function WindowView({
   });
 
   useEffect(() => {
+    // Every update this fires off lands after an await, not synchronously.
+    // oxlint-disable-next-line react/set-state-in-effect
     refreshForPanelFocus();
     void api
       .listHotkeys()
