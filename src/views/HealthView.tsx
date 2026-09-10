@@ -65,6 +65,8 @@ export function HealthView({ onNavigate, onOpenPermissions }: Navigation = {}) {
   }, []);
 
   useEffect(() => {
+    // The first read runs the same path as the retry button, busy flag and all.
+    // oxlint-disable-next-line react/set-state-in-effect
     void refresh();
     return () => {
       requestGeneration.current += 1;

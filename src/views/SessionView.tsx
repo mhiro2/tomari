@@ -120,7 +120,7 @@ export function SessionView() {
   const [timerMode, setTimerMode] = useState<TimerMode>('never');
   const [customTime, setCustomTime] = useState('');
   const [draftOptions, setDraftOptions] = useState(DEFAULT_OPTIONS);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   const [eventStreamAvailable, setEventStreamAvailable] = useState<boolean | null>(null);
   // Highest revision applied so far. Several backend threads emit, each
   // snapshotting before it emits, so an older snapshot can still arrive last.
@@ -236,6 +236,8 @@ export function SessionView() {
 
   useEffect(() => {
     if (!status?.active || status.options.endsAtMs === null) return;
+    // A new deadline must not show a second left over from the old one.
+    // oxlint-disable-next-line react/set-state-in-effect
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);

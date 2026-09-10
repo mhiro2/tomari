@@ -1162,7 +1162,12 @@ without permissions too (unit tests).
   rustfmt / oxfmt for formatting, tsc for type checking, cargo-deny for
   dependency auditing. `make check` runs the whole local suite. oxlint also
   loads React Doctor's rules (`oxlint-plugin-react-doctor`) via
-  `.oxlintrc.react-doctor.json`.
+  `.oxlintrc.react-doctor.json`. The React Compiler rules oxlint enables on its
+  own all stay at error; the handful of places that cannot satisfy them carry
+  an `oxlint-disable-next-line` and the reason — an attempt counter that exists
+  only to re-run an effect, or a ref taken as a parameter, which
+  `react/exhaustive-deps` wants in the dependency array while the compiler
+  infers `.current` and would drop it.
 - **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macos),
   cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
   --debug`) that exercises the same `tauri.conf.json` bundle config a release
