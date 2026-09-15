@@ -716,7 +716,12 @@ and applies none of them.
   logging (stderr plus a daily-rotated file under `<data_dir>/logs`, seven days
   kept, each day soft-capped at 8 MiB by `logcap` — seeded from what an
   earlier run wrote that day; past the cap one notice is written and the rest
-  of the day's lines go to stderr only) → start the `InstanceCoordinator` (a
+  of the day's lines go to stderr only; writes are synchronous, so the
+  warnings a tap callback can reach *once per keypress* — the action-dispatch
+  path — are rate-limited to one every five seconds rather than writing a line
+  per press. Each carries the `suppressed` count of the lines that limit
+  dropped; the count names no causes and is lost if no further warning is
+  allowed before exit) → start the `InstanceCoordinator` (a
   launch that cannot acquire its lock performs authenticated hand-off and exits
   before touching the database) → open the DB and
   preflight the complete startup configuration → build either normal or

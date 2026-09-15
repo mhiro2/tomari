@@ -35,8 +35,9 @@
 //! tap's own event-posting needs the grant anyway. Polling cannot make the
 //! teardown instantaneous; it bounds how long the tap can outlive the grant.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use core_graphics::event::{
     CGEvent, CGEventField, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
@@ -96,6 +97,72 @@ static ACCESSIBILITY: AtomicBool = AtomicBool::new(false);
 /// Publish the current *Accessibility* grant for the tap callback to read.
 pub fn set_accessibility_granted(granted: bool) {
     ACCESSIBILITY.store(granted, Ordering::SeqCst);
+}
+
+/// How long one warning written from the tap callback silences the next.
+const HOT_PATH_WARN_INTERVAL_MS: u64 = 5_000;
+
+/// Monotonic origin for [`hot_path_warn_allowed`]. `Instant` cannot live in an
+/// atomic, so the timestamps below are milliseconds measured from here.
+static HOT_PATH_WARN_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// When the last warning was written from the tap callback; 0 for none yet.
+static LAST_HOT_PATH_WARN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Warnings dropped by [`hot_path_warn_allowed`] since the last one it let
+/// through, reported as a field on that next line.
+static SUPPRESSED_HOT_PATH_WARNS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a warning may be written from the tap callback right now, and if
+/// so how many were dropped since the last one that was.
+///
+/// Scope: the action-dispatch path ([`dispatch_tap_action`] and the queueing
+/// half of [`dispatch_on_main`]), which is the only warning site a callback
+/// can reach once per press. `tracing` writes to the log file synchronously
+/// and the conditions warned about there persist — a revoked *Accessibility*
+/// grant stays revoked, a rule whose accelerator has no keycode fails every
+/// time — so unguarded they write one line per press and delay input enough
+/// for the OS to disable the tap. The other warnings a callback can reach
+/// (a modifier that could not be released across a teardown, a deferred Caps
+/// Lock reconcile that could not be spawned) fire at most once per teardown
+/// or per Caps Lock release, so they are left direct.
+///
+/// A rate limit rather than a per-condition latch: a latch needs a "the
+/// condition cleared" signal the callback does not have. A keystroke that
+/// succeeds only says *that* rule works, not that a different broken rule was
+/// fixed, and tying one to the *Accessibility* mirror would need the grant and
+/// the latch to move as one state, which two atomics cannot do. Bounding the
+/// rate instead needs no such signal and keeps the first occurrence of
+/// anything immediate. What it costs: a one-off failure landing inside a busy
+/// interval is folded into the `suppressed` count instead of getting its own
+/// line, that count keeps no record of *what* was dropped, and if no further
+/// warning is allowed before the process exits it is never written at all.
+fn hot_path_warn_allowed() -> Option<u64> {
+    // `+ 1` keeps 0 reserved as the "nothing written yet" sentinel.
+    let now = HOT_PATH_WARN_EPOCH.elapsed().as_millis() as u64 + 1;
+    loop {
+        let last = LAST_HOT_PATH_WARN_MS.load(Ordering::Relaxed);
+        if !hot_path_warn_due(last, now) {
+            SUPPRESSED_HOT_PATH_WARNS.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        // Compare-exchange, not a plain store: `tap` lets a callback whose
+        // teardown deadline passed run alongside a fresh tap, so two threads
+        // can reach this at once. Only the one that claims the slot writes,
+        // which is what makes the interval an actual bound.
+        if LAST_HOT_PATH_WARN_MS
+            .compare_exchange_weak(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(SUPPRESSED_HOT_PATH_WARNS.swap(0, Ordering::Relaxed));
+        }
+    }
+}
+
+/// Pure half of [`hot_path_warn_allowed`]: whether `now_ms` is far enough past
+/// the last written warning (`last_ms`, 0 when none) to write another.
+fn hot_path_warn_due(last_ms: u64, now_ms: u64) -> bool {
+    last_ms == 0 || now_ms.saturating_sub(last_ms) >= HOT_PATH_WARN_INTERVAL_MS
 }
 
 /// Set when [`reconcile_caps_mapping`] was asked to change the Caps Lock HID
@@ -1011,7 +1078,12 @@ fn dispatch_tap_action(app: &AppHandle, proxy: CGEventTapProxy, action: AppActio
         return dispatch_on_main(app, action);
     }
     if !ACCESSIBILITY.load(Ordering::SeqCst) {
-        tracing::warn!("event-tap keystroke skipped: Accessibility permission not granted");
+        if let Some(suppressed) = hot_path_warn_allowed() {
+            tracing::warn!(
+                suppressed,
+                "event-tap keystroke skipped: Accessibility permission not granted"
+            );
+        }
         return;
     }
     let sink = crate::keysend::Sink::Tap(proxy);
@@ -1020,8 +1092,10 @@ fn dispatch_tap_action(app: &AppHandle, proxy: CGEventTapProxy, action: AppActio
         AppAction::SendKeystroke(accel) => crate::keysend::send_accelerator(accel, sink),
         _ => unreachable!("routed above"),
     };
-    if let Err(e) = posted {
-        tracing::warn!(error = %e, "event-tap keystroke action failed");
+    if let Err(e) = posted
+        && let Some(suppressed) = hot_path_warn_allowed()
+    {
+        tracing::warn!(error = %e, suppressed, "event-tap keystroke action failed");
     }
 }
 
@@ -1034,14 +1108,37 @@ fn dispatch_on_main(app: &AppHandle, action: AppAction) {
         {
             tracing::warn!(error = %e, "event-tap action failed");
         }
-    }) {
-        tracing::warn!(error = %e, "could not queue an event-tap action on the main thread");
+    }) && let Some(suppressed) = hot_path_warn_allowed()
+    {
+        // Rate-limited like the warnings above: this one is written from the
+        // callback too. The failure inside the closure is not — that runs on
+        // the main thread, where a synchronous write holds up no input.
+        tracing::warn!(error = %e, suppressed, "could not queue an event-tap action on the main thread");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_hot_path_warning_is_written() {
+        assert!(hot_path_warn_due(0, 1));
+    }
+
+    #[test]
+    fn a_hot_path_warning_inside_the_interval_is_dropped() {
+        assert!(!hot_path_warn_due(1_000, 1_000));
+        assert!(!hot_path_warn_due(
+            1_000,
+            1_000 + HOT_PATH_WARN_INTERVAL_MS - 1
+        ));
+    }
+
+    #[test]
+    fn a_hot_path_warning_past_the_interval_is_written_again() {
+        assert!(hot_path_warn_due(1_000, 1_000 + HOT_PATH_WARN_INTERVAL_MS));
+    }
 
     /// Keycode of a managed modifier on the given side (mirrors the tap's own
     /// `modifier_for_keycode` table).
