@@ -324,23 +324,21 @@ fn probe_persisted_configuration(state: &AppState) -> CmdResult<()> {
     Ok(())
 }
 
-// `async fn`: Tauri dispatches synchronous commands on the main thread, and
+// `off_main`: Tauri dispatches synchronous commands on the main thread, and
 // this one can join a tap thread and shell out to `hidutil` two or three times
 // (via `eventtap`/`drag_to_snap`/`drag_to_move` restarts below) — enough to
-// visibly freeze the UI. Marking it `async` moves execution onto Tauri's async
-// runtime instead; `AppState` is `Send + Sync` (every field is a `Mutex` or a
-// `Box<dyn Trait + Send + Sync>`), so holding the `State` across the function
-// body is sound. Nothing here actually awaits — the body is unchanged sync
-// code — this only changes *which thread* runs it.
+// visibly freeze the UI. Nothing in the body awaits, so it belongs on the
+// blocking pool: left inline in the `async fn` it would only move the freeze
+// from the main thread onto an async runtime worker, holding one for seconds.
 #[tauri::command]
 pub async fn save_settings(
     app: AppHandle,
-    state: State<'_, AppState>,
     settings: AppSettings,
 ) -> CmdResult<SaveSettingsOutcome> {
-    with_config_mutation(state.inner(), || {
-        save_settings_locked(&app, state.inner(), settings)
+    off_main(app, move |app, state| {
+        with_config_mutation(state, || save_settings_locked(app, state, settings))
     })
+    .await
 }
 
 fn save_settings_locked(
@@ -520,15 +518,17 @@ fn save_settings_locked(
 /// `save_settings` reports it. Codes this cannot probe are listed in
 /// `unprobed`, so the panel keeps whatever the last save said about them
 /// instead of taking their absence here for "healed".
-// `async fn`: the Caps Lock check waits on the tap lock, which a save or the
-// wake reset can hold across `hidutil` calls (each bounded, but seconds
-// long); off the main thread that wait does not freeze the panel that is
-// opening.
+// `off_main`: the Caps Lock check waits on the tap lock, which a save or the
+// wake reset can hold across `hidutil` calls (each bounded, but seconds long).
+// Nothing here awaits, so that wait belongs on the blocking pool — off the
+// main thread it does not freeze the panel that is opening, and off the async
+// runtime it does not hold a worker for its duration.
 #[tauri::command]
-pub async fn get_apply_warnings(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CmdResult<LiveApplyWarnings> {
+pub async fn get_apply_warnings(app: AppHandle) -> CmdResult<LiveApplyWarnings> {
+    off_main(app, apply_warnings_blocking).await
+}
+
+fn apply_warnings_blocking(app: &AppHandle, state: &AppState) -> CmdResult<LiveApplyWarnings> {
     use tauri_plugin_autostart::ManagerExt;
     let settings = state.settings.lock_safe().clone();
     let mut warnings: Vec<&'static str> = Vec::new();
@@ -542,7 +542,7 @@ pub async fn get_apply_warnings(
     if state.shortcut_registration_incomplete() {
         warnings.push("globalShortcuts");
     }
-    if !command_ime_rules_live(&state, settings.command_ime_switch_enabled) {
+    if !command_ime_rules_live(state, settings.command_ime_switch_enabled) {
         warnings.push("commandImeRules");
     }
     #[cfg(target_os = "macos")]
@@ -565,11 +565,11 @@ pub async fn get_apply_warnings(
                 settings.drag_to_move_tap_enabled(),
                 crate::drag_to_move::is_running(),
             ),
-            caps_remap_ok: crate::eventtap::caps_mapping_in_step(&state),
+            caps_remap_ok: crate::eventtap::caps_mapping_in_step(state),
         }));
     }
-    // Infallible in practice; `Result` because an async command with borrowed
-    // inputs must return one.
+    // Infallible in practice; `Result` because `off_main` hands a task's
+    // result back.
     Ok(LiveApplyWarnings {
         warnings,
         unprobed: vec!["menuBar"],
@@ -930,10 +930,11 @@ pub async fn list_modifier_rules(app: AppHandle) -> CmdResult<Vec<ModifierRule>>
     .await
 }
 
-// `async fn`: a failed reload can call `reload_engine_rules` (and thus
+// `off_main`: a failed reload can call `reload_engine_rules` (and thus
 // `hidutil` via `reconcile_caps_mapping`) up to twice on the rollback path,
-// synchronously. Moving it off the main thread keeps a slow `hidutil` from
-// freezing the UI, same rationale as `save_settings` above.
+// synchronously. The blocking pool keeps a slow `hidutil` off both the main
+// thread and the async runtime's workers, same rationale as `save_settings`
+// above.
 /// Outcome of deleting a modifier rule. The deletion is live in the engine
 /// whenever this is returned; `apply_warnings` names an out-of-band side effect
 /// that did not follow.
@@ -977,10 +978,20 @@ impl RuleMutationOutcome {
 #[tauri::command]
 pub async fn save_modifier_rule(
     app: AppHandle,
-    state: State<'_, AppState>,
     rule: ModifierRule,
 ) -> CmdResult<SaveModifierRuleOutcome> {
-    let _config = lock_config_mutation(&state)?;
+    off_main(app, move |app, state| {
+        save_modifier_rule_blocking(app, state, rule)
+    })
+    .await
+}
+
+fn save_modifier_rule_blocking(
+    app: &AppHandle,
+    state: &AppState,
+    rule: ModifierRule,
+) -> CmdResult<SaveModifierRuleOutcome> {
+    let _config = lock_config_mutation(state)?;
     // Don't trust the frontend: reject empty / overlong / reserved ids and
     // labels, contradictory hyper+remap rules, unsendable tap keystrokes, and
     // rules that collide with another stored rule (or the reserved left/right ⌘
@@ -999,7 +1010,7 @@ pub async fn save_modifier_rule(
         Some(row) => state.db.replace_modifier_rule(&row.id, &rule)?,
         None => state.db.upsert_modifier_rule(&rule)?,
     }
-    match reload_engine_rules(&app, state.inner()) {
+    match reload_engine_rules(app, state) {
         // The engine reloaded but `hidutil` left the Caps Lock remap out of
         // step — not a reason to roll back the save (the rule *is* live in the
         // engine), but a live mismatch the panel must show rather than a clean
@@ -1019,7 +1030,7 @@ pub async fn save_modifier_rule(
                 tracing::warn!(error = %rollback, "failed to roll back modifier rule after reload failure");
             }
             // Best-effort: bring the live engine back in step with the restored DB.
-            if let Err(rollback) = reload_engine_rules(&app, state.inner()) {
+            if let Err(rollback) = reload_engine_rules(app, state) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
             Err(error)
@@ -1067,15 +1078,22 @@ fn validated_modifier_rule_upsert(
     Err(CmdError::other(issue))
 }
 
-// `async fn`: same rationale as `save_modifier_rule` — a failed reload can
+// `off_main`: same rationale as `save_modifier_rule` — a failed reload can
 // shell out to `hidutil` synchronously up to twice on the rollback path.
 #[tauri::command]
-pub async fn delete_modifier_rule(
-    app: AppHandle,
-    state: State<'_, AppState>,
+pub async fn delete_modifier_rule(app: AppHandle, id: String) -> CmdResult<RuleMutationOutcome> {
+    off_main(app, move |app, state| {
+        delete_modifier_rule_blocking(app, state, id)
+    })
+    .await
+}
+
+fn delete_modifier_rule_blocking(
+    app: &AppHandle,
+    state: &AppState,
     id: String,
 ) -> CmdResult<RuleMutationOutcome> {
-    let _config = lock_config_mutation(&state)?;
+    let _config = lock_config_mutation(state)?;
     // Snapshot the row so a failed live reload can restore it — as with save, the
     // DB must not diverge from the live engine on a reload error.
     let previous = state
@@ -1084,7 +1102,7 @@ pub async fn delete_modifier_rule(
         .into_iter()
         .find(|r| r.id == id);
     state.db.delete_modifier_rule(&id)?;
-    match reload_engine_rules(&app, state.inner()) {
+    match reload_engine_rules(app, state) {
         // Same as `save_modifier_rule`: the engine reloaded but the Caps Lock
         // remap did not follow; report it rather than roll back a delete that
         // did take effect in the engine.
@@ -1101,7 +1119,7 @@ pub async fn delete_modifier_rule(
                 tracing::warn!(error = %rollback, "failed to restore modifier rule after reload failure");
             }
             // Best-effort: bring the live engine back in step with the restored DB.
-            if let Err(rollback) = reload_engine_rules(&app, state.inner()) {
+            if let Err(rollback) = reload_engine_rules(app, state) {
                 tracing::warn!(error = %rollback, "failed to reload engine rules after rollback");
             }
             Err(error)

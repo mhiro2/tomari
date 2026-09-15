@@ -796,12 +796,15 @@ and applies none of them.
   `reload_engine_rules`. Hotkey and modifier-rule saves return the canonical
   stored row; the frontend replaces the submitted row with that response so an
   ID trimmed during validation is used by every subsequent edit or delete.
-  Tauri runs a synchronous command on the main thread,
-  so the hotkey and modifier-rule commands — which reach the database (a
-  `SQLITE_BUSY` wait of up to five seconds) and orchestrate a global-shortcut
-  re-registration — are `async fn`s whose body runs on the blocking pool via
-  `off_main`. Shortcut registration is main-thread work whichever thread asks
-  for it: `shortcuts::register_all` reads the database on the caller's thread,
+  Tauri runs a synchronous command on the main thread, so every command that
+  can block — reaching the database (a `SQLITE_BUSY` wait of up to five
+  seconds), orchestrating a global-shortcut re-registration, or shelling out to
+  `hidutil` — is an `async fn` whose body runs on the blocking pool via
+  `off_main`. `off_main`, not the `async fn` alone, is what does the work:
+  none of these bodies await, so leaving one inline would only trade the main
+  thread for an async runtime worker held for the same seconds. Shortcut
+  registration is main-thread work whichever thread asks for it:
+  `shortcuts::register_all` reads the database on the caller's thread,
   then runs the plugin calls and the dispatch-map update on the main thread as
   one closure — the plugin waits on the main thread while holding its own
   table lock, which the hotkey handler on the main thread also takes, so doing
