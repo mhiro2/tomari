@@ -41,3 +41,6 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[profile.release.build-override]
+strip = false
