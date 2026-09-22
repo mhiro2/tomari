@@ -10,6 +10,9 @@
 //! starts collapsed — with one exception: switching the feature on starts
 //! expanded, because a user who has not arranged anything yet would otherwise
 //! see nothing happen at all and conclude the switch is broken.
+//!
+//! macOS 27 withdrew the mechanism entirely, so [`mechanism_supported`] turns
+//! the whole feature off there rather than letting it run as a no-op.
 
 mod state;
 
@@ -66,6 +69,48 @@ pub use state::MenuBarState;
 /// tray checkmark stay in step regardless of which surface initiated it.
 const CHANGED_EVENT: &str = "tomari:menu-bar-changed";
 
+/// First macOS release that composites the menu bar as a single window. A
+/// stretched divider no longer displaces anything there: measured on 27.0
+/// (26A428), a 10,000pt divider is either parked off-screen or drawn straight
+/// over its neighbours, and every other item keeps the position it had.
+const WITHDRAWN_IN_MAJOR_VERSION: isize = 27;
+
+/// The version test on its own, so the boundary stays testable on a host that
+/// is not itself running the withdrawn release.
+const fn major_version_supports_mechanism(major: isize) -> bool {
+    major < WITHDRAWN_IN_MAJOR_VERSION
+}
+
+/// Whether this system still lets Tomari push items off the menu bar.
+///
+/// Without it the switch would still add a divider and a handle, collapse
+/// would appear to succeed, and nothing would ever be hidden — so the feature
+/// reports itself unavailable instead, and every entry point below treats it
+/// as switched off no matter what the saved settings say.
+pub fn mechanism_supported() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::NSProcessInfo;
+
+        major_version_supports_mechanism(
+            NSProcessInfo::processInfo()
+                .operatingSystemVersion()
+                .majorVersion,
+        )
+    }
+}
+
+/// The master switch as the runtime sees it: the saved setting, denied on a
+/// system where the mechanism no longer works.
+fn tidy_enabled(state: &AppState) -> bool {
+    mechanism_supported() && state.settings.lock_safe().menu_bar_tidy_enabled
+}
+
 fn app_is_running(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<AppState>() else {
         return false;
@@ -81,6 +126,9 @@ pub struct MenuBarStatus {
     pub enabled: bool,
     /// Whether the tidied items are currently pushed off-screen.
     pub collapsed: bool,
+    /// Whether this system still supports the mechanism at all. False keeps
+    /// `enabled` false however the setting is saved.
+    pub supported: bool,
 }
 
 /// Which side of Tomari's divider a menu bar item currently occupies.
@@ -174,8 +222,9 @@ static STATUS_RECONCILE_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn status(state: &AppState) -> MenuBarStatus {
     MenuBarStatus {
-        enabled: state.settings.lock_safe().menu_bar_tidy_enabled,
+        enabled: tidy_enabled(state),
         collapsed: state.menu_bar.lock_safe().is_collapsed(),
+        supported: mechanism_supported(),
     }
 }
 
@@ -473,6 +522,9 @@ fn unavailable_inventory(
     state: &AppState,
     session: &mut InventorySession,
 ) -> Option<MenuBarInventory> {
+    if !mechanism_supported() {
+        return Some(publish_inventory(session, false, false, false, Vec::new()));
+    }
     if !state.lifecycle.is_running() {
         return Some(publish_inventory(
             session,
@@ -485,7 +537,7 @@ fn unavailable_inventory(
     if !state.windows.permission_granted() {
         return Some(publish_inventory(session, true, false, false, Vec::new()));
     }
-    if !state.settings.lock_safe().menu_bar_tidy_enabled {
+    if !tidy_enabled(state) {
         return Some(publish_inventory(session, true, true, false, Vec::new()));
     }
     None
@@ -613,7 +665,7 @@ fn zone_at_point(context: status::ScanContext, x: f64, y: f64) -> Option<MenuBar
 
 #[cfg(target_os = "macos")]
 fn movement_available(state: &AppState) -> bool {
-    state.windows.permission_granted() && state.settings.lock_safe().menu_bar_tidy_enabled
+    state.windows.permission_granted() && tidy_enabled(state)
 }
 
 #[cfg(target_os = "macos")]
@@ -718,7 +770,7 @@ pub fn toggle(app: &AppHandle) {
     if !state.lifecycle.is_running() {
         return;
     }
-    if !state.settings.lock_safe().menu_bar_tidy_enabled {
+    if !tidy_enabled(state.inner()) {
         return;
     }
     let now = state.now_ms();
@@ -737,12 +789,13 @@ pub fn set_collapsed(app: &AppHandle, collapsed: bool) -> MenuBarStatus {
         return MenuBarStatus {
             enabled: false,
             collapsed: true,
+            supported: mechanism_supported(),
         };
     };
     if !state.lifecycle.is_running() {
         return status(state.inner());
     }
-    if !state.settings.lock_safe().menu_bar_tidy_enabled {
+    if !tidy_enabled(state.inner()) {
         return status(state.inner());
     }
     let now = state.now_ms();
@@ -1257,6 +1310,15 @@ mod timer_tests {
         );
         assert_eq!(timer_step(Some((1_500, 7)), 1_500), TimerStep::Fire(7));
         assert_eq!(timer_step(Some((1_500, 7)), 9_000), TimerStep::Fire(7));
+    }
+
+    #[test]
+    fn the_mechanism_survives_every_release_before_the_one_that_withdrew_it() {
+        assert!(major_version_supports_mechanism(15));
+        assert!(major_version_supports_mechanism(26));
+        assert!(!major_version_supports_mechanism(27));
+        // A later release is not assumed to have brought it back.
+        assert!(!major_version_supports_mechanism(28));
     }
 
     #[test]

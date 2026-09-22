@@ -415,11 +415,14 @@ function menuBarItem(
   const { enabled, supported, permissionGranted, dividerAvailable } = snapshot.menuBar;
   const id = 'menuBar';
   const title = t('health.menuBar');
-  if (!enabled) {
-    return { id, title, tone: 'inactive', description: t('health.menuBarOff') };
-  }
+  // Unsupported outranks off: the switch reads off there precisely because the
+  // environment withdrew the mechanism, and "off" alone would look like a
+  // setting the user could simply turn back on.
   if (!supported) {
     return { id, title, tone: 'inactive', description: t('health.menuBarUnsupported') };
+  }
+  if (!enabled) {
+    return { id, title, tone: 'inactive', description: t('health.menuBarOff') };
   }
   if (!permissionGranted) {
     return {

@@ -111,7 +111,11 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
       case 'get_settings':
         return Promise.resolve(SETTINGS);
       case 'get_menu_bar':
-        return Promise.resolve({ enabled: true, collapsed: true } satisfies MenuBarStatus);
+        return Promise.resolve({
+          enabled: true,
+          collapsed: true,
+          supported: true,
+        } satisfies MenuBarStatus);
       case 'list_menu_bar_items':
         return Promise.resolve(INVENTORY);
       case 'move_menu_bar_item':
@@ -122,7 +126,11 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
       case 'save_settings':
         return Promise.resolve({ applyWarnings: [] });
       case 'set_menu_bar_collapsed':
-        return Promise.resolve({ enabled: true, collapsed: false } satisfies MenuBarStatus);
+        return Promise.resolve({
+          enabled: true,
+          collapsed: false,
+          supported: true,
+        } satisfies MenuBarStatus);
       default:
         return Promise.resolve(null);
     }
@@ -176,16 +184,19 @@ describe('MenuBarView', () => {
     });
 
     renderView(<MenuBarView />);
-    await screen.findByRole('heading', { name: 'Menu Bar' });
     await waitFor(() =>
       expect(mockListen).toHaveBeenCalledWith('tomari:menu-bar-changed', expect.any(Function)),
     );
 
+    // Until the status arrives the page cannot know whether this system still
+    // supports tidying, so it shows neither the switch nor the notice.
+    expect(await screen.findByText('Loading…')).toBeInTheDocument();
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_menu_bar')).toHaveLength(0);
     await act(async () => finishRegistration?.());
     await waitFor(() =>
       expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_menu_bar')).toHaveLength(1),
     );
+    expect(await screen.findByRole('heading', { name: 'Menu Bar' })).toBeInTheDocument();
   });
 
   it('expands through the backend when the action button is used', async () => {
@@ -201,11 +212,24 @@ describe('MenuBarView', () => {
     expect(screen.getByRole('button', { name: 'Hide again' })).toBeInTheDocument();
   });
 
+  it('replaces the whole page with a notice when macOS no longer supports tidying', async () => {
+    mockCommands({
+      get_menu_bar: { enabled: false, collapsed: true, supported: false } satisfies MenuBarStatus,
+    });
+    renderView(<MenuBarView />);
+
+    expect(
+      await screen.findByText(/macOS 27 no longer lets an app push status icons/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Turn on menu bar tidying' })).toBeNull();
+    expect(mockInvoke).not.toHaveBeenCalledWith('list_menu_bar_items', expect.anything());
+  });
+
   it('follows a change made from the menu bar item or the tray', async () => {
     renderView(<MenuBarView />);
     await screen.findByRole('heading', { name: 'Menu Bar' });
 
-    act(() => menuBarChanged?.({ enabled: true, collapsed: false }));
+    act(() => menuBarChanged?.({ enabled: true, collapsed: false, supported: true }));
     await openBehavior();
 
     await waitFor(() => {
@@ -420,7 +444,7 @@ describe('MenuBarView', () => {
   it('keeps the item diagram visible but disabled when the feature is off', async () => {
     mockCommands({
       get_settings: { ...SETTINGS, menuBarTidyEnabled: false },
-      get_menu_bar: { enabled: false, collapsed: true } satisfies MenuBarStatus,
+      get_menu_bar: { enabled: false, collapsed: true, supported: true } satisfies MenuBarStatus,
     });
     renderView(<MenuBarView />);
 
@@ -439,7 +463,7 @@ describe('MenuBarView', () => {
   it('waits for the confirmed runtime enable before scanning the inventory', async () => {
     mockCommands({
       get_settings: { ...SETTINGS, menuBarTidyEnabled: false },
-      get_menu_bar: { enabled: false, collapsed: true } satisfies MenuBarStatus,
+      get_menu_bar: { enabled: false, collapsed: true, supported: true } satisfies MenuBarStatus,
     });
     renderView(<MenuBarView />);
 
@@ -457,7 +481,7 @@ describe('MenuBarView', () => {
     // applied the divider and published its runtime status.
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'list_menu_bar_items')).toHaveLength(0);
 
-    act(() => menuBarChanged?.({ enabled: true, collapsed: false }));
+    act(() => menuBarChanged?.({ enabled: true, collapsed: false, supported: true }));
 
     expect(await screen.findByText('Docker')).toBeInTheDocument();
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'list_menu_bar_items')).toHaveLength(1);

@@ -305,6 +305,9 @@ export interface MenuBarStatus {
   enabled: boolean;
   // Whether the tidied icons are currently pushed off-screen.
   collapsed: boolean;
+  // Whether this macOS release still supports the mechanism. False keeps
+  // `enabled` false however the setting is saved.
+  supported: boolean;
 }
 
 export type MenuBarItemZone = 'hidden' | 'visible';

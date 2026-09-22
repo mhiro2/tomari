@@ -233,9 +233,10 @@ pub fn export(app: &AppHandle, state: &AppState) -> Result<SupportBundleExport, 
 }
 
 fn menu_bar_diagnostics(enabled: bool, state: &AppState) -> MenuBarDiagnostics {
+    let supported = crate::menubar::mechanism_supported();
     MenuBarDiagnostics {
-        enabled,
-        supported: cfg!(target_os = "macos"),
+        enabled: enabled && supported,
+        supported,
         permission_granted: state.windows.permission_granted(),
         divider_available: enabled && crate::menubar::diagnostics_divider_available(),
     }

@@ -304,6 +304,10 @@ const en = {
   'menubar.diagramLabel': 'Current menu bar arrangement',
   'menubar.arrangeInstruction': 'Use the buttons below to move items across Tomari’s divider.',
   'menubar.offNote': 'Menu bar tidying is off — Tomari adds no divider to your menu bar.',
+  'menubar.unsupportedOs':
+    'macOS 27 no longer lets an app push status icons off the menu bar, so menu bar ' +
+    'tidying is unavailable. When your icons no longer fit, use the expand button ' +
+    'macOS shows beside them.',
   'menubar.enable': 'Turn on menu bar tidying',
   'menubar.showToggle': 'Show hidden icons',
   'menubar.showDesc': 'Also from the ‹ item, the tray menu, or a shortcut.',
@@ -874,6 +878,10 @@ const ja: Record<MessageKey, string> = {
   'menubar.diagramLabel': '現在のメニューバー配置',
   'menubar.arrangeInstruction': '下のボタンで、項目を Tomari の区切りの反対側へ移動します。',
   'menubar.offNote': 'メニューバー整理はオフです。区切りは表示されません。',
+  'menubar.unsupportedOs':
+    'macOS 27 では、アプリがステータスアイコンをメニューバーの外へ押し出せなくなりました。' +
+    'このためメニューバー整理は使えません。アイコンが収まりきらないときは、' +
+    'macOS がアイコンの横に出す展開ボタンを使ってください。',
   'menubar.enable': 'メニューバー整理を有効化',
   'menubar.showToggle': '隠したアイコンを表示',
   'menubar.showDesc': 'メニューバーの ‹、トレイ、ショートカットからも操作できます。',

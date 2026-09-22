@@ -353,7 +353,7 @@ export async function installDevPreview() {
       case 'retry_keep_awake_transition':
         return keepAwake;
       case 'get_menu_bar':
-        return { enabled: true, collapsed: true };
+        return { enabled: true, collapsed: true, supported: true };
       case 'list_modifier_rules':
         return modifierRules;
       case 'save_modifier_rule': {

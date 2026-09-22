@@ -203,6 +203,25 @@ describe('HealthView', () => {
     expect(screen.queryByText(/process remains/)).not.toBeInTheDocument();
   });
 
+  it('reports an unsupported menu bar as unsupported rather than merely off', async () => {
+    mockInvoke.mockImplementation((command) =>
+      command === 'get_diagnostics'
+        ? Promise.resolve({
+            ...HEALTHY,
+            menuBar: { ...HEALTHY.menuBar, enabled: false, supported: false },
+          })
+        : Promise.resolve(null),
+    );
+    renderView();
+
+    expect(
+      await screen.findByText(
+        'Menu Bar organization is not supported in this environment, so it stays off.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Menu Bar organization is off.')).not.toBeInTheDocument();
+  });
+
   it('explains an outdated database schema instead of describing it as healthy', async () => {
     mockInvoke.mockImplementation((command) =>
       command === 'get_diagnostics'

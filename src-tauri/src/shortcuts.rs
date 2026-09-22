@@ -55,14 +55,24 @@ struct PreparedHotkeys {
 /// but no disabled or invalid row can reach the OS registration boundary.
 fn prepare_hotkeys_for_registration(hotkeys: Vec<Hotkey>) -> PreparedHotkeys {
     let report = validation::validate_hotkeys(hotkeys);
+    let menu_bar_supported = crate::menubar::mechanism_supported();
     PreparedHotkeys {
         live: report
             .valid
             .into_iter()
-            .filter(|hotkey| hotkey.enabled)
+            .filter(|hotkey| hotkey.enabled && is_live_action(&hotkey.action, menu_bar_supported))
             .collect(),
         invalid: report.invalid,
     }
+}
+
+/// Whether an action is worth taking an accelerator away from the rest of the
+/// system for. A menu bar toggle on a release that withdrew the mechanism
+/// would occupy its keys and then do nothing, so it stays unregistered — the
+/// row itself is untouched and becomes live again on a system that supports
+/// it.
+fn is_live_action(action: &AppAction, menu_bar_supported: bool) -> bool {
+    !matches!(action, AppAction::ToggleMenuBar) || menu_bar_supported
 }
 
 /// Re-register every enabled hotkey from the database, replacing the previous
@@ -396,5 +406,14 @@ mod tests {
 
         record_registration_result(&state, &Ok(Vec::new()));
         assert!(!state.shortcut_registration_incomplete());
+    }
+
+    #[test]
+    fn a_menu_bar_toggle_only_takes_its_keys_where_the_mechanism_works() {
+        assert!(is_live_action(&AppAction::ToggleMenuBar, true));
+        assert!(!is_live_action(&AppAction::ToggleMenuBar, false));
+        // Every other action is registered either way.
+        assert!(is_live_action(&AppAction::NoOp, false));
+        assert!(is_live_action(&AppAction::TogglePanel, false));
     }
 }

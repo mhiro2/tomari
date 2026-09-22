@@ -11,6 +11,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
 
+// The menu bar action is offered only where macOS still supports tidying, and
+// that answer arrives over the runtime event stream.
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+
 const SETTINGS: AppSettings = {
   launchAtLogin: false,
   language: 'system',
@@ -88,6 +92,8 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(SETTINGS);
       case 'input_monitoring_status':
         return Promise.resolve(true);
+      case 'get_menu_bar':
+        return Promise.resolve({ enabled: false, collapsed: true, supported: true });
       default:
         return Promise.resolve(null);
     }
@@ -104,6 +110,30 @@ describe('KeyboardView', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
+  });
+
+  it('offers the menu bar tap action while macOS still supports tidying', async () => {
+    renderView(<KeyboardView />);
+
+    const select = await screen.findByLabelText('Tap action for Caps Lock');
+    await waitFor(() =>
+      expect(
+        within(select).queryByRole('option', { name: 'Show/Hide Menu Bar Icons' }),
+      ).not.toBeNull(),
+    );
+  });
+
+  it('withdraws the menu bar tap action where the mechanism is gone', async () => {
+    mockCommands({
+      get_menu_bar: { enabled: false, collapsed: true, supported: false },
+    });
+    renderView(<KeyboardView />);
+
+    const select = await screen.findByLabelText('Tap action for Caps Lock');
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'get_menu_bar')).toBe(true),
+    );
+    expect(within(select).queryByRole('option', { name: 'Show/Hide Menu Bar Icons' })).toBeNull();
   });
 
   it('presents modifier behavior as a four-column mapping and shows the Command-key map', async () => {

@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  Banner,
   FeatureContent,
   FeaturePageHeader,
   FeatureSwitch,
@@ -23,6 +24,9 @@ export function MenuBarView({ initialTab = 'items' }: { initialTab?: MenuBarTab 
   const { settings, update } = useSettings();
   const [tab, setTab] = useState<MenuBarTab>(initialTab);
   const [collapsed, setCollapsed] = useState(true);
+  // null until the backend answers; see `useMenuBarSupported` for why the
+  // controls must not be rendered on an assumption.
+  const [supported, setSupported] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [inventory, setInventory] = useState<MenuBarInventory | null>(null);
   const [inventoryBusy, setInventoryBusy] = useState(false);
@@ -59,6 +63,7 @@ export function MenuBarView({ initialTab = 'items' }: { initialTab?: MenuBarTab 
     const applyStatus = (status: MenuBarStatus) => {
       if (cancelled) return;
       setCollapsed(status.collapsed);
+      setSupported(status.supported);
       const wasEnabled = runtimeEnabled.current;
       runtimeEnabled.current = status.enabled;
       if (status.enabled && wasEnabled !== true) {
@@ -156,7 +161,18 @@ export function MenuBarView({ initialTab = 'items' }: { initialTab?: MenuBarTab 
     }
   }
 
-  if (!settings) return <div className="view">{t('common.loading')}</div>;
+  if (!settings || supported === null) return <div className="view">{t('common.loading')}</div>;
+
+  // macOS withdrew the mechanism this feature is built on. Offering the switch
+  // anyway would let the user turn on something that can never do anything.
+  if (!supported) {
+    return (
+      <div className="view">
+        <FeaturePageHeader title={t('menubar.title')} description={t('menubar.pageDescription')} />
+        <Banner tone="warn">{t('menubar.unsupportedOs')}</Banner>
+      </div>
+    );
+  }
 
   const enabled = settings.menuBarTidyEnabled;
   return (

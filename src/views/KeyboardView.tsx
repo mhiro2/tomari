@@ -13,6 +13,7 @@ import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { actionLabel, modifierLabel, modifierWithSide, safeDisplayText } from '../lib/format';
 import { useT, type MessageKey, type Translator } from '../lib/i18n';
+import { useMenuBarSupported } from '../lib/menuBarSupport';
 import { useSettings } from '../lib/settings';
 import type {
   AppAction,
@@ -117,6 +118,7 @@ const RULE_MUTATION_PROBES = ['capsLockRemap'] as const;
 export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: KeyboardTab }) {
   const t = useT();
   const { settings, configurationWarnings, update, reportApplyOutcome } = useSettings();
+  const menuBarSupported = useMenuBarSupported();
   const [rules, setRules] = useState<ModifierRule[]>([]);
   const [hotkeys, setHotkeys] = useState<Hotkey[]>([]);
   const [rulesLoaded, setRulesLoaded] = useState(false);
@@ -271,12 +273,16 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
       label: t('action.toggleKeepAwake'),
       action: { type: 'toggleKeepAwake' },
     },
-    {
+  ];
+  // Only once the backend confirms the mechanism exists: binding keys to it
+  // otherwise reserves them system-wide for an action that cannot run.
+  if (menuBarSupported === true) {
+    shortcutOptions.push({
       key: 'toggleMenuBar',
       label: t('action.toggleMenuBar'),
       action: { type: 'toggleMenuBar' },
-    },
-  ];
+    });
+  }
 
   return (
     <div className="view keyboard-view">
@@ -326,6 +332,7 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
             error={modifierError}
             savingIds={savingRuleIds}
             commandImeSwitchEnabled={settings.commandImeSwitchEnabled}
+            menuBarSupported={menuBarSupported === true}
             onToggle={(rule) => void saveRulePatch(rule.id, { enabled: !rule.enabled })}
             onTapAction={(rule, action) => void saveRulePatch(rule.id, { tap: action })}
             onCommandImeSwitch={(enabled) => update({ commandImeSwitchEnabled: enabled })}
@@ -499,6 +506,7 @@ function ModifiersPanel({
   error,
   savingIds,
   commandImeSwitchEnabled,
+  menuBarSupported,
   onToggle,
   onTapAction,
   onCommandImeSwitch,
@@ -508,6 +516,7 @@ function ModifiersPanel({
   error: string | null;
   savingIds: ReadonlySet<string>;
   commandImeSwitchEnabled: boolean;
+  menuBarSupported: boolean;
   onToggle: (rule: ModifierRule) => void;
   onTapAction: (rule: ModifierRule, action: AppAction) => void;
   onCommandImeSwitch: (enabled: boolean) => void;
@@ -545,6 +554,7 @@ function ModifiersPanel({
                     key={rule.id}
                     rule={rule}
                     saving={savingIds.has(rule.id)}
+                    menuBarSupported={menuBarSupported}
                     onToggle={() => onToggle(rule)}
                     onTapAction={(action) => onTapAction(rule, action)}
                   />
@@ -674,11 +684,13 @@ function ShortcutsPanel({
 function ModifierRow({
   rule,
   saving,
+  menuBarSupported,
   onToggle,
   onTapAction,
 }: {
   rule: ModifierRule;
   saving: boolean;
+  menuBarSupported: boolean;
   onToggle: () => void;
   onTapAction: (action: AppAction) => void;
 }) {
@@ -709,7 +721,11 @@ function ModifierRow({
           <option value="panel">{t('action.togglePanel')}</option>
           <option value="restoreWindow">{t('action.recallPlacement')}</option>
           <option value="preventSleep">{t('action.toggleKeepAwake')}</option>
-          <option value="menuBar">{t('action.toggleMenuBar')}</option>
+          {/* A rule already set to it keeps its option, so the row can still
+              show what it is bound to and move off it. */}
+          {(menuBarSupported || selected === 'menuBar') && (
+            <option value="menuBar">{t('action.toggleMenuBar')}</option>
+          )}
         </select>
       </td>
       <td>

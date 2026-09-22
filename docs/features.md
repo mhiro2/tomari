@@ -181,6 +181,18 @@ Tomari's own settings window.
 Push the status icons you rarely look at off the edge of the screen, and bring
 them back when you want them.
 
+**This feature is unavailable on macOS 27 and later.** It works by owning a
+status item wide enough to push its neighbours past the edge of the screen, and
+macOS 27 composites the menu bar as a single window in which that no longer
+displaces anything. Rather than leave a switch that adds a divider and hides
+nothing, Tomari reports the feature as unavailable there: the Menu Bar settings
+page shows a notice instead of its controls, Diagnostics marks it unsupported,
+and no divider or handle is added whatever the saved setting says. The Keyboard
+page stops offering the menu bar action, and a shortcut already bound to it is
+left stored but never registered, so it does not hold its keys away from the
+rest of the system. macOS shows its own expand button beside the icons once they
+no longer fit.
+
 Turn it on in the **Menu Bar** section and Tomari adds two small items to your
 menu bar: a **divider** (≡) and a **handle** (‹). Collapsing stretches the
 divider so everything to its *left* slides off-screen; the handle stays put so

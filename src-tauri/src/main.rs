@@ -691,7 +691,7 @@ fn startup_automation_plan(state: &AppState) -> StartupAutomationPlan {
         keyboard: settings.keyboard_enabled,
         drag_to_snap: settings.window_management_enabled && settings.drag_to_snap_enabled,
         drag_to_move: settings.window_management_enabled && settings.drag_to_move_enabled,
-        menu_bar_tidy: settings.menu_bar_tidy_enabled,
+        menu_bar_tidy: settings.menu_bar_tidy_enabled && menubar::mechanism_supported(),
     }
 }
 

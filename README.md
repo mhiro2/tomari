@@ -41,6 +41,9 @@
   hidden and always-visible items and can move one across the divider with a
   **Hide** or **Always Show** action. A manual ⌘-drag remains available when
   macOS refuses an automated move.
+- **Unavailable on macOS 27 and later.** The system no longer lets an
+  application push status icons off the menu bar, so Tomari switches the
+  feature off there and leaves the overflow button macOS provides in charge.
 
 ### Keep Awake
 
