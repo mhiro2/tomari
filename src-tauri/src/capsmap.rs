@@ -20,6 +20,10 @@
 //! rebuilt from, [`parse_entries`] is strict: output it does not fully
 //! understand is an error, never a partial list, so a format change or a
 //! truncated read cannot silently drop the mappings it failed to read.
+//! Reads and writes both match keyboard-capable services by their usage pairs.
+//! Every matched keyboard must have the same mapping; differing per-keyboard
+//! mappings are refused, including a newly connected keyboard whose mappings
+//! differ. No service is dropped from a read just to make a rewrite possible.
 //!
 //! ## Owning the Caps Lock source
 //!
@@ -109,12 +113,12 @@ pub const F18_KEYCODE: i64 = 79;
 /// the wake reset or quit indefinitely.
 const HIDUTIL_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Run `hidutil` with `args` under [`HIDUTIL_DEADLINE`], returning its stdout
+/// Run a keyboard-scoped property operation under [`HIDUTIL_DEADLINE`], returning its stdout
 /// on a clean exit. A timeout, non-zero exit or failure to start is an `Err`
 /// like any other, so every caller's fail-closed handling covers it.
-fn hidutil(args: &[&str]) -> Result<Vec<u8>, String> {
+fn hidutil(operation: &str, value: &str) -> Result<Vec<u8>, String> {
     let outcome = crate::childproc::output_with_deadline(
-        Command::new("/usr/bin/hidutil").args(args),
+        &mut hidutil_command(operation, value),
         HIDUTIL_DEADLINE,
     )
     .map_err(|e| format!("failed to run hidutil: {e}"))?;
@@ -140,8 +144,22 @@ fn hidutil(args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
+fn hidutil_command(operation: &str, value: &str) -> Command {
+    // DeviceUsage matches any advertised usage pair, including a keyboard
+    // interface on a composite device whose primary usage is something else.
+    let mut command = Command::new("/usr/bin/hidutil");
+    command.args([
+        "property",
+        "--matching",
+        r#"{"DeviceUsagePage":1,"DeviceUsage":6}"#,
+        operation,
+        value,
+    ]);
+    command
+}
+
 fn set_mapping(json: &str) -> Result<(), String> {
-    hidutil(&["property", "--set", json]).map(|_| ())
+    hidutil("--set", json).map(|_| ())
 }
 
 /// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs. `Err`
@@ -150,7 +168,7 @@ fn set_mapping(json: &str) -> Result<(), String> {
 /// every write replaces the whole property from what was read here. An
 /// approximate read would silently drop the entries it failed to understand.
 fn read_entries() -> Result<Vec<(u64, u64)>, String> {
-    let stdout = hidutil(&["property", "--get", "UserKeyMapping"])?;
+    let stdout = hidutil("--get", "UserKeyMapping")?;
     parse_entries(&String::from_utf8_lossy(&stdout))
 }
 
@@ -162,10 +180,66 @@ fn read_entries() -> Result<Vec<(u64, u64)>, String> {
 /// output format, an extra field, an unexpected number format, or a truncated
 /// read would otherwise delete mappings that have nothing to do with Tomari.
 ///
-/// The format is an old-style property list: a parenthesized list of
-/// `{ key = value; … }` dictionaries, printed as `(null)` when the property is
-/// not set at all.
+/// macOS 27 prints a `RegistryID Key Value` table with one property value per
+/// matched keyboard service. Each value is an old-style property list. A write
+/// can preserve these mappings only when every service reports the same list, so
+/// differing per-service mappings are rejected rather than flattened.
 fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
+    let (header, mut rest) = text
+        .trim()
+        .split_once('\n')
+        .ok_or_else(|| malformed("expected a HID service table"))?;
+    if !header.split_whitespace().eq(["RegistryID", "Key", "Value"]) {
+        return Err(malformed("unrecognized HID service table header"));
+    }
+    let mut registry_ids = std::collections::HashSet::new();
+    let mut common_entries = None;
+    while !rest.trim().is_empty() {
+        let (registry_id, after_id) = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| malformed("missing HID service property"))?;
+        if registry_id.is_empty() || !registry_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(malformed("invalid HID service registry ID"));
+        }
+        let registry_id = u64::from_str_radix(registry_id, 16)
+            .map_err(|_| malformed("invalid HID service registry ID"))?;
+        if !registry_ids.insert(registry_id) {
+            return Err(malformed("the same HID service appears twice"));
+        }
+        let (key, value) = after_id
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| malformed("missing HID service property value"))?;
+        if key != "UserKeyMapping" {
+            return Err(malformed("unexpected HID service property"));
+        }
+        let (value, after_value) = value
+            .trim_start()
+            .split_once(')')
+            .ok_or_else(|| malformed("unterminated HID service property value"))?;
+        let mut entries = parse_mapping(&format!("{value})"))?;
+        entries.sort_unstable();
+        if let Some(common) = &common_entries {
+            if *common != entries {
+                return Err(malformed("HID services have different key mappings"));
+            }
+        } else {
+            common_entries = Some(entries);
+        }
+        // The property itself may span multiple lines; a new service must
+        // start on a new line, never after stray text beside a closing value.
+        let (line_end, following) = after_value.split_once('\n').unwrap_or((after_value, ""));
+        if !line_end.trim().is_empty() {
+            return Err(malformed("unexpected text after HID service property"));
+        }
+        rest = following;
+    }
+    common_entries.ok_or_else(|| malformed("no HID services were reported"))
+}
+
+/// Parse one complete property value, including every source and destination.
+fn parse_mapping(text: &str) -> Result<Vec<(u64, u64)>, String> {
     let entries = parse_entry_list(text)?;
     // One source mapped twice is not a list we can reason about: which entry
     // owns that key is undefined, so "the mapping on the Caps Lock source" —
@@ -1050,7 +1124,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_entries_reads_every_pair() {
+    fn reads_and_writes_share_the_keyboard_usage_scope() {
+        for (operation, value) in [
+            ("--get", "UserKeyMapping"),
+            ("--set", r#"{"UserKeyMapping":[]}"#),
+        ] {
+            let command = hidutil_command(operation, value);
+            assert_eq!(command.get_program(), "/usr/bin/hidutil");
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            assert_eq!(args.len(), 5);
+            assert_eq!(&args[..2], ["property", "--matching"]);
+            let scope: serde_json::Value = serde_json::from_str(args[2]).unwrap();
+            assert_eq!(
+                scope,
+                serde_json::json!({"DeviceUsagePage": 1, "DeviceUsage": 6})
+            );
+            assert_eq!(&args[3..], [operation, value]);
+        }
+    }
+
+    #[test]
+    fn parse_mapping_reads_every_pair() {
         // The decimal shape `hidutil property --get` prints, with two entries.
         let text = format!(
             "(\n  {{\n    HIDKeyboardModifierMappingSrc = {CAPS_USAGE};\n    \
@@ -1059,17 +1156,17 @@ mod tests {
              HIDKeyboardModifierMappingDst = {OTHER_DST};\n  }}\n)"
         );
         assert_eq!(
-            parse_entries(&text),
+            parse_mapping(&text),
             Ok(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)])
         );
     }
 
     #[test]
-    fn parse_entries_accepts_the_shapes_hidutil_prints() {
+    fn parse_mapping_accepts_complete_property_values() {
         // Comma-separated entries, hex usages, reversed field order, and the two
         // ways of saying "nothing set" — all seen across macOS versions.
         assert_eq!(
-            parse_entries(&format!(
+            parse_mapping(&format!(
                 "({{HIDKeyboardModifierMappingDst = 0x70000006d; \
                  HIDKeyboardModifierMappingSrc = 0x700000039;}},\
                  {{HIDKeyboardModifierMappingSrc = {OTHER_SRC}; \
@@ -1078,12 +1175,12 @@ mod tests {
             Ok(vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)])
         );
         for empty in ["(null)", "()", "(\n)", "  (null)\n"] {
-            assert_eq!(parse_entries(empty), Ok(Vec::new()), "{empty:?}");
+            assert_eq!(parse_mapping(empty), Ok(Vec::new()), "{empty:?}");
         }
     }
 
     #[test]
-    fn parse_entries_rejects_anything_it_does_not_fully_understand() {
+    fn parse_mapping_rejects_anything_it_does_not_fully_understand() {
         // Each of these would previously have parsed as a *shorter* list, and
         // writing that back would delete the entries it could not read.
         let src = "HIDKeyboardModifierMappingSrc";
@@ -1171,10 +1268,74 @@ mod tests {
             ),
         ] {
             assert!(
-                parse_entries(&text).is_err(),
+                parse_mapping(&text).is_err(),
                 "{case} must not parse: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_entries_reads_macos_27_service_table_without_mappings() {
+        // Captured from macOS 27.0.1; every reported HID service had this shape.
+        let text = "RegistryID  Key                   Value\n\
+                    100008829   UserKeyMapping   (null)\n\
+                    100000cd6   UserKeyMapping   (null)\n\
+                    1000083ab   UserKeyMapping   (null)\n\
+                    1000083e0   UserKeyMapping   (null)\n";
+        assert_eq!(parse_entries(text), Ok(vec![]));
+    }
+
+    #[test]
+    fn parse_entries_requires_the_same_complete_mapping_for_each_service() {
+        let caps = format!(
+            "{{ HIDKeyboardModifierMappingSrc = {CAPS_USAGE}; \
+             HIDKeyboardModifierMappingDst = {F18_USAGE}; }}"
+        );
+        let other = format!(
+            "{{ HIDKeyboardModifierMappingSrc = {OTHER_SRC}; \
+             HIDKeyboardModifierMappingDst = {OTHER_DST}; }}"
+        );
+        let text = format!(
+            "RegistryID  Key                   Value\n\
+             100000ba7   UserKeyMapping   (\n{caps},\n{other}\n)\n\
+             100000b7f   UserKeyMapping   ({other}, {caps})\n"
+        );
+        let mut expected = vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)];
+        expected.sort_unstable();
+        assert_eq!(parse_entries(&text), Ok(expected));
+        for value in ["(null)", "()", &format!("({caps})")] {
+            assert!(
+                parse_entries(&format!("{text}100000b57   UserKeyMapping   {value}\n")).is_err(),
+                "a divergent service must not be overwritten: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_entries_rejects_incomplete_or_unrecognized_service_tables() {
+        let header = "RegistryID  Key                   Value\n";
+        for table in [
+            "",
+            "(null)",
+            "RegistryID Key Value\n",
+            "RegistryID Key Value\n100000ba7 UserKeyMapping",
+            "RegistryID Key Value\n100000ba7 UserKeyMapping (",
+            "RegistryID Key Value\n100000ba7 OtherProperty (null)",
+            "RegistryID Key Value Extra\n100000ba7 UserKeyMapping (null)",
+            "RegistryID Key Value\nnot-hex UserKeyMapping (null)",
+            "RegistryID Key Value\n10000000000000000 UserKeyMapping (null)",
+            "RegistryID Key Value\n100000ba7 UserKeyMapping (null) extra",
+            "RegistryID Key Value\n100000ba7 UserKeyMapping (null)100000b7f UserKeyMapping (null)",
+            "RegistryID Key Value\n100000ba7 UserKeyMapping (null)\n100000BA7 UserKeyMapping (null)",
+        ] {
+            assert!(parse_entries(table).is_err(), "must reject {table:?}");
+        }
+        assert!(
+            parse_entries(&format!(
+                "{header}100000ba7 UserKeyMapping (null)\n100000b7f UserKeyMapping ({{Unknown = 1;}})"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1816,7 +1977,10 @@ mod tests {
 
     /// The structural check behind [`caps_to_f18_live`], over parsed text.
     fn maps_caps_to_f18(text: &str) -> bool {
-        parse_entries(text).is_ok_and(|e| e.contains(&(CAPS_USAGE, F18_USAGE)))
+        parse_entries(&format!(
+            "RegistryID  Key                   Value\n100000ba7 UserKeyMapping {text}\n"
+        ))
+        .is_ok_and(|e| e.contains(&(CAPS_USAGE, F18_USAGE)))
     }
 
     #[test]
