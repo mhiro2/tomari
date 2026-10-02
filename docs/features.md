@@ -178,56 +178,15 @@ Tomari's own settings window.
 
 ## Menu bar tidying
 
-Push the status icons you rarely look at off the edge of the screen, and bring
-them back when you want them.
+Menu bar tidying is unavailable on the supported macOS 27+ baseline. The
+previous divider mechanism cannot hide status icons there. The Menu Bar page
+shows an explanation, Diagnostics reports the feature as unsupported, and no
+divider or handle is created. Tomari leaves the system's overflow control in
+charge.
 
-**This feature is unavailable on macOS 27 and later.** It works by owning a
-status item wide enough to push its neighbours past the edge of the screen, and
-macOS 27 composites the menu bar as a single window in which that no longer
-displaces anything. Rather than leave a switch that adds a divider and hides
-nothing, Tomari reports the feature as unavailable there: the Menu Bar settings
-page shows a notice instead of its controls, Diagnostics marks it unsupported,
-and no divider or handle is added whatever the saved setting says. The Keyboard
-page stops offering the menu bar action, and a shortcut already bound to it is
-left stored but never registered, so it does not hold its keys away from the
-rest of the system. macOS shows its own expand button beside the icons once they
-no longer fit.
-
-Turn it on in the **Menu Bar** section and Tomari adds two small items to your
-menu bar: a **divider** (≡) and a **handle** (‹). Collapsing stretches the
-divider so everything to its *left* slides off-screen; the handle stays put so
-you can always bring them back.
-
-**You choose what gets hidden.** In Tomari's item list, choose **Hide** to move
-an always-shown item to the left of the divider, or **Always Show** to move a
-hidden item to its right. Tomari performs the same ⌘-drag gesture you would use
-in the real menu bar, then rereads the physical arrangement before reporting
-success. It never updates the list based on an assumed move.
-
-The **Menu Bar** settings separate **Items** from **Behavior**. Items shows a
-menu-bar diagram and a live, best-effort inventory split into **Hidden now** and
-**Always shown**, with an action on every identified item. Choose **Refresh
-Items** after rearranging the real menu bar manually. Reading names and
-performing an automated move require Accessibility access; some applications
-expose only a generic owner name, and the list may be incomplete when macOS
-does not publish an item through Accessibility. Behavior contains the show/hide
-control and automatic collapse timing.
-
-- **Expand and collapse** — click the ‹ handle, use **Show Menu Bar Icons** in
-  the tray menu, or bind the "Show/Hide Menu Bar Icons" action to a shortcut in
-  the Keyboard section.
-- **Collapse automatically** — off by default; 5, 15 or 30 seconds are
-  available. A timed collapse fires on schedule whatever you are doing,
-  including while one of the revealed menus is open.
-- **Limits** — expanding may not reveal everything if the frontmost app has a
-  long menu bar of its own, or if your Mac has a notch. Some system and
-  third-party items also ignore synthetic drags or restore their own position.
-  Tomari reports those moves as unsuccessful and leaves the physical layout as
-  macOS presents it; hold ⌘ and drag the item manually as the fallback.
-
-If you ever lose the handle (⌘-dragging it to the *left* of the divider hides it
-along with everything else), open Tomari's window with the global shortcut
-(default ⌘⇧K) and use the switch in the Menu Bar section.
+Keyboard settings do not offer the menu bar action. A previously saved shortcut
+for that action remains inactive and does not reserve its keys. Other menu bar
+app behavior, including Tomari's tray menu, is unaffected.
 
 ## Prevent Sleep (keep awake)
 

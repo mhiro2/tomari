@@ -1,7 +1,7 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
-// macOS-only app: the WKWebView shipped with macOS 26 supports modern syntax,
+// macOS-only app: the WKWebView shipped with macOS 27 supports modern syntax,
 // so we can target a recent baseline and skip legacy transpilation.
 export default defineConfig({
   plugins: [react()],

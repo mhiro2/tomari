@@ -6,9 +6,10 @@ for adding new features.
 Tomari is a small utility that lives in the macOS menu bar. It currently
 provides **keyboard customization** (modifier tap/hold, remapping, hyper key,
 global shortcuts), **window management** (per-application remembered homes,
-reversible restore, quick tiling, drag-to-snap), **menu bar tidying** (hiding
-status items behind a divider), and **sleep prevention** (keep awake, including
-with the lid closed).
+reversible restore, quick tiling, drag-to-snap), and **sleep prevention** (keep
+awake, including with the lid closed). The application requires macOS 27 or
+later on Apple Silicon. Menu bar tidying is unavailable on every supported OS;
+its settings destination reports that limitation.
 
 ---
 
@@ -1062,6 +1063,12 @@ workers. It otherwise releases everything before the process exits. The pure
 
 ## 9. Menu bar tidying (`src-tauri/src/menubar/`)
 
+This mechanism is unavailable on the supported macOS 27+ baseline. The backend
+availability gate prevents status-item creation, inventory scans, movement,
+and shortcut registration for this feature; the UI and Diagnostics report it
+as unsupported. The implementation below documents the withdrawn mechanism,
+not a supported workflow. No macOS 26 compatibility target is maintained.
+
 Gather the status items you rarely look at behind a divider and push them off
 the edge of the screen until you ask for them — the job Bartender, Ice and
 Hidden Bar do.
@@ -1140,11 +1147,10 @@ sees no effect at all and concludes the switch is broken. Quit removes the items
 even on a crash, so there is no `keepawake`-style marker to keep) but so the
 menu bar is tidy the moment Tomari is asked to leave.
 
-Verified on macOS 26: the divider stretches, the controller stays on screen, and
-clicking it, the tray item, a hotkey or the panel all round-trip. Position
-persistence (`autosaveName`) is best effort on Apple's side and is only written
-once the user actually drags an item, so a rearrangement surviving OFF→ON and
-relaunch is still unproven.
+Historical testing on macOS 26 confirmed divider expansion and the main
+controls, but never established position persistence across OFF→ON or relaunch.
+Those results do not establish support on macOS 27, where the gate above keeps
+the mechanism off.
 
 ## 10. Permission model
 

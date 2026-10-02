@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Small macOS utilities under a single menu bar icon.</b><br/>
-  Keyboard customization, window management, menu bar tidying and keep awake — one quiet place, built to grow.
+  Keyboard customization, window management and keep awake — one quiet place, built to grow.
 </p>
 
 ## Features
@@ -34,16 +34,11 @@
 - Familiar left/right/maximize shortcuts remain available for quick tiling;
   the menu bar stays focused on status and recovery instead of placement grids.
 
-### Menu bar
+### Menu bar availability
 
-- Hide the status icons you rarely look at behind a divider, and bring them
-  back with a click, the tray, or a shortcut. Settings mirrors the current
-  hidden and always-visible items and can move one across the divider with a
-  **Hide** or **Always Show** action. A manual ⌘-drag remains available when
-  macOS refuses an automated move.
-- **Unavailable on macOS 27 and later.** The system no longer lets an
-  application push status icons off the menu bar, so Tomari switches the
-  feature off there and leaves the overflow button macOS provides in charge.
+Menu bar tidying is unavailable on supported macOS versions. The Menu Bar
+page explains the limitation, and Tomari leaves the overflow button macOS
+provides in charge.
 
 ### Keep Awake
 
@@ -75,7 +70,7 @@ See the [feature reference](docs/features.md) for the full details.
 
 ## Installation
 
-**Requirements:** macOS 26 or later on Apple Silicon.
+**Requirements:** macOS 27 or later on Apple Silicon.
 
 1. Download the latest `Tomari_*.dmg` from the
    [Releases](https://github.com/mhiro2/tomari/releases) page.
