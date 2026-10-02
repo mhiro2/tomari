@@ -1925,6 +1925,25 @@ kbd,
   font-size: 12px;
 }
 
+.backup-panel > .settings-section__header {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.backup-panel > .settings-section__header h2 {
+  white-space: nowrap;
+}
+
+.backup-panel__action {
+  display: inline-flex;
+  width: 208px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
 .backup-note {
   display: flex;
   flex-wrap: wrap;

@@ -196,12 +196,21 @@ export function SettingsBackupPanel() {
 
   return (
     <>
-      <SettingsList label={t('backup.title')} description={t('backup.privacy')}>
+      <SettingsList
+        className="backup-panel"
+        label={t('backup.title')}
+        description={t('backup.privacy')}
+      >
         <SettingsRow
           title={t('backup.exportTitle')}
           description={t('backup.exportDescription')}
           trail={
-            <button type="button" className="btn" disabled={busy} onClick={backup.exportSettings}>
+            <button
+              type="button"
+              className="btn backup-panel__action"
+              disabled={busy}
+              onClick={backup.exportSettings}
+            >
               {t(backup.phase === 'exporting' ? 'backup.exporting' : 'backup.export')}
             </button>
           }
@@ -213,7 +222,7 @@ export function SettingsBackupPanel() {
             <button
               ref={importButtonRef}
               type="button"
-              className="btn"
+              className="btn backup-panel__action"
               disabled={busy}
               onClick={(event) => {
                 event.currentTarget.focus();
@@ -224,10 +233,10 @@ export function SettingsBackupPanel() {
             </button>
           }
         />
+        {/* macOS may classify valid JSON as plain text; validate contents after selection. */}
         <input
           ref={fileRef}
           type="file"
-          accept="application/json,.json"
           hidden
           aria-label={t('backup.chooseFile')}
           onChange={(event) => {
@@ -245,7 +254,7 @@ export function SettingsBackupPanel() {
             <button
               ref={restoreButtonRef}
               type="button"
-              className="btn btn--ghost"
+              className="btn backup-panel__action"
               disabled={busy || backup.canRestore !== true}
               onClick={backup.reviewRestore}
             >
