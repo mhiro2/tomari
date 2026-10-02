@@ -13,16 +13,12 @@ use crate::error::CmdError;
 /// Longest menu-bar auto-collapse delay accepted: one hour. The panel offers
 /// seconds-scale choices; anything beyond this is a value no UI produced, and a
 /// timer armed for `u32::MAX` seconds would be a deadline 136 years out.
-pub const MAX_AUTO_COLLAPSE_SECS: u32 = 3600;
+pub use tomari_core::MAX_AUTO_COLLAPSE_SECS;
 
 /// Don't trust the frontend's `AppSettings`: bound every numeric field that
 /// drives a timer or a resource. `0` for the auto-collapse delay means off.
 pub fn sanitize_settings(settings: AppSettings) -> Result<AppSettings, CmdError> {
-    if settings.menu_bar_auto_collapse_secs > MAX_AUTO_COLLAPSE_SECS {
-        return Err(CmdError::other(format!(
-            "menuBarAutoCollapseSecs must be 0 (off) or at most {MAX_AUTO_COLLAPSE_SECS} seconds"
-        )));
-    }
+    settings.validate()?;
     Ok(settings)
 }
 

@@ -14,6 +14,7 @@ use crate::domain::AppSettings;
 use crate::domain::keyboard::{Hotkey, ModifierRule};
 use crate::error::{Error, Result};
 
+mod backup;
 mod keyboard;
 mod meta;
 mod placements;

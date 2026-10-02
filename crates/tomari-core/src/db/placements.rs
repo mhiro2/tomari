@@ -91,32 +91,7 @@ impl Database {
 
     /// Insert or replace one application's named position.
     pub fn save_window_placement(&self, placement: &WindowPlacement) -> Result<()> {
-        if placement.application.bundle_id.trim().is_empty() {
-            return Err(Error::invalid("bundle_id", "must not be empty"));
-        }
-        if !placement.frame.is_valid() {
-            return Err(Error::invalid(
-                "frame",
-                "must be finite, non-empty, and inside the work area",
-            ));
-        }
-        let frame = serde_json::to_string(&placement.frame)?;
-        self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO window_placements (bundle_id, app_name, slot, frame)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(bundle_id, slot) DO UPDATE SET
-                   app_name = excluded.app_name,
-                   frame = excluded.frame",
-                params![
-                    placement.application.bundle_id,
-                    placement.application.name,
-                    placement.slot.as_str(),
-                    frame,
-                ],
-            )?;
-            Ok(())
-        })
+        self.with_conn(|conn| write_window_placement(conn, placement))
     }
 
     /// Forget one named position, returning whether a row existed. Deleting an
@@ -130,6 +105,36 @@ impl Database {
             Ok(deleted != 0)
         })
     }
+}
+
+pub(super) fn write_window_placement(
+    conn: &rusqlite::Connection,
+    placement: &WindowPlacement,
+) -> Result<()> {
+    if placement.application.bundle_id.trim().is_empty() {
+        return Err(Error::invalid("bundle_id", "must not be empty"));
+    }
+    if !placement.frame.is_valid() {
+        return Err(Error::invalid(
+            "frame",
+            "must be finite, non-empty, and inside the work area",
+        ));
+    }
+    let frame = serde_json::to_string(&placement.frame)?;
+    conn.execute(
+        "INSERT INTO window_placements (bundle_id, app_name, slot, frame)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(bundle_id, slot) DO UPDATE SET
+           app_name = excluded.app_name,
+           frame = excluded.frame",
+        params![
+            placement.application.bundle_id,
+            placement.application.name,
+            placement.slot.as_str(),
+            frame,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Read every persisted placement column and classify only malformed slot/frame

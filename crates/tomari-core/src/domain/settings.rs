@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Longest accepted menu-bar auto-collapse delay. Zero disables the timer.
+pub const MAX_AUTO_COLLAPSE_SECS: u32 = 3600;
+
 /// Preferred UI language. `System` follows the OS locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +74,17 @@ fn default_command_ime_switch_enabled() -> bool {
 }
 
 impl AppSettings {
+    /// Reject resource and timer values outside the supported settings range.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.menu_bar_auto_collapse_secs > MAX_AUTO_COLLAPSE_SECS {
+            return Err(crate::Error::invalid(
+                "menuBarAutoCollapseSecs",
+                format!("must be 0 (off) or at most {MAX_AUTO_COLLAPSE_SECS} seconds"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether the keyboard event tap should be running.
     pub fn keyboard_tap_enabled(&self) -> bool {
         self.keyboard_enabled

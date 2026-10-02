@@ -44,6 +44,9 @@ pub enum Error {
 
     #[error("invalid value for {field}: {reason}")]
     Invalid { field: &'static str, reason: String },
+
+    #[error("the saved configuration changed; review the import again")]
+    ConfigurationChanged,
 }
 
 impl Error {
