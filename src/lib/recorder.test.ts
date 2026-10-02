@@ -44,6 +44,24 @@ describe('captureAccelerator', () => {
     });
   });
 
+  it('records plain keys and Shift combinations for keystroke actions', () => {
+    expect(captureAccelerator(event('Escape'), 'keystroke')).toEqual({
+      status: 'captured',
+      accelerator: 'Escape',
+    });
+    expect(captureAccelerator(event('Enter'), 'keystroke')).toEqual({
+      status: 'captured',
+      accelerator: 'Enter',
+    });
+    expect(captureAccelerator(event('KeyA', { shiftKey: true }), 'keystroke')).toEqual({
+      status: 'captured',
+      accelerator: 'Shift+A',
+    });
+    expect(captureAccelerator(event('ShiftLeft', { shiftKey: true }), 'keystroke')).toEqual({
+      status: 'ignored',
+    });
+  });
+
   it('ignores modifier-only presses while a chord is still being built', () => {
     expect(captureAccelerator(event('MetaLeft', { metaKey: true }))).toEqual({
       status: 'ignored',

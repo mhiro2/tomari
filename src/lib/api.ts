@@ -71,8 +71,11 @@ export const deleteHotkey = (id: string): Promise<void> => invoke('delete_hotkey
 
 export const listModifierRules = (): Promise<ModifierRule[]> => invoke('list_modifier_rules');
 
-export const saveModifierRule = (rule: ModifierRule): Promise<SaveModifierRuleOutcome> =>
-  invoke('save_modifier_rule', { rule });
+export const saveModifierRule = (
+  rule: ModifierRule,
+  originalId?: string,
+): Promise<SaveModifierRuleOutcome> =>
+  invoke('save_modifier_rule', { rule, originalId: originalId ?? null });
 
 export const deleteModifierRule = (id: string): Promise<RuleMutationOutcome> =>
   invoke('delete_modifier_rule', { id });
@@ -119,8 +122,10 @@ export const inputMonitoringStatus = (): Promise<boolean> => invoke('input_monit
 
 export const requestInputMonitoring = (): Promise<boolean> => invoke('request_input_monitoring');
 
-export const validateAccelerator = (accelerator: string): Promise<AcceleratorCheck> =>
-  invoke('validate_accelerator', { accelerator });
+export const validateAccelerator = (
+  accelerator: string,
+  purpose: 'shortcut' | 'keystroke' = 'shortcut',
+): Promise<AcceleratorCheck> => invoke('validate_accelerator', { accelerator, purpose });
 
 // Temporarily unregister (true) or re-register (false) all global shortcuts,
 // so a shortcut being recorded reaches the panel instead of firing an action.

@@ -37,6 +37,20 @@ Command IME switch is shown as a direct key-to-input-source mapping. Global
 shortcut recording stays in the Shortcuts tab so it does not compete with the
 modifier table.
 
+Use **Add Modifier Rule** or a row's **Edit** button to configure its label,
+physical key, side, held role, and tap action. The held role is either the
+original modifier, another modifier, or Hyper; choosing one never combines
+Hyper with a separate remap. Caps Lock and Fn use Either because those keys
+have no left/right pair. Left and right Command remain reserved for the IME
+switch even while that switch is off; an Either-side Command rule is separate
+and side-specific rules take precedence.
+
+The editor supports IME actions, window actions, and **Send a keystroke** as tap
+actions. The keystroke recorder accepts single keys such as Escape, Enter, or a
+letter, while global-shortcut recording retains its modifier requirement.
+Changes stay in the editor until **Save Rule** succeeds. Cancel discards the draft;
+deleting an existing rule requires a second confirmation in the editor.
+
 - **Modifier remapping** — remap Caps Lock / Control / Option / Command /
   Shift / fn to another modifier (for example, _Caps Lock → Control_).
 - **Tap vs. hold** — tap a modifier on its own, quickly, to fire a dedicated
@@ -65,20 +79,24 @@ and all valid items keep working.
 The checks reject malformed key combinations and keystroke actions, ordinary
 typing keys used as global shortcuts without Control, Option, or Command,
 invalid names or identifiers, Hyper combined with a separate remap, and slots
-reserved for the built-in left/right Command IME switch. If multiple rows
-normalize to the same identifier, shortcut, or physical modifier slot, Tomari
-skips every row in that group rather than choosing one based on database order.
+reserved for the built-in left/right Command IME switch. A Caps Lock or Fn rule
+with a left/right side is also invalid. If multiple rows normalize to the same
+identifier, shortcut, or physical modifier slot, Tomari skips every row in that
+group rather than choosing one based on database order.
 Disabled rows take part too, preventing an item from silently displacing another
 when it is enabled later. The built-in Command IME pair is added only after the
 saved rules pass these checks.
 
 A persistent amber notice reports how many saved keyboard items need attention
 and links to localized details on the Keyboard page. The notice remains until
-the affected rows are repaired or deleted. Every warning offers deletion by its
-exact stored identity, including window shortcuts and modifier rules that the
-Keyboard editor cannot otherwise reconstruct. Persisted labels and accelerators
-are bounded and stripped of control characters for display without changing the
-stored values used by repair or deletion. This is separate from an apply warning,
+the affected rows are repaired or deleted. Readable modifier rules offer
+**Repair**, opening their values in the editor; invalid identities can be
+replaced without leaving a second copy of the original row. A rule that cannot
+be reconstructed instead offers a path to create a new rule. Every warning
+also offers deletion by its exact stored identity, including window shortcuts
+and modifier rules that the editor cannot reconstruct. Persisted labels and
+accelerators are bounded and stripped of control characters for display without
+changing the stored values used by repair or deletion. This is separate from an apply warning,
 which means a valid setting reached macOS but its live system change failed.
 
 ### Notes on remapping

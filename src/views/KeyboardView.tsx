@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 
 import { AddHotkeyForm, HotkeyRow, type HotkeyActionOption } from '../components/HotkeyEditor';
+import { ModifierRuleEditor } from '../components/ModifierRuleEditor';
 import {
   FeatureContent,
   FeaturePageHeader,
@@ -38,6 +39,7 @@ const CONFIGURATION_REASON_KEYS = {
   duplicateId: 'keyboard.configurationIssueReason.duplicateId',
   duplicateAccelerator: 'keyboard.configurationIssueReason.duplicateAccelerator',
   duplicateModifierSlot: 'keyboard.configurationIssueReason.duplicateModifierSlot',
+  unsupportedModifierSide: 'keyboard.configurationIssueReason.unsupportedModifierSide',
 } as const satisfies Record<ConfigurationIssueReason, MessageKey>;
 
 function isWindowAction(action: AppAction): boolean {
@@ -115,6 +117,31 @@ function clearSaving(
 // shared warning state replaces exactly these.
 const RULE_MUTATION_PROBES = ['capsLockRemap'] as const;
 
+function keyboardShortcutOptions(
+  menuBarSupported: boolean | null,
+  t: Translator,
+): HotkeyActionOption[] {
+  const options: HotkeyActionOption[] = [
+    { key: 'togglePanel', label: t('action.togglePanel'), action: { type: 'togglePanel' } },
+    {
+      key: 'toggleKeepAwake',
+      label: t('action.toggleKeepAwake'),
+      action: { type: 'toggleKeepAwake' },
+    },
+  ];
+  // Only once the backend confirms the mechanism exists: binding keys to it
+  // otherwise reserves them system-wide for an action that cannot run.
+  if (menuBarSupported === true) {
+    options.push({
+      key: 'toggleMenuBar',
+      label: t('action.toggleMenuBar'),
+      action: { type: 'toggleMenuBar' },
+    });
+  }
+
+  return options;
+}
+
 export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: KeyboardTab }) {
   const t = useT();
   const { settings, configurationWarnings, update, reportApplyOutcome } = useSettings();
@@ -128,6 +155,11 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
   const [configurationError, setConfigurationError] = useState<string | null>(null);
   const [tab, setTab] = useState<KeyboardTab>(initialTab);
   const [addingShortcut, setAddingShortcut] = useState(false);
+  const [editor, setEditor] = useState<{
+    rule: ModifierRule | null;
+    repairIdentity: boolean;
+  } | null>(null);
+  const editorTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Ids with a save in flight, so their row's controls can be disabled — this
   // both prevents a second click racing the first save and, since the base
   // for a patch is always read from these refs (not a render-captured prop),
@@ -146,6 +178,12 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
     rulesRef.current = rules;
     hotkeysRef.current = hotkeys;
   }, [rules, hotkeys]);
+  useLayoutEffect(() => {
+    if (editor !== null || editorTriggerRef.current === null) return;
+    if (editorTriggerRef.current.isConnected) editorTriggerRef.current.focus();
+    else document.getElementById('keyboard-modifiers-title')?.focus();
+    editorTriggerRef.current = null;
+  }, [editor]);
   // Formats through the current `t` without the mount-only effect below
   // depending on it — `useT()` returns a new closure on every render, so
   // adding it to the effect's deps would re-run the fetch each time.
@@ -182,7 +220,7 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
     // reloaded the engine — a save failure must surface rather than leave the
     // row showing a state the runtime never adopted.
     try {
-      const outcome = await api.saveModifierRule(next);
+      const outcome = await api.saveModifierRule(next, id);
       setRules((rs) => rs.map((r) => (r.id === id ? outcome.rule : r)));
       setModifierError(null);
       // The rule is stored and live; whether the Caps Lock HID remap followed
@@ -262,27 +300,26 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
     setAddingShortcut(false);
   }
 
+  function openRuleEditor(rule: ModifierRule | null, trigger: HTMLButtonElement) {
+    editorTriggerRef.current = trigger;
+    const repairIdentity =
+      rule !== null &&
+      ((configurationWarnings?.invalidModifierRules.some(
+        (issue) =>
+          issue.id === rule.id &&
+          ['emptyId', 'idTooLong', 'reservedRuleId', 'duplicateId'].includes(issue.reason),
+      ) ??
+        false) ||
+        rulesRef.current.some(
+          (other) => other.id !== rule.id && other.id.trim() === rule.id.trim(),
+        ));
+    setEditor({ rule, repairIdentity });
+  }
+
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
   const on = settings.keyboardEnabled;
   const keyboardHotkeys = hotkeys.filter((hotkey) => !isWindowAction(hotkey.action));
-  const shortcutOptions: HotkeyActionOption[] = [
-    { key: 'togglePanel', label: t('action.togglePanel'), action: { type: 'togglePanel' } },
-    {
-      key: 'toggleKeepAwake',
-      label: t('action.toggleKeepAwake'),
-      action: { type: 'toggleKeepAwake' },
-    },
-  ];
-  // Only once the backend confirms the mechanism exists: binding keys to it
-  // otherwise reserves them system-wide for an action that cannot run.
-  if (menuBarSupported === true) {
-    shortcutOptions.push({
-      key: 'toggleMenuBar',
-      label: t('action.toggleMenuBar'),
-      action: { type: 'toggleMenuBar' },
-    });
-  }
 
   return (
     <div className="view keyboard-view">
@@ -302,6 +339,12 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
             error={configurationError}
             onDeleteHotkey={(id) => void removeHotkey(id, true)}
             onDeleteModifierRule={(id) => void removeInvalidModifierRule(id)}
+            repairableModifierIds={new Set(rules.map((rule) => rule.id))}
+            modifierRulesLoaded={rulesLoaded}
+            onRepairModifierRule={(id, trigger) => {
+              setTab('modifiers');
+              openRuleEditor(rulesRef.current.find((rule) => rule.id === id) ?? null, trigger);
+            }}
           />
         )}
 
@@ -336,6 +379,9 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
             onToggle={(rule) => void saveRulePatch(rule.id, { enabled: !rule.enabled })}
             onTapAction={(rule, action) => void saveRulePatch(rule.id, { tap: action })}
             onCommandImeSwitch={(enabled) => update({ commandImeSwitchEnabled: enabled })}
+            editorOpen={editor !== null}
+            onAdd={(trigger) => openRuleEditor(null, trigger)}
+            onEdit={openRuleEditor}
           />
         ) : (
           <ShortcutsPanel
@@ -343,7 +389,7 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
             loaded={hotkeysLoaded}
             error={shortcutError}
             savingIds={savingHotkeyIds}
-            options={shortcutOptions}
+            options={keyboardShortcutOptions(menuBarSupported, t)}
             adding={addingShortcut}
             onStartAdding={() => setAddingShortcut(true)}
             onCancelAdding={() => setAddingShortcut(false)}
@@ -354,6 +400,32 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
           />
         )}
       </FeatureContent>
+      {editor !== null && (
+        <ModifierRuleEditor
+          rule={editor.rule}
+          repairIdentity={editor.repairIdentity}
+          menuBarSupported={menuBarSupported === true}
+          onClose={() => setEditor(null)}
+          onSaved={(outcome, originalId) => {
+            setRules((current) =>
+              originalId === undefined
+                ? [...current, outcome.rule]
+                : current.map((rule) => (rule.id === originalId ? outcome.rule : rule)),
+            );
+            reportApplyOutcome(outcome, RULE_MUTATION_PROBES);
+            setModifierError(null);
+            setConfigurationError(null);
+            setEditor(null);
+          }}
+          onDeleted={(outcome, originalId) => {
+            setRules((current) => current.filter((rule) => rule.id !== originalId));
+            reportApplyOutcome(outcome, RULE_MUTATION_PROBES);
+            setModifierError(null);
+            setConfigurationError(null);
+            setEditor(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -372,11 +444,17 @@ function ConfigurationIssueGroup({
   issues,
   deletingIds,
   onDelete,
+  repairableIds,
+  repairReady,
+  onRepair,
 }: {
   title: string;
   issues: ConfigurationIssue[];
   deletingIds: ReadonlySet<string>;
   onDelete: (id: string) => void;
+  repairableIds?: ReadonlySet<string>;
+  repairReady?: boolean;
+  onRepair?: (id: string, trigger: HTMLButtonElement) => void;
 }) {
   const t = useT();
   if (issues.length === 0) return null;
@@ -392,11 +470,33 @@ function ConfigurationIssueGroup({
                 <strong>{label}</strong>
                 <span>{t(CONFIGURATION_REASON_KEYS[issue.reason])}</span>
               </span>
-              <ConfigurationIssueDeleteButton
-                label={label}
-                deleting={deletingIds.has(issue.id)}
-                onDelete={() => onDelete(issue.id)}
-              />
+              <span className="configuration-issues__actions">
+                {onRepair && (
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={!repairReady || deletingIds.has(issue.id)}
+                    aria-label={t(
+                      repairableIds?.has(issue.id)
+                        ? 'keyboard.repairRuleFor'
+                        : 'keyboard.createReplacementFor',
+                      { label },
+                    )}
+                    onClick={(event) => onRepair(issue.id, event.currentTarget)}
+                  >
+                    {t(
+                      repairableIds?.has(issue.id)
+                        ? 'keyboard.repairRule'
+                        : 'keyboard.createReplacement',
+                    )}
+                  </button>
+                )}
+                <ConfigurationIssueDeleteButton
+                  label={label}
+                  deleting={deletingIds.has(issue.id)}
+                  onDelete={() => onDelete(issue.id)}
+                />
+              </span>
             </li>
           );
         })}
@@ -454,6 +554,9 @@ function ConfigurationIssues({
   error,
   onDeleteHotkey,
   onDeleteModifierRule,
+  repairableModifierIds,
+  modifierRulesLoaded,
+  onRepairModifierRule,
 }: {
   warnings: ConfigurationWarnings;
   deletingHotkeyIds: ReadonlySet<string>;
@@ -461,6 +564,9 @@ function ConfigurationIssues({
   error: string | null;
   onDeleteHotkey: (id: string) => void;
   onDeleteModifierRule: (id: string) => void;
+  repairableModifierIds: ReadonlySet<string>;
+  modifierRulesLoaded: boolean;
+  onRepairModifierRule: (id: string, trigger: HTMLButtonElement) => void;
 }) {
   const t = useT();
   return (
@@ -483,6 +589,9 @@ function ConfigurationIssues({
           issues={warnings.invalidModifierRules}
           deletingIds={deletingModifierRuleIds}
           onDelete={onDeleteModifierRule}
+          repairableIds={repairableModifierIds}
+          repairReady={modifierRulesLoaded}
+          onRepair={onRepairModifierRule}
         />
         <ConfigurationIssueGroup
           title={t('keyboard.configurationIssuesHotkeys')}
@@ -510,6 +619,9 @@ function ModifiersPanel({
   onToggle,
   onTapAction,
   onCommandImeSwitch,
+  editorOpen,
+  onAdd,
+  onEdit,
 }: {
   rules: ModifierRule[];
   loaded: boolean;
@@ -520,6 +632,9 @@ function ModifiersPanel({
   onToggle: (rule: ModifierRule) => void;
   onTapAction: (rule: ModifierRule, action: AppAction) => void;
   onCommandImeSwitch: (enabled: boolean) => void;
+  editorOpen: boolean;
+  onAdd: (trigger: HTMLButtonElement) => void;
+  onEdit: (rule: ModifierRule, trigger: HTMLButtonElement) => void;
 }) {
   const t = useT();
   return (
@@ -530,8 +645,18 @@ function ModifiersPanel({
       aria-labelledby="keyboard-tabs-modifiers-tab"
     >
       <section className="keyboard-section">
-        <header className="keyboard-section__header">
-          <h2 id="keyboard-modifiers-title">{t('keyboard.modifierKeys')}</h2>
+        <header className="keyboard-section__header keyboard-section__header--action">
+          <h2 id="keyboard-modifiers-title" tabIndex={-1}>
+            {t('keyboard.modifierKeys')}
+          </h2>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={!loaded || editorOpen || savingIds.size > 0}
+            onClick={(event) => onAdd(event.currentTarget)}
+          >
+            {t('keyboard.addRule')}
+          </button>
         </header>
         <SettingsList>
           {!loaded && <p className="empty-row">{t('common.loading')}</p>}
@@ -553,10 +678,11 @@ function ModifiersPanel({
                   <ModifierRow
                     key={rule.id}
                     rule={rule}
-                    saving={savingIds.has(rule.id)}
+                    saving={savingIds.has(rule.id) || editorOpen}
                     menuBarSupported={menuBarSupported}
                     onToggle={() => onToggle(rule)}
                     onTapAction={(action) => onTapAction(rule, action)}
+                    onEdit={(trigger) => onEdit(rule, trigger)}
                   />
                 ))}
               </tbody>
@@ -687,12 +813,14 @@ function ModifierRow({
   menuBarSupported,
   onToggle,
   onTapAction,
+  onEdit,
 }: {
   rule: ModifierRule;
   saving: boolean;
   menuBarSupported: boolean;
   onToggle: () => void;
   onTapAction: (action: AppAction) => void;
+  onEdit: (trigger: HTMLButtonElement) => void;
 }) {
   const t = useT();
   const selected = tapActionKey(rule.tap);
@@ -703,6 +831,17 @@ function ModifierRow({
           <span className="kbd-chip">{modifierWithSide(rule.modifier, rule.side, t)}</span>
           <span>{modifierLabel(rule.modifier)}</span>
         </span>
+        <button
+          type="button"
+          className="btn btn--ghost modifier-table__edit"
+          disabled={saving}
+          onClick={(event) => onEdit(event.currentTarget)}
+          aria-label={t('keyboard.editRuleFor', {
+            label: safeDisplayText(rule.label) || modifierLabel(rule.modifier),
+          })}
+        >
+          {t('keyboard.edit')}
+        </button>
       </th>
       <td>
         <select

@@ -1,22 +1,25 @@
 // TypeScript mirror of the `tomari-core` domain types. These match the
 // camelCase JSON the Rust backend produces and accepts.
 
-export type WindowPreset =
-  | 'leftHalf'
-  | 'rightHalf'
-  | 'topHalf'
-  | 'bottomHalf'
-  | 'topLeftQuarter'
-  | 'topRightQuarter'
-  | 'bottomLeftQuarter'
-  | 'bottomRightQuarter'
-  | 'leftThird'
-  | 'centerThird'
-  | 'rightThird'
-  | 'leftTwoThirds'
-  | 'rightTwoThirds'
-  | 'center'
-  | 'maximize';
+export const WINDOW_PRESETS = [
+  'leftHalf',
+  'rightHalf',
+  'topHalf',
+  'bottomHalf',
+  'topLeftQuarter',
+  'topRightQuarter',
+  'bottomLeftQuarter',
+  'bottomRightQuarter',
+  'leftThird',
+  'centerThird',
+  'rightThird',
+  'leftTwoThirds',
+  'rightTwoThirds',
+  'center',
+  'maximize',
+] as const;
+
+export type WindowPreset = (typeof WINDOW_PRESETS)[number];
 
 export type DisplayDirection = 'next' | 'prev';
 
@@ -135,6 +138,7 @@ export const CONFIGURATION_ISSUE_REASONS = [
   'duplicateId',
   'duplicateAccelerator',
   'duplicateModifierSlot',
+  'unsupportedModifierSide',
 ] as const;
 
 export type ConfigurationIssueReason = (typeof CONFIGURATION_ISSUE_REASONS)[number];

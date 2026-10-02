@@ -53,6 +53,12 @@ impl Database {
         self.with_conn(|conn| write_modifier_rule(conn, rule))
     }
 
+    /// Create a new row without replacing an existing ID, including rows whose
+    /// contents no longer decode and therefore do not appear in the list.
+    pub fn insert_modifier_rule(&self, rule: &ModifierRule) -> Result<()> {
+        self.with_conn(|conn| store_modifier_rule(conn, rule, false))
+    }
+
     /// Replace one existing modifier rule, including an ID canonicalization.
     pub fn replace_modifier_rule(&self, previous_id: &str, rule: &ModifierRule) -> Result<()> {
         self.with_conn(|conn| replace_modifier_rule(conn, previous_id, rule))
@@ -107,6 +113,10 @@ fn replace_hotkey(conn: &Connection, previous_id: &str, hk: &Hotkey) -> Result<(
 }
 
 pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Result<()> {
+    store_modifier_rule(conn, rule, true)
+}
+
+fn store_modifier_rule(conn: &Connection, rule: &ModifierRule, upsert: bool) -> Result<()> {
     let modifier = serde_json::to_string(&rule.modifier)?;
     let side = serde_json::to_string(&rule.side)?;
     let remap_to = rule
@@ -115,11 +125,14 @@ pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Res
         .map(serde_json::to_string)
         .transpose()?;
     let tap = serde_json::to_string(&rule.tap)?;
-    conn.execute(
+    let mut sql = String::from(
         "INSERT INTO modifier_rules
             (id, label, modifier, side, remap_to, hyper, tap, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    );
+    if upsert {
+        sql.push_str(
+            " ON CONFLICT(id) DO UPDATE SET
             label = excluded.label,
             modifier = excluded.modifier,
             side = excluded.side,
@@ -127,6 +140,10 @@ pub(super) fn write_modifier_rule(conn: &Connection, rule: &ModifierRule) -> Res
             hyper = excluded.hyper,
             tap = excluded.tap,
             enabled = excluded.enabled",
+        );
+    }
+    conn.execute(
+        &sql,
         params![
             rule.id,
             rule.label,
@@ -368,6 +385,77 @@ mod tests {
         db.replace_modifier_rule(&canonical.id, &raw).unwrap();
         assert_eq!(db.list_modifier_rules().unwrap(), vec![raw]);
         assert_eq!(db.count_modifier_rules().unwrap(), 1);
+    }
+
+    #[test]
+    fn modifier_replacement_id_conflict_leaves_both_rows_unchanged() {
+        let db = Database::open_in_memory().unwrap();
+        let original = ModifierRule {
+            id: "".into(),
+            label: "Original".into(),
+            modifier: ModifierKey::Control,
+            side: KeySide::Left,
+            remap_to: None,
+            hyper: false,
+            tap: AppAction::NoOp,
+            enabled: false,
+        };
+        let other = ModifierRule {
+            id: "occupied".into(),
+            label: "Other".into(),
+            modifier: ModifierKey::Option,
+            ..original.clone()
+        };
+        db.upsert_modifier_rule(&original).unwrap();
+        db.upsert_modifier_rule(&other).unwrap();
+        let before = db.list_modifier_rules().unwrap();
+        let replacement = ModifierRule {
+            id: other.id.clone(),
+            enabled: true,
+            ..original
+        };
+
+        assert!(db.replace_modifier_rule("", &replacement).is_err());
+        assert_eq!(db.list_modifier_rules().unwrap(), before);
+    }
+
+    #[test]
+    fn modifier_insert_refuses_to_overwrite_an_undecodable_row() {
+        let db = Database::open_in_memory().unwrap();
+        let rule = ModifierRule {
+            id: "occupied".into(),
+            label: "Stored".into(),
+            modifier: ModifierKey::Control,
+            side: KeySide::Left,
+            remap_to: None,
+            hyper: false,
+            tap: AppAction::NoOp,
+            enabled: false,
+        };
+        db.insert_modifier_rule(&rule).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE modifier_rules SET tap = ?1 WHERE id = ?2",
+                params!["undecodable", rule.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.list_modifier_rules().unwrap().is_empty());
+
+        assert!(db.insert_modifier_rule(&rule).is_err());
+
+        assert_eq!(db.count_modifier_rules().unwrap(), 1);
+        let tap = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT tap FROM modifier_rules WHERE id = ?1",
+                    params![rule.id],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(tap, "undecodable");
     }
 
     #[test]

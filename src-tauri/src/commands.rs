@@ -1,7 +1,7 @@
 //! Tauri commands — the bridge invoked from the React frontend. Argument names
 //! here must match the keys passed from `src/lib/api.ts`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tomari_core::{
     AppPaths, AppSettings, DisplayDirection, Hotkey, ModifierRule, PersistedSettings,
@@ -24,6 +24,15 @@ pub struct AcceleratorCheck {
     valid: bool,
     normalized: Option<String>,
     error: Option<String>,
+}
+
+/// Recording a global shortcut requires a safe chord; sending a keystroke can
+/// also use an ordinary key such as Escape or a letter.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AcceleratorPurpose {
+    Shortcut,
+    Keystroke,
 }
 
 /// Outcome of [`save_settings`]: the settings always persist (a write failure
@@ -975,13 +984,17 @@ impl RuleMutationOutcome {
     }
 }
 
+/// Create a rule when `original_id` is absent, or replace exactly that stored
+/// row when supplied. The original ID is opaque, including empty and untrimmed
+/// values, so quarantined identities can be repaired without creating a copy.
 #[tauri::command]
 pub async fn save_modifier_rule(
     app: AppHandle,
     rule: ModifierRule,
+    original_id: Option<String>,
 ) -> CmdResult<SaveModifierRuleOutcome> {
     off_main(app, move |app, state| {
-        save_modifier_rule_blocking(app, state, rule)
+        save_modifier_rule_blocking(app, state, rule, original_id.as_deref())
     })
     .await
 }
@@ -990,6 +1003,7 @@ fn save_modifier_rule_blocking(
     app: &AppHandle,
     state: &AppState,
     rule: ModifierRule,
+    original_id: Option<&str>,
 ) -> CmdResult<SaveModifierRuleOutcome> {
     let _config = lock_config_mutation(state)?;
     // Don't trust the frontend: reject empty / overlong / reserved ids and
@@ -1002,13 +1016,13 @@ fn save_modifier_rule_blocking(
     let ValidatedUpsert {
         value: rule,
         previous,
-    } = validated_modifier_rule_upsert(rule, &existing)?;
+    } = validated_modifier_rule_upsert(rule, original_id, &existing)?;
     // Snapshot the stored row so a failed live reload can be rolled back — the
     // DB must not keep a rule the live engine never picked up, which would
     // "save successfully" yet take no effect until the next launch.
     match &previous {
         Some(row) => state.db.replace_modifier_rule(&row.id, &rule)?,
-        None => state.db.upsert_modifier_rule(&rule)?,
+        None => state.db.insert_modifier_rule(&rule)?,
     }
     match reload_engine_rules(app, state) {
         // The engine reloaded but `hidutil` left the Caps Lock remap out of
@@ -1040,16 +1054,25 @@ fn save_modifier_rule_blocking(
 
 fn validated_modifier_rule_upsert(
     candidate: ModifierRule,
+    original_id: Option<&str>,
     existing: &[ModifierRule],
 ) -> CmdResult<ValidatedUpsert<ModifierRule>> {
-    let raw_candidate_id = candidate.id.clone();
+    // The target row and its replacement identity are independent: repairing
+    // an empty, reserved, overlong or colliding ID requires changing the ID.
+    // Never trim the original ID or fall back to another row after it vanished.
+    let previous = original_id
+        .map(|id| {
+            existing
+                .iter()
+                .find(|rule| rule.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    CmdError::other("the modifier rule no longer exists; refresh the list")
+                })
+        })
+        .transpose()?;
     let candidate = keyboard_validation::validate_modifier_rule(candidate)
         .map_err(|issue| CmdError::other(issue.to_string()))?;
-    let previous = existing
-        .iter()
-        .find(|rule| rule.id == raw_candidate_id)
-        .or_else(|| existing.iter().find(|rule| rule.id == candidate.id))
-        .cloned();
     let mut post_upsert = existing
         .iter()
         .filter(|rule| {
@@ -1059,6 +1082,14 @@ fn validated_modifier_rule_upsert(
         })
         .cloned()
         .collect::<Vec<_>>();
+    // Even an intrinsically invalid row owns its stored primary key. Surface
+    // the collision before writing; the database's INSERT also protects IDs
+    // owned by undecodable rows omitted from this readable snapshot.
+    if post_upsert.iter().any(|rule| rule.id == candidate.id) {
+        return Err(CmdError::other(
+            "another modifier rule already uses this id",
+        ));
+    }
     post_upsert.push(candidate.clone());
     let report = keyboard_validation::validate_modifier_rules(post_upsert);
     if report.valid.iter().any(|rule| rule == &candidate) {
@@ -1377,8 +1408,17 @@ fn set_hotkeys_suspended_blocking(
 }
 
 #[tauri::command]
-pub fn validate_accelerator(accelerator: String) -> AcceleratorCheck {
-    match accelerator::normalize_global(&accelerator) {
+pub fn validate_accelerator(accelerator: String, purpose: AcceleratorPurpose) -> AcceleratorCheck {
+    let normalized = match purpose {
+        AcceleratorPurpose::Shortcut => {
+            keyboard_validation::validate_global_accelerator(&accelerator)
+                .map_err(|reason| reason.to_string())
+        }
+        AcceleratorPurpose::Keystroke => {
+            accelerator::normalize(&accelerator).map_err(|error| error.to_string())
+        }
+    };
+    match normalized {
         Ok(normalized) => AcceleratorCheck {
             valid: true,
             normalized: Some(normalized),
@@ -1387,7 +1427,7 @@ pub fn validate_accelerator(accelerator: String) -> AcceleratorCheck {
         Err(e) => AcceleratorCheck {
             valid: false,
             normalized: None,
-            error: Some(e.to_string()),
+            error: Some(e),
         },
     }
 }
@@ -1625,10 +1665,11 @@ mod tests {
         let existing = vec![occupied, legacy_invalid];
 
         let duplicate = test_modifier_rule("candidate", ModifierKey::Option, KeySide::Left);
-        assert!(validated_modifier_rule_upsert(duplicate, &existing).is_err());
+        assert!(validated_modifier_rule_upsert(duplicate, None, &existing).is_err());
 
         let accepted = validated_modifier_rule_upsert(
             test_modifier_rule(" candidate ", ModifierKey::Shift, KeySide::Right),
+            None,
             &existing,
         )
         .expect("an unrelated quarantined row must not block a valid save");
@@ -1642,8 +1683,9 @@ mod tests {
 
         let raw = test_modifier_rule(" rule ", ModifierKey::Shift, KeySide::Right);
 
-        let upsert = validated_modifier_rule_upsert(raw.clone(), std::slice::from_ref(&raw))
-            .expect("editing the singleton raw-ID rule must not invent a duplicate");
+        let upsert =
+            validated_modifier_rule_upsert(raw.clone(), Some(&raw.id), std::slice::from_ref(&raw))
+                .expect("editing the singleton raw-ID rule must not invent a duplicate");
 
         assert_eq!(upsert.value.id, "rule");
         assert_eq!(upsert.previous, Some(raw));
@@ -1656,7 +1698,184 @@ mod tests {
         let raw = test_modifier_rule(" rule ", ModifierKey::Shift, KeySide::Right);
         let canonical = test_modifier_rule("rule", ModifierKey::Control, KeySide::Either);
 
-        assert!(validated_modifier_rule_upsert(raw.clone(), &[raw, canonical]).is_err());
+        let original_id = raw.id.clone();
+        assert!(
+            validated_modifier_rule_upsert(raw.clone(), Some(&original_id), &[raw, canonical])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn modifier_repair_replaces_invalid_raw_id_without_leaving_the_quarantined_row() {
+        use tomari_core::{Database, KeySide, ModifierKey};
+
+        for raw_id in [
+            "".to_string(),
+            " ".into(),
+            "mr-left-cmd-eisu".into(),
+            "x".repeat(129),
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let mut raw = test_modifier_rule(&raw_id, ModifierKey::Control, KeySide::Left);
+            raw.label = "Repair me".into();
+            assert!(keyboard_validation::validate_modifier_rule(raw.clone()).is_err());
+            db.upsert_modifier_rule(&raw).unwrap();
+            let mut repaired = raw.clone();
+            repaired.id = "repaired".into();
+            repaired.enabled = false;
+
+            let upsert = validated_modifier_rule_upsert(
+                repaired.clone(),
+                Some(&raw_id),
+                &db.list_modifier_rules().unwrap(),
+            )
+            .unwrap();
+            db.replace_modifier_rule(&upsert.previous.unwrap().id, &upsert.value)
+                .unwrap();
+
+            assert_eq!(db.list_modifier_rules().unwrap(), vec![repaired]);
+            assert_eq!(db.count_modifier_rules().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn modifier_edit_requires_the_exact_original_id_even_when_a_canonical_row_exists() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let stored = test_modifier_rule("rule", ModifierKey::Control, KeySide::Left);
+        for original_id in [" rule ", "deleted"] {
+            assert!(
+                validated_modifier_rule_upsert(
+                    stored.clone(),
+                    Some(original_id),
+                    std::slice::from_ref(&stored),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn modifier_create_never_overwrites_an_existing_invalid_row() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let candidate = test_modifier_rule("rule", ModifierKey::Control, KeySide::Left);
+        let mut invalid = candidate.clone();
+        invalid.hyper = true;
+        invalid.remap_to = Some(ModifierKey::Option);
+
+        assert!(validated_modifier_rule_upsert(candidate, None, &[invalid]).is_err());
+    }
+
+    #[test]
+    fn modifier_repair_cannot_take_another_invalid_rows_identity() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let original = test_modifier_rule("original", ModifierKey::Control, KeySide::Left);
+        let mut occupied = test_modifier_rule("occupied", ModifierKey::Option, KeySide::Right);
+        occupied.label.clear();
+        let mut candidate = original.clone();
+        candidate.id = occupied.id.clone();
+        assert!(
+            validated_modifier_rule_upsert(candidate, Some("original"), &[original, occupied])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn modifier_repair_changes_only_the_selected_member_of_a_canonical_id_collision() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let original = test_modifier_rule(" rule ", ModifierKey::Control, KeySide::Left);
+        let other = test_modifier_rule("rule", ModifierKey::Option, KeySide::Right);
+        let mut candidate = original.clone();
+        candidate.id = "repaired".into();
+        candidate.label = "Repaired".into();
+        let accepted = validated_modifier_rule_upsert(
+            candidate.clone(),
+            Some(&original.id),
+            &[original.clone(), other],
+        )
+        .unwrap();
+        assert_eq!(accepted.value, candidate);
+        assert_eq!(accepted.previous, Some(original));
+    }
+
+    #[test]
+    fn modifier_edit_rejects_a_new_slot_collision_and_accepts_a_free_slot() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let edited = test_modifier_rule("edited", ModifierKey::Control, KeySide::Left);
+        let occupied = test_modifier_rule("occupied", ModifierKey::Option, KeySide::Right);
+        let existing = [edited.clone(), occupied];
+        let mut candidate = edited.clone();
+        candidate.modifier = ModifierKey::Option;
+        candidate.side = KeySide::Right;
+        assert!(
+            validated_modifier_rule_upsert(candidate.clone(), Some(&edited.id), &existing).is_err()
+        );
+        candidate.side = KeySide::Left;
+        let accepted =
+            validated_modifier_rule_upsert(candidate.clone(), Some(&edited.id), &existing).unwrap();
+        assert_eq!(accepted.value, candidate);
+        assert_eq!(accepted.previous, Some(edited));
+    }
+
+    #[test]
+    fn modifier_repair_must_fix_unsafe_content_before_it_can_be_saved() {
+        use tomari_core::{KeySide, ModifierKey};
+
+        let mut invalid = test_modifier_rule("unsafe", ModifierKey::CapsLock, KeySide::Either);
+        invalid.hyper = true;
+        invalid.remap_to = Some(ModifierKey::Control);
+        let mut candidate = invalid.clone();
+        candidate.id = "repaired".into();
+        candidate.enabled = false;
+        assert!(
+            validated_modifier_rule_upsert(
+                candidate.clone(),
+                Some(&invalid.id),
+                std::slice::from_ref(&invalid),
+            )
+            .is_err()
+        );
+        candidate.remap_to = None;
+        let accepted = validated_modifier_rule_upsert(
+            candidate,
+            Some(&invalid.id),
+            std::slice::from_ref(&invalid),
+        )
+        .unwrap();
+        assert!(!accepted.value.enabled);
+    }
+
+    #[test]
+    fn keystroke_recording_preserves_sendable_keys_and_global_registration_normalization() {
+        for key in ["Escape", "Enter", "A", "Shift+A", "Space"] {
+            assert!(validate_accelerator(key.into(), AcceleratorPurpose::Keystroke).valid);
+            assert!(!validate_accelerator(key.into(), AcceleratorPurpose::Shortcut).valid);
+        }
+        assert_eq!(
+            validate_accelerator("Plus".into(), AcceleratorPurpose::Keystroke)
+                .normalized
+                .as_deref(),
+            Some("Plus"),
+        );
+        assert_eq!(
+            validate_accelerator("Cmd+Plus".into(), AcceleratorPurpose::Shortcut)
+                .normalized
+                .as_deref(),
+            Some("Shift+Cmd+Equal"),
+        );
+        for key in ["F1", "F20", "Ctrl+A", "Alt+Enter", "Cmd+K"] {
+            assert!(validate_accelerator(key.into(), AcceleratorPurpose::Shortcut).valid);
+        }
+        let check =
+            validate_accelerator("command + shift + k".into(), AcceleratorPurpose::Keystroke);
+        assert_eq!(check.normalized.as_deref(), Some("Shift+Cmd+K"));
+        assert!(
+            !validate_accelerator("Cmd+UnknownKey".into(), AcceleratorPurpose::Keystroke).valid
+        );
     }
 
     #[test]

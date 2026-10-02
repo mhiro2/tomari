@@ -78,6 +78,7 @@ pub enum ValidationReason {
     ReservedRuleId,
     HyperWithRemap,
     ReservedCommandSlot,
+    UnsupportedModifierSide,
     DuplicateAccelerator {
         accelerator: String,
     },
@@ -102,6 +103,7 @@ impl ValidationReason {
             Self::ReservedRuleId => "reservedRuleId",
             Self::HyperWithRemap => "hyperWithRemap",
             Self::ReservedCommandSlot => "reservedCommandSlot",
+            Self::UnsupportedModifierSide => "unsupportedModifierSide",
             Self::DuplicateAccelerator { .. } => "duplicateAccelerator",
             Self::DuplicateModifierSlot { .. } => "duplicateModifierSlot",
         }
@@ -131,6 +133,9 @@ impl fmt::Display for ValidationReason {
             Self::HyperWithRemap => f.write_str("a rule cannot be both a Hyper key and a remap"),
             Self::ReservedCommandSlot => {
                 f.write_str("left/right Command is reserved for the Command-key IME toggle")
+            }
+            Self::UnsupportedModifierSide => {
+                f.write_str("Caps Lock and Fn do not have separate left and right keys")
             }
             Self::DuplicateAccelerator { accelerator } => write!(
                 f,
@@ -214,6 +219,20 @@ pub fn validate_app_action(
     }
 }
 
+/// Validate a global chord and normalize it for registration. Recording and
+/// saving share this boundary so neither accepts an ordinary typing key that
+/// global registration would take away from every application.
+pub fn validate_global_accelerator(input: &str) -> Result<String, ValidationReason> {
+    let parsed =
+        accelerator::parse_global(input).map_err(|error| ValidationReason::InvalidAccelerator {
+            detail: error.to_string(),
+        })?;
+    if !(parsed.ctrl || parsed.alt || parsed.cmd || is_function_key(&parsed.key)) {
+        return Err(ValidationReason::UnsafeGlobalShortcut);
+    }
+    Ok(parsed.to_canonical())
+}
+
 /// Validate one hotkey intrinsically and return its canonical representation.
 ///
 /// Collection collisions are intentionally handled by [`validate_hotkeys`]. A
@@ -225,20 +244,8 @@ pub fn validate_hotkey(hotkey: Hotkey) -> Result<Hotkey, InvalidRecord> {
     let id = canonical_id(&metadata, &hotkey.id)?;
     let label = canonical_label(&metadata, &hotkey.label)?;
 
-    let parsed = accelerator::parse_global(&hotkey.accelerator).map_err(|error| {
-        metadata.invalid(
-            ValidationField::Accelerator,
-            ValidationReason::InvalidAccelerator {
-                detail: error.to_string(),
-            },
-        )
-    })?;
-    if !(parsed.ctrl || parsed.alt || parsed.cmd || is_function_key(&parsed.key)) {
-        return Err(metadata.invalid(
-            ValidationField::Accelerator,
-            ValidationReason::UnsafeGlobalShortcut,
-        ));
-    }
+    let accelerator = validate_global_accelerator(&hotkey.accelerator)
+        .map_err(|reason| metadata.invalid(ValidationField::Accelerator, reason))?;
 
     let action = validate_app_action(hotkey.action).map_err(|error| {
         let ActionValidationError::InvalidKeystroke { detail } = error;
@@ -251,7 +258,7 @@ pub fn validate_hotkey(hotkey: Hotkey) -> Result<Hotkey, InvalidRecord> {
     Ok(Hotkey {
         id,
         label,
-        accelerator: parsed.to_canonical(),
+        accelerator,
         action,
         enabled: hotkey.enabled,
     })
@@ -345,6 +352,15 @@ pub fn validate_modifier_rule(rule: ModifierRule) -> Result<ModifierRule, Invali
     if rule.modifier == ModifierKey::Command && matches!(rule.side, KeySide::Left | KeySide::Right)
     {
         return Err(metadata.invalid(ValidationField::Slot, ValidationReason::ReservedCommandSlot));
+    }
+
+    if matches!(rule.modifier, ModifierKey::CapsLock | ModifierKey::Function)
+        && rule.side != KeySide::Either
+    {
+        return Err(metadata.invalid(
+            ValidationField::Slot,
+            ValidationReason::UnsupportedModifierSide,
+        ));
     }
 
     Ok(ModifierRule {
@@ -562,6 +578,7 @@ mod tests {
             ValidationReason::ReservedRuleId,
             ValidationReason::HyperWithRemap,
             ValidationReason::ReservedCommandSlot,
+            ValidationReason::UnsupportedModifierSide,
             ValidationReason::DuplicateAccelerator {
                 accelerator: String::new(),
             },
@@ -584,6 +601,7 @@ mod tests {
                 "reservedRuleId",
                 "hyperWithRemap",
                 "reservedCommandSlot",
+                "unsupportedModifierSide",
                 "duplicateAccelerator",
                 "duplicateModifierSlot",
             ]
@@ -872,6 +890,22 @@ mod tests {
             ValidationField::Action,
             "invalidKeystroke",
         );
+    }
+
+    #[test]
+    fn unpaired_modifiers_require_either_side_without_silently_changing_stored_rules() {
+        for modifier in [ModifierKey::CapsLock, ModifierKey::Function] {
+            for side in [KeySide::Left, KeySide::Right] {
+                let mut input = rule("unpaired", modifier, side);
+                input.enabled = false;
+                assert_issue(
+                    validate_modifier_rule(input).unwrap_err(),
+                    ValidationField::Slot,
+                    "unsupportedModifierSide",
+                );
+            }
+            assert!(validate_modifier_rule(rule("unpaired", modifier, KeySide::Either)).is_ok());
+        }
     }
 
     #[test]

@@ -308,8 +308,9 @@ post-upsert collection before writing. Intrinsic validation trims and bounds ids
 and labels, canonicalizes accelerator and `SendKeystroke` syntax, rejects
 modifier-free global shortcuts other than function keys, and excludes malformed
 keystrokes, built-in rule ids and Command-key slots, and rules that combine
-Hyper with a remap. Collection validation detects canonical-id collisions,
-duplicate accelerators, and duplicate modifier slots. Every member of a
+Hyper with a remap or assign a left/right side to Caps Lock or Fn. Collection
+validation detects canonical-id collisions, duplicate accelerators, and
+duplicate modifier slots. Every member of a
 collision is quarantined, independently of row order, and disabled rows still
 participate so enabling one cannot silently displace another. Only canonical,
 accepted rows reach the shortcut map or modifier engine; the built-in left/right
@@ -802,6 +803,13 @@ and applies none of them.
   `reload_engine_rules`. Hotkey and modifier-rule saves return the canonical
   stored row; the frontend replaces the submitted row with that response so an
   ID trimmed during validation is used by every subsequent edit or delete.
+  Modifier-rule writes distinguish creation from replacement: `originalId` is
+  null for a new rule and the exact stored identity for an edit or repair.
+  Repairs can replace invalid identities, including empty IDs, with a fresh ID
+  without leaving the original row behind. New writes insert rather than
+  upsert, so even an undecodable existing row cannot be overwritten by an ID
+  collision. Replacement checks the full post-edit collection and retains the
+  existing rollback path when a live engine reload fails.
   Tauri runs a synchronous command on the main thread, so every command that
   can block — reaching the database (a `SQLITE_BUSY` wait of up to five
   seconds), orchestrating a global-shortcut re-registration, or shelling out to
@@ -873,11 +881,19 @@ and applies none of them.
   refreshes that context when the panel becomes active, exposes fixed-position
   operation feedback, and owns shortcut editing for every window action without
   restoring the old preset palette. `KeyboardView` owns general keyboard and
-  modifier tap actions, including optional remembered-position restore. Both
-  reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
-  shortcuts (`set_hotkeys_suspended`) while capturing a chord. Quarantined
-  keyboard records produce a persistent, localized amber shell banner whose
-  action opens and focuses the Keyboard explanation; that view groups the
+  modifier tap actions, including optional remembered-position restore. Its
+  `ModifierRuleEditor` provides a modal draft for creating, editing, repairing,
+  and deleting complete rules. Save errors retain that draft; successful writes
+  adopt the canonical backend response. The editor does not mutate stored IDs
+  through display sanitization, and repair targets use the original raw ID.
+  Both reuse `HotkeyEditor`; its `ShortcutRecorder` suspends registered global
+  shortcuts (`set_hotkeys_suspended`) while capturing a chord. Its recording
+  purpose is explicit: shortcut recording uses global-safe validation, while
+  keystroke recording permits an ordinary key, including Escape. The Rust
+  `validate_accelerator` command enforces the same distinction; changing the
+  recorder's purpose cannot weaken validation on a global-shortcut save.
+  Quarantined keyboard records produce a persistent, localized amber shell
+  banner whose action opens and focuses the Keyboard explanation; that view groups the
   affected records and localizes each stable reason code while retaining the
   persisted identity needed to repair or remove the underlying row.
 - **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way terminal

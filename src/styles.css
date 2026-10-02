@@ -1856,6 +1856,68 @@ kbd,
   font-size: 12px;
 }
 
+.modifier-table__edit {
+  margin-top: 3px;
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
+.configuration-issues__actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.modifier-editor {
+  width: min(540px, calc(100vw - 48px));
+}
+
+.modifier-editor__header {
+  margin-bottom: 16px;
+}
+
+.modifier-editor__header h2 {
+  margin: 0 0 5px;
+  font-size: 18px;
+}
+
+.modifier-editor__fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.modifier-editor__note,
+.modifier-editor__enabled {
+  grid-column: 1 / -1;
+}
+
+.modifier-editor__enabled {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.modifier-editor__actions,
+.modifier-editor__actions-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modifier-editor__actions {
+  justify-content: space-between;
+  margin-top: 18px;
+}
+
+.modifier-editor__actions-end {
+  margin-left: auto;
+}
+
 .command-ime {
   display: flex;
   align-items: center;

@@ -11,7 +11,8 @@ import { acquireSuspension, releaseSuspension } from '../lib/suspension';
  * A click-to-record shortcut field: click it, type the chord, and the
  * normalized accelerator is committed. While recording, Tomari's own global
  * shortcuts are suspended so the typed chord reaches this field instead of
- * firing an action; plain Escape or clicking away cancels.
+ * firing an action. Plain Escape cancels shortcut recording; keystroke actions
+ * can record Escape too, so click again or move focus to cancel those.
  *
  * macOS WebKit does not move keyboard focus to a <button> on click, so without
  * an explicit focus the field would never see a keydown — neither the chord
@@ -21,10 +22,12 @@ export function ShortcutRecorder({
   value,
   onCapture,
   ariaLabel,
+  purpose = 'shortcut',
 }: {
   value?: string;
   onCapture: (normalized: string) => void;
   ariaLabel: string;
+  purpose?: 'shortcut' | 'keystroke';
 }) {
   const t = useT();
   const [recording, setRecording] = useState(false);
@@ -95,12 +98,16 @@ export function ShortcutRecorder({
     event.preventDefault();
     event.stopPropagation();
 
-    if (event.code === 'Escape' && heldModifierGlyphs(event).length === 0) {
+    if (
+      purpose === 'shortcut' &&
+      event.code === 'Escape' &&
+      heldModifierGlyphs(event).length === 0
+    ) {
       stop();
       return;
     }
 
-    const result = captureAccelerator(event);
+    const result = captureAccelerator(event, purpose);
     if (result.status === 'ignored') {
       setHeld(heldModifierGlyphs(event));
       return;
@@ -117,7 +124,7 @@ export function ShortcutRecorder({
     // The backend owns the canonical form, so normalize through it.
     let check: Awaited<ReturnType<typeof api.validateAccelerator>>;
     try {
-      check = await api.validateAccelerator(result.accelerator);
+      check = await api.validateAccelerator(result.accelerator, purpose);
     } catch (e) {
       // The IPC itself failed (not the chord). Recording cannot complete, so
       // end it — which also hands the global-shortcut suspension back; left
@@ -167,7 +174,9 @@ export function ShortcutRecorder({
         </span>
       ) : (
         <span className="recorder__placeholder">
-          {recording ? t('recorder.typing') : t('recorder.click')}
+          {recording
+            ? t(purpose === 'keystroke' ? 'recorder.typingKeystroke' : 'recorder.typing')
+            : t('recorder.click')}
         </span>
       )}
       {error && <span className="recorder__err">{error}</span>}

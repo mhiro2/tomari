@@ -229,6 +229,115 @@ describe('KeyboardView', () => {
     expect(screen.getByRole('button', { name: 'Add Shortcut' })).toBeInTheDocument();
   });
 
+  it('adds a modifier rule and returns focus to its Add action', async () => {
+    renderView(<KeyboardView />);
+    const add = await screen.findByRole('button', { name: 'Add Modifier Rule' });
+    await waitFor(() => expect(add).not.toBeDisabled());
+    fireEvent.click(add);
+    const editor = screen.getByRole('dialog', { name: 'Add Modifier Rule' });
+    fireEvent.change(within(editor).getByLabelText('Modifier rule label'), {
+      target: { value: 'Shift Hyper' },
+    });
+    fireEvent.change(within(editor).getByLabelText('Physical key'), { target: { value: 'shift' } });
+    fireEvent.change(within(editor).getByLabelText('While held'), { target: { value: 'hyper' } });
+    fireEvent.click(within(editor).getByRole('button', { name: 'Save Rule' }));
+    await screen.findByRole('button', { name: 'Edit modifier rule Shift Hyper' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(add).toHaveFocus();
+    expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+      originalId: null,
+      rule: expect.objectContaining({ modifier: 'shift', hyper: true, remapTo: null }),
+    });
+  });
+
+  it('repairs a colliding raw identity even when a missing label is the reported issue', async () => {
+    const invalid = { ...RULE, id: ' rule-1 ', label: '' };
+    mockCommands({
+      list_modifier_rules: [RULE, invalid],
+      get_configuration_warnings: {
+        invalidHotkeys: [],
+        invalidModifierRules: [{ id: invalid.id, label: 'Broken alias', reason: 'emptyLabel' }],
+        revision: 1,
+      },
+    });
+    renderView(<KeyboardView />);
+    const repair = await screen.findByRole('button', { name: 'Repair modifier rule Broken alias' });
+    await waitFor(() => expect(repair).not.toBeDisabled());
+    fireEvent.click(repair);
+    const editor = screen.getByRole('dialog');
+    expect(within(editor).getByLabelText('Modifier rule label')).toHaveValue('');
+    fireEvent.change(within(editor).getByLabelText('Modifier rule label'), {
+      target: { value: 'Repaired rule' },
+    });
+    fireEvent.change(within(editor).getByLabelText('Physical key'), {
+      target: { value: 'option' },
+    });
+    fireEvent.click(within(editor).getByRole('button', { name: 'Save Rule' }));
+    await screen.findByRole('button', { name: 'Edit modifier rule Repaired rule' });
+    expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+      originalId: invalid.id,
+      rule: expect.objectContaining({
+        id: expect.stringMatching(/^rule-/u),
+        label: 'Repaired rule',
+        enabled: false,
+      }),
+    });
+    expect(
+      screen.getByRole('button', { name: 'Edit modifier rule Caps Lock' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers a new rule when a quarantined row cannot be reconstructed, without deleting it', async () => {
+    mockCommands({
+      list_modifier_rules: [],
+      get_configuration_warnings: {
+        invalidHotkeys: [],
+        invalidModifierRules: [
+          { id: 'unreadable', label: 'Lost rule', reason: 'invalidKeystroke' },
+        ],
+        revision: 1,
+      },
+    });
+    renderView(<KeyboardView />);
+    const create = await screen.findByRole('button', { name: 'Create a new rule for Lost rule' });
+    await waitFor(() => expect(create).not.toBeDisabled());
+    fireEvent.click(create);
+    expect(screen.getByRole('dialog', { name: 'Add Modifier Rule' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Modifier rule label')).toHaveValue('');
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(
+      mockInvoke.mock.calls.some(
+        ([command]) => command === 'delete_modifier_rule' || command === 'save_modifier_rule',
+      ),
+    ).toBe(false);
+  });
+
+  it('can repair a quarantined rule while Keyboard is off without turning either on', async () => {
+    const invalid = { ...RULE, hyper: true };
+    mockCommands({
+      get_settings: { ...SETTINGS, keyboardEnabled: false },
+      list_modifier_rules: [invalid],
+      get_configuration_warnings: {
+        invalidHotkeys: [],
+        invalidModifierRules: [{ id: invalid.id, label: invalid.label, reason: 'hyperWithRemap' }],
+        revision: 1,
+      },
+    });
+    renderView(<KeyboardView />);
+    const repair = await screen.findByRole('button', { name: 'Repair modifier rule Caps Lock' });
+    await waitFor(() => expect(repair).not.toBeDisabled());
+    fireEvent.click(repair);
+    const editor = screen.getByRole('dialog');
+    fireEvent.change(within(editor).getByLabelText('While held'), { target: { value: 'hyper' } });
+    fireEvent.click(within(editor).getByRole('button', { name: 'Save Rule' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+      originalId: RULE.id,
+      rule: { ...RULE, hyper: true, remapTo: null },
+    });
+    expect(mockInvoke.mock.calls.some(([command]) => command === 'save_settings')).toBe(false);
+  });
+
   it('shows an error when the initial modifier rules and hotkeys load fails', async () => {
     mockCommands({
       list_modifier_rules: Object.assign(new Error('boom'), { code: 'unknown' }),
@@ -271,6 +380,7 @@ describe('KeyboardView', () => {
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+        originalId: RULE.id,
         rule: expect.objectContaining({ enabled: true }),
       });
     });
@@ -406,6 +516,7 @@ describe('KeyboardView', () => {
 
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+        originalId: RULE.id,
         rule: expect.objectContaining({
           id: RULE.id,
           tap: { type: 'recallWindowPlacement' },

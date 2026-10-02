@@ -16,6 +16,7 @@ import { formatCmdError } from '../lib/errors';
 import { actionLabel, presetLabel, safeDisplayText } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
+import { WINDOW_PRESETS } from '../lib/types';
 import type {
   AppAction,
   HistoryActionResult,
@@ -25,7 +26,6 @@ import type {
   PlacementSlot,
   WindowHistoryStatus,
   WindowPlacement,
-  WindowPreset,
   WindowTarget,
 } from '../lib/types';
 
@@ -34,23 +34,6 @@ const RECOVERABLE_STATUS_CLEAR_MS = 8000;
 const EMPTY_HISTORY: WindowHistoryStatus = { canUndo: false, canRedo: false };
 const EMPTY_KEYCAPS: readonly string[] = [];
 const PRIMARY_SHORTCUT_COUNT = 5;
-const WINDOW_PRESETS: WindowPreset[] = [
-  'leftHalf',
-  'rightHalf',
-  'topHalf',
-  'bottomHalf',
-  'topLeftQuarter',
-  'topRightQuarter',
-  'bottomLeftQuarter',
-  'bottomRightQuarter',
-  'leftThird',
-  'centerThird',
-  'rightThird',
-  'leftTwoThirds',
-  'rightTwoThirds',
-  'center',
-  'maximize',
-];
 
 type StatusSource = 'contextLoad' | 'other';
 type Status = {

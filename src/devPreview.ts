@@ -35,7 +35,7 @@ export async function installDevPreview() {
     showInMenuBar: true,
     dragToSnapEnabled: true,
     dragToMoveEnabled: false,
-    menuBarTidyEnabled: true,
+    menuBarTidyEnabled: false,
     menuBarAutoCollapseSecs: 15,
   };
   const configurationWarnings: ConfigurationWarnings = {
@@ -129,10 +129,10 @@ export async function installDevPreview() {
       invalidCount: configurationWarnings.invalidHotkeys.length,
     },
     menuBar: {
-      enabled: true,
-      supported: true,
+      enabled: false,
+      supported: false,
       permissionGranted: !permissionsMissing,
-      dividerAvailable: !permissionsMissing,
+      dividerAvailable: false,
     },
     keepAwake: {
       active: false,
@@ -192,6 +192,18 @@ export async function installDevPreview() {
       enabled: true,
     },
   ];
+  if (showConfigurationWarnings) {
+    modifierRules.push({
+      id: 'legacy-command-left',
+      label: 'Left Command',
+      modifier: 'command',
+      side: 'left',
+      remapTo: null,
+      hyper: false,
+      tap: { type: 'switchIme', value: 'kana' },
+      enabled: false,
+    });
+  }
   const hotkeys: Hotkey[] = [
     {
       id: 'snap-left',
@@ -255,43 +267,11 @@ export async function installDevPreview() {
     damagedPlacements: [],
     canMoveToDisplay: true,
   };
-  let menuItemGeneration = 1;
-  let menuItems: MenuBarInventory = {
-    supported: true,
-    permissionGranted: true,
-    dividerAvailable: true,
-    items: [
-      { id: '1:0', name: 'Dropbox', ownerName: 'Dropbox', bundleId: null, zone: 'hidden' },
-      {
-        id: '1:1',
-        name: 'Docker',
-        ownerName: 'Docker Desktop',
-        bundleId: null,
-        zone: 'hidden',
-      },
-      { id: '1:2', name: 'VPN', ownerName: 'VPN', bundleId: null, zone: 'hidden' },
-      {
-        id: '1:3',
-        name: 'Wi-Fi',
-        ownerName: 'Control Center',
-        bundleId: 'com.apple.controlcenter',
-        zone: 'visible',
-      },
-      {
-        id: '1:4',
-        name: 'Battery',
-        ownerName: 'Control Center',
-        bundleId: 'com.apple.controlcenter',
-        zone: 'visible',
-      },
-      {
-        id: '1:5',
-        name: 'Clock',
-        ownerName: 'Control Center',
-        bundleId: 'com.apple.controlcenter',
-        zone: 'visible',
-      },
-    ],
+  const menuItems: MenuBarInventory = {
+    supported: false,
+    permissionGranted: !permissionsMissing,
+    dividerAvailable: false,
+    items: [],
   };
 
   const previewCommand: Parameters<typeof mockIPC>[0] = (cmd, payload) => {
@@ -353,23 +333,27 @@ export async function installDevPreview() {
       case 'retry_keep_awake_transition':
         return keepAwake;
       case 'get_menu_bar':
-        return { enabled: true, collapsed: true, supported: true };
+        return { enabled: false, collapsed: false, supported: false };
       case 'list_modifier_rules':
         return modifierRules;
       case 'save_modifier_rule': {
-        const { rule } = payload as { rule: ModifierRule };
+        const { rule, originalId } = payload as { rule: ModifierRule; originalId: string | null };
         const saved = { ...rule, id: rule.id.trim(), label: rule.label.trim() };
-        const index = modifierRules.findIndex(
-          (candidate) => candidate.id === rule.id || candidate.id === saved.id,
-        );
+        const index = modifierRules.findIndex((candidate) => candidate.id === originalId);
         if (index === -1) modifierRules.push(saved);
         else modifierRules.splice(index, 1, saved);
+        configurationWarnings.invalidModifierRules =
+          configurationWarnings.invalidModifierRules.filter((issue) => issue.id !== originalId);
+        configurationWarnings.revision += 1;
         return { rule: saved, applyWarnings: [] };
       }
       case 'delete_modifier_rule': {
         const { id } = payload as { id: string };
         const index = modifierRules.findIndex((rule) => rule.id === id);
         if (index !== -1) modifierRules.splice(index, 1);
+        configurationWarnings.invalidModifierRules =
+          configurationWarnings.invalidModifierRules.filter((issue) => issue.id !== id);
+        configurationWarnings.revision += 1;
         return { applyWarnings: [] };
       }
       case 'dismiss_keep_awake_recovery':
@@ -398,23 +382,13 @@ export async function installDevPreview() {
         return { canUndo: true, canRedo: false };
       case 'list_menu_bar_items':
         return menuItems;
-      case 'move_menu_bar_item': {
-        const { itemId, targetZone } = payload as {
-          itemId: string;
-          targetZone: 'hidden' | 'visible';
-        };
-        const item = menuItems.items.find((candidate) => candidate.id === itemId);
-        const outcome = !item ? 'staleItem' : item.zone === targetZone ? 'alreadyInZone' : 'moved';
-        menuItemGeneration += 1;
-        menuItems = {
-          ...menuItems,
-          items: menuItems.items.map((candidate, index) => ({
-            ...candidate,
-            id: `${menuItemGeneration}:${index}`,
-            zone: candidate.id === itemId ? targetZone : candidate.zone,
-          })),
-        };
-        return { outcome, inventory: menuItems };
+      case 'move_menu_bar_item':
+        return { outcome: 'unsupported', inventory: menuItems };
+      case 'validate_accelerator': {
+        const { accelerator } = payload as { accelerator: string };
+        // Recording already produces canonical chords; semantic validation is
+        // exercised against the Rust command, never this visual preview.
+        return { valid: true, normalized: accelerator, error: null };
       }
       case 'plugin:app|version':
         return '0.0.2';

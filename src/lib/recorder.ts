@@ -83,9 +83,13 @@ function keyToken(code: string): string | null {
 
 /**
  * Interpret a keydown during recording. Function keys may stand alone; any
- * other key needs Ctrl, Alt or Cmd (Shift alone would swallow plain typing).
+ * other global shortcut needs Ctrl, Alt or Cmd (Shift alone would swallow
+ * plain typing). A keystroke action can send any supported key without modifiers.
  */
-export function captureAccelerator(event: RecorderKeyEvent): CaptureResult {
+export function captureAccelerator(
+  event: RecorderKeyEvent,
+  purpose: 'shortcut' | 'keystroke' = 'shortcut',
+): CaptureResult {
   const key = keyToken(event.code);
   if (key === null) {
     // A held modifier alone is just the chord still being built; any other
@@ -94,7 +98,13 @@ export function captureAccelerator(event: RecorderKeyEvent): CaptureResult {
   }
 
   const isFunctionKey = /^F\d+$/u.test(key);
-  if (!event.metaKey && !event.ctrlKey && !event.altKey && !isFunctionKey) {
+  if (
+    purpose === 'shortcut' &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !isFunctionKey
+  ) {
     return { status: 'needModifier' };
   }
 

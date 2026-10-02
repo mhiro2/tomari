@@ -9,6 +9,15 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(() => Promise.resolve()),
 }));
 
+// jsdom does not implement native dialog focus trapping. Keep its open/close
+// state in tests; supported macOS WebKit supplies the native methods.
+HTMLDialogElement.prototype.showModal = function () {
+  this.setAttribute('open', '');
+};
+HTMLDialogElement.prototype.close = function () {
+  this.removeAttribute('open');
+};
+
 afterEach(() => {
   cleanup();
 });
