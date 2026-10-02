@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod backup;
 mod capsmap;
 mod childproc;
 mod commands;
@@ -143,7 +144,14 @@ fn main() {
         .manage(paths)
         .manage(app_state)
         .manage(commands::PendingUpdate::default())
+        .manage(backup::BackupSession::default())
         .invoke_handler(tauri::generate_handler![
+            backup::export_configuration_backup,
+            backup::reveal_configuration_backups,
+            backup::get_configuration_backup_status,
+            backup::preview_configuration_import,
+            backup::preview_configuration_restore,
+            backup::apply_configuration_backup,
             commands::get_settings,
             commands::get_configuration_warnings,
             commands::get_diagnostics,

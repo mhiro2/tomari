@@ -558,8 +558,8 @@ and applies none of them.
 - Tables: `hotkeys` / `modifier_rules` / `settings` (a single `id = 1` row
   holding the `AppSettings` JSON) / `window_placements` (bundle id + one of two
   slot names, with a normalized frame JSON value) / `meta` (app-internal
-  key/value records — currently the permission snapshot `regrant.rs` compares
-  at launch to detect update-caused revocations — kept out of `settings` so
+  key/value records — including the permission snapshot `regrant.rs` compares
+  at launch and the pre-import configuration restore point — kept out of `settings` so
   they never leak into the settings object the frontend round-trips). Domain
   values are stored as JSON strings in their columns, keeping the schema
   resilient to domain-type evolution.
@@ -711,6 +711,33 @@ and applies none of them.
   main-thread `window_mutation` coordinator to avoid the shortcut-registration
   deadlock; each entry checks the immutable recovery gate before touching DB or
   history.
+- **Configuration backups** serialize general settings, hotkeys, modifier
+  rules, and all saved window placements into a versioned JSON document. The
+  external format requires a complete known shape; it does not inherit the
+  database decoder's tolerance for missing or unknown preference fields.
+  Unsupported versions and invalid content fail before writes. Reading a
+  backup source requires a complete single-transaction snapshot: skipped rows,
+  missing or extra settings rows, and unreadable content cannot be exported as
+  an apparently complete backup. Keyboard collection validation still lives
+  at the shell boundary, using `tomari-keyboard` to avoid a core-to-keyboard
+  dependency cycle.
+  Import is a whole replacement of the four configuration tables. An immediate
+  transaction compares the expected current snapshot, stores that exact
+  snapshot as the internal restore point, and replaces the rows together. Any
+  failure rolls back the complete transaction. Other internal metadata remains
+  untouched; permission grants, session state, ownership records, and runtime
+  histories are not portable backup data. Restoring uses the same expected-state
+  check and atomically consumes the restore point only when the data replacement
+  succeeds. It survives process restarts, and a failed later import does not
+  replace it.
+  The shell takes `config_mutation` around the operation and a short
+  `window_mutation` section around database capture/replacement and remembered-
+  position history invalidation. It releases the window lock **before** any
+  main-thread shortcut or UI hop; holding it across that hop could deadlock a
+  main-thread window command waiting for the same lock. A complete snapshot
+  comparison covers saved-position edits, which do not advance `config_revision`.
+  Current quarantined keyboard configuration must be repaired before import,
+  ensuring the captured restore point can be validated and reapplied.
 
 ## 7. Tauri shell and the frontend boundary
 
@@ -896,6 +923,27 @@ and applies none of them.
   banner whose action opens and focuses the Keyboard explanation; that view groups the
   affected records and localizes each stable reason code while retaining the
   persisted identity needed to repair or remove the underlying row.
+- **Backup UI and live apply**: General exports an owner-readable/writable JSON
+  file under the application-data `backups` directory and can reveal it in
+  Finder. Importing a selected file first stages a validated candidate and
+  expected current snapshot in the backend; only its returned token can confirm
+  that preview. Restore follows the same preview/confirm boundary and explicitly
+  replaces edits made since the import. The settings provider drains pending
+  autosaves and blocks new edits during the operation, then explicitly adopts
+  the resulting settings instead of relying on the ordinary settings event
+  handler, which ignores broadcasts during local saves.
+  The backend retains the last completed token and its apply warnings for this
+  process, allowing a lost command acknowledgement to be recovered by a status
+  read. If the result cannot be established, the provider re-reads current
+  settings and does not claim the import left the database unchanged.
+  A committed replacement always reloads modifier rules and re-registers
+  shortcuts, even when the general settings values did not change. Live OS
+  application happens after the atomic database operation: failures produce
+  apply warnings; an import retains the pre-import data for explicit restoration.
+  Restoring the old database is not a claim that every macOS effect has healed;
+  remaining mismatches continue to surface through the existing apply-warning
+  mechanism. These operations use the ordinary lifecycle/recovery interlocks;
+  they do not turn an unreadable startup session into a partially live runtime.
 - **Terminal shutdown** (`lifecycle.rs`): `AppState` owns a one-way terminal
   lifecycle with a non-terminal `Recovering` sub-state:
   `Running → Recovering → ShuttingDown → Stopped` on successful repair, or

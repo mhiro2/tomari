@@ -452,6 +452,14 @@ impl AppState {
         self.placement_edit_history.lock_safe().push(edit);
     }
 
+    /// A full configuration replacement invalidates remembered-position edits
+    /// and A/B cycling, but does not move windows or discard their frame history.
+    /// The caller must hold the window-mutation gate.
+    pub(crate) fn clear_placement_configuration_history(&self) {
+        self.placement_edit_history.lock_safe().clear();
+        self.clear_last_placement();
+    }
+
     /// The most recent preset snap, for hotkey-repeat cycling.
     pub fn last_snap(&self) -> Option<LastSnap> {
         *self.last_snap.lock_safe()

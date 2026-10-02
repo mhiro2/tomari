@@ -42,6 +42,14 @@ pub enum ErrorCode {
     /// SQLite was physically damaged and quarantined. The replacement store
     /// cannot be trusted until the user explicitly confirms a safe reset.
     DatabaseResetRequired,
+    /// The selected file is not a supported, valid settings backup.
+    BackupInvalid,
+    /// Existing settings cannot be captured completely for a reversible import.
+    BackupCurrentInvalid,
+    /// A different preview or subsequent edit invalidated the confirmation.
+    BackupPreviewExpired,
+    /// No previous configuration is available to restore.
+    BackupUnavailable,
     /// Anything else; `message` carries the detail.
     Other,
 }
@@ -160,6 +168,10 @@ mod tests {
             ErrorCode::WindowNotResponding => "windowNotResponding",
             ErrorCode::SettingsRecoveryRequired => "settingsRecoveryRequired",
             ErrorCode::DatabaseResetRequired => "databaseResetRequired",
+            ErrorCode::BackupInvalid => "backupInvalid",
+            ErrorCode::BackupCurrentInvalid => "backupCurrentInvalid",
+            ErrorCode::BackupPreviewExpired => "backupPreviewExpired",
+            ErrorCode::BackupUnavailable => "backupUnavailable",
             ErrorCode::Other => "other",
         }
     }
@@ -179,7 +191,11 @@ mod tests {
             Some(ErrorCode::WindowTargetChanged) => Some(ErrorCode::WindowNotResponding),
             Some(ErrorCode::WindowNotResponding) => Some(ErrorCode::SettingsRecoveryRequired),
             Some(ErrorCode::SettingsRecoveryRequired) => Some(ErrorCode::DatabaseResetRequired),
-            Some(ErrorCode::DatabaseResetRequired) => Some(ErrorCode::Other),
+            Some(ErrorCode::DatabaseResetRequired) => Some(ErrorCode::BackupInvalid),
+            Some(ErrorCode::BackupInvalid) => Some(ErrorCode::BackupCurrentInvalid),
+            Some(ErrorCode::BackupCurrentInvalid) => Some(ErrorCode::BackupPreviewExpired),
+            Some(ErrorCode::BackupPreviewExpired) => Some(ErrorCode::BackupUnavailable),
+            Some(ErrorCode::BackupUnavailable) => Some(ErrorCode::Other),
             Some(ErrorCode::Other) => None,
         }
     }
@@ -197,7 +213,7 @@ mod tests {
         // The exact count catches a chain that skips a variant (a lazily
         // added `=> None` arm would otherwise hide the new variant from the
         // loop above).
-        assert_eq!(visited, 9, "the chain must visit every variant once");
+        assert_eq!(visited, 13, "the chain must visit every variant once");
     }
 
     #[test]

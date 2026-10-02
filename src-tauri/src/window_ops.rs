@@ -364,8 +364,9 @@ pub fn capture_placement(
     // by `config_mutation`: that lock is held across a main-thread hop by the
     // shortcut commands (the global-shortcut plugin registers on the main
     // thread and waits), and this runs *on* the main thread — waiting for it
-    // here would deadlock the app. Nothing under `config_mutation` touches the
-    // placements table, so no ordering is lost.
+    // here would deadlock the app. Configuration replacement takes this window
+    // gate only for its database transaction, releasing it before any main-thread
+    // runtime reconciliation, so placement writes remain serialized too.
     let before = state
         .db
         .get_window_placement(&placement.application.bundle_id, slot)?;

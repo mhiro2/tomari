@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  ConfigurationBackupOutcome,
   ConfigurationWarnings,
   DiagnosticsSnapshot,
   Hotkey,
@@ -8,7 +9,21 @@ import type {
   ModifierRule,
   PlacementContext,
   SetupStatus,
+  WindowPlacement,
 } from './lib/types';
+
+type PreviewBackup = {
+  formatVersion: number;
+  settings: AppSettings;
+  hotkeys: Hotkey[];
+  modifierRules: ModifierRule[];
+  windowPlacements: WindowPlacement[];
+};
+const counts = (value: PreviewBackup) => ({
+  hotkeys: value.hotkeys.length,
+  modifierRules: value.modifierRules.length,
+  windowPlacements: value.windowPlacements.length,
+});
 
 // Browser-only sample data for visual review. It is installed only when Vite
 // runs in development with ?preview=1; production and the Tauri WebView keep
@@ -274,6 +289,36 @@ export async function installDevPreview() {
     items: [],
   };
 
+  const snapshot = (): PreviewBackup =>
+    structuredClone({
+      formatVersion: 1,
+      settings,
+      hotkeys,
+      modifierRules,
+      windowPlacements: placement.placements,
+    });
+  let previousConfiguration: PreviewBackup | null = null;
+  let pendingBackup: {
+    token: number;
+    kind: 'import' | 'restore';
+    before: PreviewBackup;
+    incoming: PreviewBackup;
+  } | null = null;
+  let lastApplied: (ConfigurationBackupOutcome & { token: number }) | null = null;
+  let backupToken = 0;
+  function previewBackup(incoming: PreviewBackup, kind: 'import' | 'restore') {
+    const before = snapshot();
+    pendingBackup = { token: ++backupToken, kind, before, incoming };
+    return {
+      token: pendingBackup.token,
+      kind,
+      current: counts(before),
+      incoming: counts(incoming),
+      currentSettings: before.settings,
+      settings: incoming.settings,
+    };
+  }
+
   const previewCommand: Parameters<typeof mockIPC>[0] = (cmd, payload) => {
     switch (cmd) {
       case 'get_settings': {
@@ -295,6 +340,56 @@ export async function installDevPreview() {
         return configurationWarnings;
       case 'get_diagnostics':
         return diagnostics;
+      case 'get_apply_warnings':
+        return { warnings: [], unprobed: ['menuBar'] };
+      case 'get_configuration_backup_status':
+        return { canRestore: previousConfiguration !== null, lastApplied };
+      case 'export_configuration_backup':
+        return {
+          path: '/Users/preview/Library/Application Support/Tomari/backups/tomari-settings.json',
+          generatedAtMs: Date.now(),
+        };
+      case 'reveal_configuration_backups':
+        return null;
+      case 'preview_configuration_import': {
+        const { contents } = payload as { contents: string };
+        // Only visual fixtures run here; the real Rust boundary owns complete
+        // structural and semantic validation of user-selected files.
+        const incoming = JSON.parse(contents) as PreviewBackup;
+        if (
+          incoming.formatVersion !== 1 ||
+          !incoming.settings ||
+          !Array.isArray(incoming.hotkeys) ||
+          !Array.isArray(incoming.modifierRules) ||
+          !Array.isArray(incoming.windowPlacements)
+        ) {
+          throw { code: 'backupInvalid', message: 'Invalid preview backup' };
+        }
+        return previewBackup(incoming, 'import');
+      }
+      case 'preview_configuration_restore':
+        if (!previousConfiguration)
+          throw { code: 'backupUnavailable', message: 'No previous settings' };
+        return previewBackup(previousConfiguration, 'restore');
+      case 'apply_configuration_backup': {
+        const { token } = payload as { token: number };
+        if (
+          !pendingBackup ||
+          token !== pendingBackup.token ||
+          JSON.stringify(pendingBackup.before) !== JSON.stringify(snapshot())
+        ) {
+          throw { code: 'backupPreviewExpired', message: 'Review the settings again' };
+        }
+        const { before, incoming, kind } = pendingBackup;
+        previousConfiguration = kind === 'import' ? before : null;
+        Object.assign(settings, incoming.settings);
+        hotkeys.splice(0, hotkeys.length, ...incoming.hotkeys);
+        modifierRules.splice(0, modifierRules.length, ...incoming.modifierRules);
+        placement.placements = incoming.windowPlacements;
+        pendingBackup = null;
+        lastApplied = { token, settings: { ...settings }, applyWarnings: [] };
+        return lastApplied;
+      }
       case 'export_support_bundle':
         return {
           path: '/Users/preview/Library/Application Support/Tomari/support/tomari-support.json',
@@ -319,6 +414,7 @@ export async function installDevPreview() {
         recoveryKind = null;
         return null;
       case 'save_settings':
+        Object.assign(settings, (payload as { settings: AppSettings }).settings);
         return { applyWarnings: [] };
       case 'setup_status':
         if (setupPending) return new Promise<SetupStatus>(() => {});

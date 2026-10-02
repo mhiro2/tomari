@@ -43,7 +43,7 @@ pub enum AcceleratorPurpose {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSettingsOutcome {
-    apply_warnings: Vec<&'static str>,
+    pub(crate) apply_warnings: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -108,7 +108,7 @@ pub struct PendingUpdateSlot {
 /// for the rest.
 type CmdResult<T> = Result<T, CmdError>;
 
-fn lock_config_mutation(state: &AppState) -> CmdResult<ConfigurationMutationGuard<'_>> {
+pub(crate) fn lock_config_mutation(state: &AppState) -> CmdResult<ConfigurationMutationGuard<'_>> {
     // Reject before waiting as well as after acquiring the lock. A settings
     // autosave issued while the recovery screen is up must not queue behind
     // the explicit reset and then land on the freshly repaired row after the
@@ -149,7 +149,7 @@ fn with_config_mutation<T>(state: &AppState, task: impl FnOnce() -> CmdResult<T>
 /// orchestration move off it; and the window commands stay synchronous,
 /// because the screen geometry they depend on is only readable on the main
 /// thread (see the note above them).
-async fn off_main<T, F>(app: AppHandle, task: F) -> CmdResult<T>
+pub(crate) async fn off_main<T, F>(app: AppHandle, task: F) -> CmdResult<T>
 where
     T: Send + 'static,
     F: FnOnce(&AppHandle, &AppState) -> CmdResult<T> + Send + 'static,
@@ -355,8 +355,6 @@ fn save_settings_locked(
     state: &AppState,
     settings: AppSettings,
 ) -> CmdResult<SaveSettingsOutcome> {
-    let previous = state.settings.lock_safe().clone();
-
     // Persisting is the hard requirement: a failure here rejects so the UI knows
     // nothing was saved. The side effects below are applied on a best-effort
     // basis and reported as warnings — the preference is stored either way.
@@ -364,6 +362,20 @@ fn save_settings_locked(
     // anything is stored or armed.
     let settings = crate::validate::sanitize_settings(settings)?;
     state.db.save_settings(&settings)?;
+    Ok(apply_settings_runtime(app, state, settings, None))
+}
+
+/// Apply an already-persisted configuration. A complete replacement supplies
+/// validated modifier rules so no second persistence write or fallible rule
+/// read can split the atomic database replacement from its runtime update.
+pub(crate) fn apply_settings_runtime(
+    app: &AppHandle,
+    state: &AppState,
+    settings: AppSettings,
+    replacement_rules: Option<Vec<ModifierRule>>,
+) -> SaveSettingsOutcome {
+    let previous = state.settings.lock_safe().clone();
+    let replacing = replacement_rules.is_some();
 
     // Reconcile the side-effecting toggles every save — not only when they
     // change — so a prior unresolved failure keeps warning until it is actually
@@ -391,10 +403,18 @@ fn save_settings_locked(
         previous.command_ime_switch_enabled != settings.command_ime_switch_enabled;
     *state.settings.lock_safe() = settings.clone();
 
+    if let Some(mut rules) = replacement_rules {
+        if settings.command_ime_switch_enabled {
+            rules.extend(tomari_core::defaults::command_ime_rules());
+        }
+        state.engine.lock_safe().set_rules(rules);
+        publish_modifier_rule_issues(app, &state.configuration_warnings, Vec::new());
+    }
+
     // Global shortcuts belong to keyboard customization too. Rebuild them
     // immediately when the master switch changes so turning it off releases
     // every system registration and turning it on restores the saved set.
-    if keyboard_toggled {
+    if keyboard_toggled || replacing {
         let shortcut_result = shortcuts::register_all(app, state);
         if let Err(error) = &shortcut_result {
             tracing::warn!(%error, "failed to reconcile global shortcuts after keyboard toggle");
@@ -430,7 +450,9 @@ fn save_settings_locked(
     // inside `reload_engine_rules` callees): the authoritative `capsLockRemap`
     // check runs once below, after every side effect, against the final live
     // state.
-    if (command_ime_changed || !command_ime_rules_live(state, settings.command_ime_switch_enabled))
+    if !replacing
+        && (command_ime_changed
+            || !command_ime_rules_live(state, settings.command_ime_switch_enabled))
         && let Err(e) = reload_engine_rules(app, state)
     {
         tracing::warn!(error = %e, "failed to reload engine rules after IME toggle");
@@ -510,7 +532,7 @@ fn save_settings_locked(
         );
     }
 
-    Ok(SaveSettingsOutcome { apply_warnings })
+    SaveSettingsOutcome { apply_warnings }
 }
 
 /// The `apply_warnings` the live state warrants right now, with no save

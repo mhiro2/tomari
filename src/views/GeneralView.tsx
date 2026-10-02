@@ -1,6 +1,7 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { useEffect, useRef, useState } from 'react';
 
+import { SettingsBackupPanel } from '../components/SettingsBackupPanel';
 import { Banner, FeaturePageHeader, SettingsList, SettingsRow, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
 import { applyWarningText } from '../lib/applyWarnings';
@@ -195,6 +196,8 @@ export function GeneralView({
           onChange={(v) => update({ externalWindowActionsEnabled: v })}
         />
       </SettingsList>
+
+      <SettingsBackupPanel />
 
       <SettingsList label={t('settings.maintenance')}>
         <SettingsRow

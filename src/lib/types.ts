@@ -248,6 +248,36 @@ export interface AppSettings {
   menuBarAutoCollapseSecs: number;
 }
 
+export interface ConfigurationBackupExport {
+  path: string;
+  generatedAtMs: number;
+}
+
+export interface ConfigurationBackupStatus {
+  canRestore: boolean;
+  lastApplied: (ConfigurationBackupOutcome & { token: number }) | null;
+}
+
+export interface ConfigurationCounts {
+  hotkeys: number;
+  modifierRules: number;
+  windowPlacements: number;
+}
+
+export interface ConfigurationBackupPreview {
+  token: number;
+  kind: 'import' | 'restore';
+  current: ConfigurationCounts;
+  incoming: ConfigurationCounts;
+  currentSettings: AppSettings;
+  settings: AppSettings;
+}
+
+export interface ConfigurationBackupOutcome {
+  settings: AppSettings;
+  applyWarnings: string[];
+}
+
 // State of the lid-close veto (pmset disablesleep): off, awaiting admin auth, or
 // engaged. ('unavailable' mirrors the backend enum but is no longer surfaced — a
 // declined veto turns keep-awake off entirely rather than reporting it.)
@@ -381,6 +411,10 @@ export type CmdErrorCode =
   | 'windowNotResponding'
   | 'settingsRecoveryRequired'
   | 'databaseResetRequired'
+  | 'backupInvalid'
+  | 'backupCurrentInvalid'
+  | 'backupPreviewExpired'
+  | 'backupUnavailable'
   | 'other';
 
 export interface CmdError {

@@ -7,6 +7,10 @@ import type {
   AcceleratorCheck,
   AppSettings,
   ConfigurationWarnings,
+  ConfigurationBackupExport,
+  ConfigurationBackupStatus,
+  ConfigurationBackupPreview,
+  ConfigurationBackupOutcome,
   DisplayDirection,
   DiagnosticsSnapshot,
   Hotkey,
@@ -45,6 +49,24 @@ export const getDiagnostics = (): Promise<DiagnosticsSnapshot> => invoke('get_di
 
 export const exportSupportBundle = (): Promise<SupportBundleExport> =>
   invoke('export_support_bundle');
+
+export const exportConfigurationBackup = (): Promise<ConfigurationBackupExport> =>
+  invoke('export_configuration_backup');
+
+export const revealConfigurationBackups = (): Promise<void> =>
+  invoke('reveal_configuration_backups');
+
+export const getConfigurationBackupStatus = (): Promise<ConfigurationBackupStatus> =>
+  invoke('get_configuration_backup_status');
+
+export const previewConfigurationImport = (contents: string): Promise<ConfigurationBackupPreview> =>
+  invoke('preview_configuration_import', { contents });
+
+export const previewConfigurationRestore = (): Promise<ConfigurationBackupPreview> =>
+  invoke('preview_configuration_restore');
+
+export const applyConfigurationBackup = (token: number): Promise<ConfigurationBackupOutcome> =>
+  invoke('apply_configuration_backup', { token });
 
 // Retry the unreadable persisted snapshot without changing it, or replace the
 // affected settings and automation rows with the backend's fixed fail-closed

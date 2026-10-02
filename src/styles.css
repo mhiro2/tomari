@@ -1918,6 +1918,66 @@ kbd,
   margin-left: auto;
 }
 
+.configuration-operation {
+  padding: 8px 22px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backup-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.backup-path {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.backup-preview {
+  width: min(620px, calc(100vw - 48px));
+}
+
+.backup-preview h3 {
+  margin-top: 18px;
+  font-size: 13px;
+}
+
+.backup-preview__table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.backup-preview__table th,
+.backup-preview__table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.backup-preview__table thead th {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.backup-preview__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
 .command-ime {
   display: flex;
   align-items: center;

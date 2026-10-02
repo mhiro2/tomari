@@ -194,6 +194,66 @@ const en = {
   'error.settingsRecoveryRequired': 'Settings must be repaired before changes can be saved.',
   'error.databaseResetRequired':
     'The quarantined settings database must be reset before Tomari can continue.',
+  'error.backupInvalid':
+    'This is not a supported, valid Tomari settings backup. Choose another file.',
+  'error.backupCurrentInvalid':
+    'Current settings need repair before they can be backed up or replaced. Review Diagnostics and Keyboard.',
+  'error.backupPreviewExpired':
+    'Settings changed after this preview. Review the replacement again before applying it.',
+  'error.backupUnavailable': 'There are no previous settings available to restore.',
+
+  'backup.title': 'Settings backup',
+  'backup.privacy':
+    'Settings backups contain your shortcut bindings, labels, and app identifiers. They are different from the anonymous support bundle in Diagnostics.',
+  'backup.exportTitle': 'Back up your configuration',
+  'backup.exportDescription':
+    'Save general settings, shortcuts, modifier rules, and remembered window positions as a JSON file.',
+  'backup.export': 'Export Settings',
+  'backup.exporting': 'Exporting…',
+  'backup.exported': 'Settings backup saved.',
+  'backup.openFolder': 'Open Backup Folder',
+  'backup.importTitle': 'Restore from a backup file',
+  'backup.importDescription':
+    'Choose a Tomari settings backup, review the changes, then replace the current configuration.',
+  'backup.chooseFile': 'Choose Backup…',
+  'backup.checking': 'Checking Backup…',
+  'backup.restoreTitle': 'Return to the settings before the last import',
+  'backup.restoreDescription':
+    'Review and restore the configuration saved immediately before your last import. Later edits will also be replaced.',
+  'backup.restore': 'Restore Previous Settings…',
+  'backup.noRestore': 'No previous import is available to undo.',
+  'backup.statusFailed': 'Could not check for previous settings: {error}',
+  'backup.imported': 'Settings replaced. Use “Restore Previous Settings” to undo this import.',
+  'backup.restored': 'The settings from before the last import have been restored.',
+  'backup.applyUnconfirmed':
+    'The result could not be confirmed. Current settings have been refreshed. Review them, or use “Restore Previous Settings” if available.',
+  'backup.fileTooLarge': 'Choose a settings backup no larger than 2 MiB.',
+  'backup.busy': 'Completing the settings operation…',
+  'backup.confirmImportTitle': 'Replace all settings from this backup?',
+  'backup.confirmImportBody':
+    'This replaces your entire saved configuration, including items with the same count. Your current configuration will be saved so you can restore it later.',
+  'backup.confirmRestoreTitle': 'Restore the settings before the last import?',
+  'backup.confirmRestoreBody':
+    'This replaces your entire configuration, including changes made since the import. This restore can be used once. Export your current settings first if you want to keep them.',
+  'backup.items': 'Saved items',
+  'backup.current': 'Current',
+  'backup.replacement': 'After replacement',
+  'backup.hotkeys': 'Shortcuts',
+  'backup.modifierRules': 'Modifier rules',
+  'backup.windowPlacements': 'Window positions',
+  'backup.settingsChanges': 'General settings that will change',
+  'backup.settingsUnchanged':
+    'General settings have the same values. The saved items above will still be replaced.',
+  'backup.setting': 'Setting',
+  'backup.dragToSnap': 'Drag to snap',
+  'backup.dragToMove': 'Drag to move and resize',
+  'backup.runtimeExcluded':
+    'Permissions, Caps Lock ownership, and the current Prevent Sleep session are not imported or restored.',
+  'backup.hiddenIcon':
+    'This configuration hides the menu bar icon. Launch Tomari again from Spotlight to reopen Settings.',
+  'backup.reviewAgain': 'Review Again',
+  'backup.replaceAll': 'Replace All Settings',
+  'backup.applying': 'Replacing Settings…',
 
   'recovery.eyebrow': 'Safety interlock',
   'recovery.title': 'Settings need repair',
@@ -801,6 +861,65 @@ const ja: Record<MessageKey, string> = {
   'error.settingsRecoveryRequired': '設定を修復するまで変更を保存できません。',
   'error.databaseResetRequired':
     '隔離された設定データベースをリセットするまで Tomari を続行できません。',
+  'error.backupInvalid':
+    '対応する形式の正しい Tomari 設定バックアップではありません。別のファイルを選んでください。',
+  'error.backupCurrentInvalid':
+    '現在の設定を修復するまで、バックアップや置き換えはできません。「診断」と「キーボード」を確認してください。',
+  'error.backupPreviewExpired':
+    'プレビュー後に設定が変更されました。置き換える内容をもう一度確認してください。',
+  'error.backupUnavailable': '復元できる以前の設定がありません。',
+
+  'backup.title': '設定のバックアップ',
+  'backup.privacy':
+    '設定バックアップにはショートカットの割り当て、名前、アプリの識別子が含まれます。「診断」の匿名化されたサポート情報とは異なります。',
+  'backup.exportTitle': '設定を書き出す',
+  'backup.exportDescription':
+    '一般設定、ショートカット、修飾キールール、記憶したウィンドウ位置を JSON ファイルに保存します。',
+  'backup.export': '設定を書き出す',
+  'backup.exporting': '書き出し中…',
+  'backup.exported': '設定バックアップを保存しました。',
+  'backup.openFolder': 'バックアップフォルダを開く',
+  'backup.importTitle': 'ファイルから設定を復元する',
+  'backup.importDescription':
+    'Tomari の設定バックアップを選び、変更内容を確認してから現在の設定を置き換えます。',
+  'backup.chooseFile': 'バックアップを選ぶ…',
+  'backup.checking': 'バックアップを確認中…',
+  'backup.restoreTitle': '最後の取り込み前の設定へ戻す',
+  'backup.restoreDescription':
+    '最後に取り込む直前の設定を確認して復元します。取り込み後に変更した設定も置き換わります。',
+  'backup.restore': '取り込み前の設定へ戻す…',
+  'backup.noRestore': '元に戻せる取り込みはありません。',
+  'backup.statusFailed': '取り込み前の設定を確認できませんでした: {error}',
+  'backup.imported': '設定を置き換えました。「取り込み前の設定へ戻す」で元に戻せます。',
+  'backup.restored': '最後の取り込み前の設定に戻しました。',
+  'backup.applyUnconfirmed':
+    '処理結果を確認できなかったため、現在の設定を再読み込みしました。設定を確認し、必要であれば「取り込み前の設定へ戻す」を使用してください。',
+  'backup.fileTooLarge': '2 MiB 以下の設定バックアップを選んでください。',
+  'backup.busy': '設定の処理を完了しています…',
+  'backup.confirmImportTitle': 'バックアップで設定をすべて置き換えますか？',
+  'backup.confirmImportBody':
+    '保存済みの設定をすべて置き換えます。件数が同じ項目も対象です。現在の設定は保存され、あとから戻せます。',
+  'backup.confirmRestoreTitle': '最後の取り込み前の設定に戻しますか？',
+  'backup.confirmRestoreBody':
+    '取り込み後の編集を含め、設定をすべて置き換えます。この復元は1回だけ利用できます。現在の設定も残す場合は、先に書き出してください。',
+  'backup.items': '保存済みの項目',
+  'backup.current': '現在',
+  'backup.replacement': '置き換え後',
+  'backup.hotkeys': 'ショートカット',
+  'backup.modifierRules': '修飾キールール',
+  'backup.windowPlacements': 'ウィンドウ位置',
+  'backup.settingsChanges': '変更される一般設定',
+  'backup.settingsUnchanged': '一般設定の値は同じです。上の保存済み項目は置き換わります。',
+  'backup.setting': '設定項目',
+  'backup.dragToSnap': 'ドラッグで整列',
+  'backup.dragToMove': 'ドラッグで移動・リサイズ',
+  'backup.runtimeExcluded':
+    '権限、Caps Lock 設定の所有記録、実行中のスリープ防止は取り込み・復元しません。',
+  'backup.hiddenIcon':
+    'この設定ではメニューバーのアイコンが非表示になります。Spotlight から Tomari をもう一度起動すると設定を開けます。',
+  'backup.reviewAgain': 'もう一度確認',
+  'backup.replaceAll': '設定をすべて置き換える',
+  'backup.applying': '設定を置き換え中…',
 
   'recovery.eyebrow': '安全インターロック',
   'recovery.title': '設定の修復が必要です',

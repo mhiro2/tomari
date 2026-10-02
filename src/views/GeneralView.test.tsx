@@ -51,6 +51,8 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(SETTINGS);
       case 'save_settings':
         return Promise.resolve({ applyWarnings: [] });
+      case 'get_configuration_backup_status':
+        return Promise.resolve({ canRestore: false, lastApplied: null });
       default:
         return Promise.resolve(null);
     }

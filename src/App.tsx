@@ -97,7 +97,7 @@ function SettingsRoot() {
 
 function OperationalShell() {
   const t = useT();
-  const { saveError, applyWarnings, configurationWarnings } = useSettings();
+  const { saveError, applyWarnings, configurationWarnings, configurationBusy } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
   const [healthDestination, setHealthDestination] = useState<HealthDestination | null>(null);
   const [configurationFocusRequest, setConfigurationFocusRequest] = useState(0);
@@ -279,7 +279,7 @@ function OperationalShell() {
 
   return (
     <div className="app">
-      <nav className="sidebar" aria-label={t('app.sections')}>
+      <nav className="sidebar" aria-label={t('app.sections')} inert={configurationBusy}>
         <div className="brand" aria-label="Tomari">
           <BrandIcon />
           <strong>Tomari</strong>
@@ -310,6 +310,11 @@ function OperationalShell() {
       </nav>
 
       <div className="app__content">
+        {configurationBusy && (
+          <output className="configuration-operation" aria-live="polite">
+            {t('backup.busy')}
+          </output>
+        )}
         {saveError !== null && (
           <p className="alert" role="alert">
             {t('settings.saveFailed', { error: formatCmdError(saveError, t) })}
@@ -348,7 +353,13 @@ function OperationalShell() {
           </output>
         )}
 
-        <main ref={mainRef} className="app__main" aria-label={t(`app.nav.${section}`)}>
+        <main
+          ref={mainRef}
+          className="app__main"
+          aria-label={t(`app.nav.${section}`)}
+          inert={configurationBusy}
+          aria-busy={configurationBusy}
+        >
           <SelectedView
             section={section}
             autoCheckUpdate={autoCheckUpdate}

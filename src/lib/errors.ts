@@ -20,6 +20,10 @@ export const LOCALIZED_CODES = [
   'windowNotResponding',
   'settingsRecoveryRequired',
   'databaseResetRequired',
+  'backupInvalid',
+  'backupCurrentInvalid',
+  'backupPreviewExpired',
+  'backupUnavailable',
 ] as const;
 type LocalizedCode = (typeof LOCALIZED_CODES)[number];
 

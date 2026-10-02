@@ -63,6 +63,11 @@ provides in charge.
 
 ### And more
 
+- **Settings backups** — export a local JSON file containing general settings,
+  shortcuts, modifier rules, and saved window positions. Preview an import
+  before replacing the configuration, and restore the saved pre-import state
+  if needed. Runtime apply failures remain visible and do not erase that
+  restore point.
 - **Localized UI** in English and Japanese (follows your system language by
   default).
 

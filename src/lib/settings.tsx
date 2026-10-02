@@ -24,7 +24,7 @@ import {
 import * as api from './api';
 import { hasCmdErrorCode } from './errors';
 import { CONFIGURATION_ISSUE_REASONS } from './types';
-import type { AppSettings, ConfigurationWarnings } from './types';
+import type { AppSettings, ConfigurationWarnings, ConfigurationBackupOutcome } from './types';
 
 const CONFIGURATION_ISSUE_REASON_SET = new Set<string>(CONFIGURATION_ISSUE_REASONS);
 
@@ -82,6 +82,11 @@ type SettingsContextValue = {
   // safety notice survives page navigation and unrelated successful saves.
   configurationWarnings: ConfigurationWarnings | null;
   update: (patch: Partial<AppSettings>) => void;
+  configurationBusy: boolean;
+  // A full snapshot operation waits for optimistic preference writes, then
+  // owns a barrier until its backend result is settled.
+  withSettingsSaved: <T>(operation: () => Promise<T>) => Promise<T>;
+  applyConfigurationBackup: (token: number) => Promise<void>;
   // Fold the outcome of a mutation made outside `update` — a modifier-rule
   // save, say — into `applyWarnings`. `probed` lists the codes that mutation
   // is able to report on; those are replaced by what it reported, every other
@@ -222,6 +227,149 @@ function usePanelWarningRefresh(
   }, [recoveryRequired, refreshApplyWarnings, refreshConfigurationWarnings, settings]);
 }
 
+function useConfigurationTransfer({
+  settingsRef,
+  recoveryRequired,
+  onApplied,
+  onUnconfirmed,
+}: {
+  settingsRef: ReadonlyRef<AppSettings | null>;
+  recoveryRequired: ReadonlyRef<boolean>;
+  onApplied: (outcome: ConfigurationBackupOutcome) => void;
+  onUnconfirmed: () => Promise<void>;
+}) {
+  const [configurationBusy, setConfigurationBusy] = useState(false);
+  const configurationOperation = useRef(false);
+  const pendingWrites = useRef(new Set<Promise<void>>());
+  const trackWrite = useCallback((pending: Promise<void>) => {
+    pendingWrites.current.add(pending);
+    void pending.then(
+      () => pendingWrites.current.delete(pending),
+      () => pendingWrites.current.delete(pending),
+    );
+  }, []);
+
+  async function withSettingsSaved<T>(operation: () => Promise<T>): Promise<T> {
+    if (configurationOperation.current)
+      throw new Error('A configuration operation is already running.');
+    configurationOperation.current = true;
+    setConfigurationBusy(true);
+    try {
+      // The first flush awaits all dirty follow-ups, draining the whole queue.
+      await Promise.all(pendingWrites.current);
+      if (recoveryRequired.current || settingsRef.current === null) {
+        throw Object.assign(new Error('Settings require recovery.'), {
+          code: 'settingsRecoveryRequired',
+        });
+      }
+      return await operation();
+    } finally {
+      configurationOperation.current = false;
+      setConfigurationBusy(false);
+    }
+  }
+
+  async function applyConfigurationBackup(token: number) {
+    async function apply() {
+      let outcome: ConfigurationBackupOutcome | null = null;
+      try {
+        outcome = await api.applyConfigurationBackup(token);
+      } catch (error) {
+        try {
+          const status = await api.getConfigurationBackupStatus();
+          if (status.lastApplied?.token === token) outcome = status.lastApplied;
+        } catch {
+          // A failed cache read still requires a fresh settings pull below.
+        }
+        if (outcome === null) {
+          // The commit may have succeeded even when its acknowledgement was
+          // lost. Re-read before permitting another optimistic settings save.
+          await onUnconfirmed();
+          throw error;
+        }
+      }
+      onApplied(outcome);
+    }
+    await withSettingsSaved(apply);
+  }
+
+  return {
+    configurationBusy,
+    configurationOperation,
+    withSettingsSaved,
+    applyConfigurationBackup,
+    trackWrite,
+  };
+}
+
+function useRecoveryCommands({
+  settingsRecovery,
+  recoveryRequired,
+  setSettingsRecovery,
+  applySettings,
+  refreshApplyWarnings,
+}: {
+  settingsRecovery: SettingsRecoveryState | null;
+  recoveryRequired: ReadonlyRef<boolean>;
+  setSettingsRecovery: (state: SettingsRecoveryState) => void;
+  applySettings: (settings: AppSettings) => void;
+  refreshApplyWarnings: WarningRefresh;
+}) {
+  const recoveryActionRunning = useRef(false);
+  // Recovery normally restarts Tomari. Reload after a resolved mock so tests
+  // and previews still exercise the explicit recovery boundary.
+  const runSettingsRecovery = useCallback(
+    async (action: 'retry' | 'reset') => {
+      if (
+        !recoveryRequired.current ||
+        recoveryActionRunning.current ||
+        settingsRecovery === null ||
+        (action === 'retry' && settingsRecovery.kind === 'databaseReset')
+      )
+        return;
+      const kind = settingsRecovery.kind;
+      recoveryActionRunning.current = true;
+      setSettingsRecovery(
+        action === 'retry'
+          ? { kind, phase: 'retrying', action: 'retry', error: null }
+          : { kind, phase: 'resetting', action: 'reset', error: null },
+      );
+      try {
+        if (action === 'retry') {
+          await api.retrySettingsRecovery();
+        } else {
+          await api.resetSettingsRecovery();
+        }
+        const recovered = await api.getSettings();
+        applySettings(recovered);
+        void refreshApplyWarnings(() => false);
+      } catch (error) {
+        const errorKind = recoveryKindFromError(error);
+        setSettingsRecovery({
+          kind: kind === 'databaseReset' || errorKind === 'databaseReset' ? 'databaseReset' : kind,
+          phase: 'failed',
+          action,
+          error,
+        });
+      } finally {
+        recoveryActionRunning.current = false;
+      }
+    },
+    [applySettings, recoveryRequired, refreshApplyWarnings, setSettingsRecovery, settingsRecovery],
+  );
+
+  const retrySettingsRecovery = useCallback(
+    () => runSettingsRecovery('retry'),
+    [runSettingsRecovery],
+  );
+  const resetSettingsRecovery = useCallback(
+    () => runSettingsRecovery('reset'),
+    [runSettingsRecovery],
+  );
+
+  return { retrySettingsRecovery, resetSettingsRecovery };
+}
+
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsRecovery, setSettingsRecovery] = useState<SettingsRecoveryState | null>(null);
@@ -238,7 +386,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // React commits.
   const settingsRef = useRef<AppSettings | null>(null);
   const recoveryRequired = useRef(false);
-  const recoveryActionRunning = useRef(false);
   // A save is in flight; `dirty` means new edits arrived while it ran, so the
   // saver should persist the latest state once more.
   const saving = useRef(false);
@@ -413,15 +560,48 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     flushRef.current = flush;
   }, [flush]);
 
+  const {
+    configurationBusy,
+    configurationOperation,
+    withSettingsSaved,
+    applyConfigurationBackup,
+    trackWrite,
+  } = useConfigurationTransfer({
+    settingsRef,
+    recoveryRequired,
+    onApplied: (outcome) => {
+      applySettings(outcome.settings);
+      warningsGeneration.current += 1;
+      setApplyWarnings(outcome.applyWarnings);
+      void refreshConfigurationWarnings(() => false);
+    },
+    onUnconfirmed: async () => {
+      try {
+        applySettings(await api.getSettings());
+        await refreshApplyWarnings(() => false);
+        void refreshConfigurationWarnings(() => false);
+      } catch (readError) {
+        const kind = recoveryKindFromError(readError);
+        if (kind !== null) requireSettingsRecovery(kind);
+        else {
+          settingsRef.current = null;
+          settled.current = false;
+          setSettings(null);
+          setLoadError(readError);
+        }
+      }
+    },
+  });
+
   const update = useCallback(
     (patch: Partial<AppSettings>) => {
-      if (recoveryRequired.current) return;
+      if (recoveryRequired.current || configurationOperation.current) return;
       const previous = settingsRef.current;
       if (!previous) return;
       applySettings({ ...previous, ...patch });
-      void flush();
+      trackWrite(flush());
     },
-    [applySettings, flush],
+    [applySettings, configurationOperation, flush, trackWrite],
   );
 
   const reportApplyOutcome = useCallback(
@@ -438,56 +618,13 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  // Recovery normally restarts Tomari. Reload after a resolved mock so tests
-  // and previews still exercise the explicit recovery boundary.
-  const runSettingsRecovery = useCallback(
-    async (action: 'retry' | 'reset') => {
-      if (
-        !recoveryRequired.current ||
-        recoveryActionRunning.current ||
-        settingsRecovery === null ||
-        (action === 'retry' && settingsRecovery.kind === 'databaseReset')
-      )
-        return;
-      const kind = settingsRecovery.kind;
-      recoveryActionRunning.current = true;
-      setSettingsRecovery(
-        action === 'retry'
-          ? { kind, phase: 'retrying', action: 'retry', error: null }
-          : { kind, phase: 'resetting', action: 'reset', error: null },
-      );
-      try {
-        if (action === 'retry') {
-          await api.retrySettingsRecovery();
-        } else {
-          await api.resetSettingsRecovery();
-        }
-        const recovered = await api.getSettings();
-        applySettings(recovered);
-        void refreshApplyWarnings(() => false);
-      } catch (error) {
-        const errorKind = recoveryKindFromError(error);
-        setSettingsRecovery({
-          kind: kind === 'databaseReset' || errorKind === 'databaseReset' ? 'databaseReset' : kind,
-          phase: 'failed',
-          action,
-          error,
-        });
-      } finally {
-        recoveryActionRunning.current = false;
-      }
-    },
-    [applySettings, refreshApplyWarnings, settingsRecovery],
-  );
-
-  const retrySettingsRecovery = useCallback(
-    () => runSettingsRecovery('retry'),
-    [runSettingsRecovery],
-  );
-  const resetSettingsRecovery = useCallback(
-    () => runSettingsRecovery('reset'),
-    [runSettingsRecovery],
-  );
+  const { retrySettingsRecovery, resetSettingsRecovery } = useRecoveryCommands({
+    settingsRecovery,
+    recoveryRequired,
+    setSettingsRecovery,
+    applySettings,
+    refreshApplyWarnings,
+  });
 
   const value = useMemo(
     () => ({
@@ -501,6 +638,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       applyWarnings,
       configurationWarnings,
       update,
+      configurationBusy,
+      withSettingsSaved,
+      applyConfigurationBackup,
       reportApplyOutcome,
     }),
     [
@@ -514,6 +654,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       applyWarnings,
       configurationWarnings,
       update,
+      configurationBusy,
+      withSettingsSaved,
+      applyConfigurationBackup,
       reportApplyOutcome,
     ],
   );

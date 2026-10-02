@@ -109,6 +109,8 @@ function defaultCommand(cmd: string): Promise<unknown> {
   switch (cmd) {
     case 'get_settings':
       return Promise.resolve(SETTINGS);
+    case 'get_configuration_backup_status':
+      return Promise.resolve({ canRestore: false, lastApplied: null });
     case 'setup_status':
       return Promise.resolve(ALL_GRANTED);
     case 'save_settings':

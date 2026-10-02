@@ -60,11 +60,24 @@ mark its case passed because the control is absent.
 | R14 | Upgrade the prior release with configured positions/remaps and a granted test profile. Repeat with a failed download and then retry. | Settings persist; failed delivery leaves a usable installed app. A successful restart cleans up the old runtime and starts one new instance. Record actual permission retention or re-grant behavior for the signing model used. | Not run |
 | R15 | Switch English/Japanese, navigate Setup, feature tabs, and Diagnostics by keyboard, and export the support bundle. | Text and action state remain correct; focus can reach and leave controls and dialogs. The exported bundle excludes input, window labels, process details, and paths. | Not run |
 | R16 | Run an eight-hour ordinary-work session, including ten lock/unlock and sleep/wake cycles plus display reconnection. Capture Diagnostics before and after. | No persistent input fault, crash, runaway tap restart, unbounded memory growth, or unresolved owned system state remains. Record the actual duration and cycle counts. | Not run |
+| R17 | Export configured general settings, hotkeys, modifier rules, and positions; reveal the file in Finder. Change each group, select the export, inspect the preview, cancel once, then preview and confirm replacement. | The export is an owner-only file. Cancel changes nothing; confirmation restores all four groups, including deletions, without moving open windows or starting Prevent Sleep. Settings and active shortcuts agree with the saved result. | Not run |
+| R18 | Preview a malformed, unsupported-version, incomplete, or conflicting backup. Also preview a valid backup, change the current configuration, then try the old confirmation. | Invalid files and stale previews are refused without replacing any configuration or earlier restore point. Quarantined current rows must be repaired before import. Old autosaves cannot land over an accepted import. | Not run |
+| R19 | Import while a requested OS effect is unavailable, such as a shortcut conflict or missing Input Monitoring. Inspect the apply warning, quit/relaunch, preview the pre-import restore point, and confirm restoration. Repeat after making a post-import edit. | Saved data and live-apply failure are distinguished. The restore point survives relaunch; its preview clearly replaces later edits. Restoration recovers all four configuration groups, and any remaining OS mismatch stays visible. An old position-edit undo cannot rewrite the imported or restored snapshot. | Not run |
 
 Authentication and permission changes must be checked through macOS and the
 running bundle. Mocks are still valuable for race conditions, database recovery,
 and failure paths; they do not satisfy these rows. Preserve the existing unit
 coverage and add regressions when an observed failure can be reproduced there.
+
+For configuration imports, also exercise fault injection in automated tests:
+fail a write after an earlier table has been deleted, fail the restore-point
+write or consumption, race a saved-position edit with the expected-snapshot
+check, and fail live application after the database commit. The first group
+must preserve every pre-existing row and restore point; the last must report
+saved data plus an apply failure and retain the documented recovery path.
+Repeat preview/apply after an error to prove a failed attempt cannot silently
+consume the user's recovery option. Do not simulate database failures by
+damaging the user's live database.
 
 ## CPU and resident-memory measurement
 
@@ -180,7 +193,7 @@ macOS version and build / hardware / display / keyboard / power:
 Signing model:
 Validation date and reviewer:
 Automated fmt / lint / typecheck / tests / dependency audit / bundle build:
-R01–R16 results, observations, and failure issue links:
+R01–R19 results, observations, and failure issue links:
 Measurement files and scenario repetition counts:
 CPU / RSS baseline and candidate comparisons:
 Long-session actual duration / cycles / diagnostic changes:

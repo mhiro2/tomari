@@ -347,6 +347,67 @@ Even with the icon hidden, you can always reopen the window:
 - Call **`tomari://v1/toggle-panel`** (see the [URL scheme](url-scheme.md)). This
   always works, even when external window control is turned off.
 
+## Settings backups
+
+Under **General → Settings backup**, **Export Settings** creates a versioned
+JSON backup of general preferences, global shortcuts, modifier rules, and every
+app's saved Position A/B. It writes a local file in Tomari's application-data
+`backups` folder; **Open Backup Folder** opens that location in Finder. Files
+are created with owner-only read/write permissions.
+
+A backup contains your labels, shortcut bindings, keystroke actions, application
+names and bundle identifiers, and saved positions. It is intended to restore
+your configuration and is not an anonymized support report. Keep it private
+when sharing diagnostic information. It does not contain raw input, window
+titles, macOS permission grants, HID ownership records, Prevent Sleep's active
+session or safety policies, or window-movement history. Importing never grants
+permissions or starts a Prevent Sleep session.
+
+Use **Choose Backup…** to preview a JSON file's contents, then confirm with
+**Replace All Settings**. Import **replaces all four configuration groups**; it
+does not merge rows with the existing configuration. Canceling the preview changes
+nothing. Unsupported format versions, incomplete or unknown fields, invalid
+values, and conflicting keyboard records are rejected before anything is
+written. Version 1 allows at most 2 MiB and 1,000 records in each collection.
+A file that is readable JSON is not necessarily a valid Tomari backup.
+If the current configuration changes after the preview, preview again before
+replacing it so the confirmation refers to the state actually being replaced.
+
+Tomari must also be able to read and validate the complete current configuration
+before replacing it. Repair or remove quarantined keyboard items first; an
+unreadable database belongs to the dedicated startup recovery flow described
+above. Import does not silently discard damaged rows to manufacture a partial
+restore point.
+
+The database replacement and its pre-import restore point are saved together.
+A database write failure leaves the existing configuration and any earlier
+restore point intact. After a successful replacement, Tomari updates the live
+keyboard rules, shortcuts, general preferences, and saved-position context.
+It does not move open windows to imported positions automatically. Normal
+permission and operating-system constraints still apply: a saved configuration
+can produce a visible apply warning when macOS cannot activate part of it. That
+warning means the import was saved, and the previous configuration remains
+available to restore; it is not reported as a clean apply.
+
+**Restore Previous Settings…** previews the configuration saved immediately
+before the latest successful import. It remains available after quitting and
+reopening Tomari. Confirming it replaces the current configuration, **including
+edits made after the import**. This restores one configuration snapshot rather than
+undoing individual edits. A subsequent successful import replaces that restore
+point; a failed import does not. A successful restore consumes it. If macOS
+cannot fully apply the restored settings, the remaining apply warning still
+needs attention even though the database restoration succeeded.
+
+Saved-position edit history is cleared when a whole configuration is replaced
+so an old Remember/Forget undo cannot write a pre-import position back into the
+new configuration. Shortcuts and Settings edits are serialized with the import;
+an earlier settings autosave cannot silently overwrite the newly imported
+preferences afterward.
+
+The [runtime validation guide](runtime-validation.md) includes import, recovery,
+and restart checks. Those physical-device checks are currently **Not run**;
+automated validation does not establish that every macOS side effect succeeds.
+
 ## Localization
 
 The Tomari window and tray menu are available in **Japanese and English**. By
