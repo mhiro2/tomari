@@ -1172,6 +1172,13 @@ without permissions too (unit tests).
   without the OS via `MockWindowManager`.
 - **Frontend**: Vitest + Testing Library (jsdom). `vitest.setup.ts` mocks the
   Tauri API.
+- **Runtime validation**: [the macOS validation guide](docs/runtime-validation.md)
+  defines physical-device scenarios, release acceptance, and a results template.
+  `tools/measure_runtime.py` reads CPU time and resident memory for one explicitly
+  selected process without changing application or OS state. Its standard-library
+  tests run through `make tools-test` in the local test suite and both CI and
+  release workflows. Measurements cover that process only, not WebView helpers;
+  automated unit tests do not establish device or long-running performance results.
 - **Toolchain**: clippy (`-D warnings`) / oxlint (type-aware) for linting,
   rustfmt / oxfmt for formatting, tsc for type checking, cargo-deny for
   dependency auditing. `make check` runs the whole local suite. oxlint also
@@ -1182,7 +1189,7 @@ without permissions too (unit tests).
   only to re-run an effect, or a ref taken as a parameter, which
   `react/exhaustive-deps` wants in the dependency array while the compiler
   infers `.current` and would drop it.
-- **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macos),
+- **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macOS 27),
   cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
   --debug`) that exercises the same `tauri.conf.json` bundle config a release
   build uses, so a broken bundle setting fails on every push instead of first
@@ -1191,6 +1198,8 @@ without permissions too (unit tests).
   release build is gated on the same checks as a regular push — a tag pushed
   from a commit that never went through CI cannot publish an artifact whose
   dependency policy was never checked.
+  Native jobs use GitHub's `xcode-27` arm64 image, which runs macOS 27 and is
+  currently in public preview. macOS 26 is no longer a test or distribution target.
 
 ## 12. Adding a feature
 

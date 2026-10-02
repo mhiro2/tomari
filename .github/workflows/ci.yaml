@@ -70,6 +70,8 @@ jobs:
         run: make rust-lint
       - name: Run tests
         run: make rust-test
+      - name: Test runtime measurement tool
+        run: make tools-test
 
   deny-check:
     name: Dependency audit

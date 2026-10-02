@@ -92,6 +92,7 @@ See the [feature reference](docs/features.md) for the full details.
 - [Feature reference](docs/features.md) — every feature in detail.
 - [Permissions & privacy](docs/permissions.md) — Accessibility, Input Monitoring, and Keep Awake.
 - [URL scheme](docs/url-scheme.md) — drive window actions from Raycast, Alfred, and other launchers.
+- [Runtime validation](docs/runtime-validation.md) — macOS regression scenarios and resident-performance measurements.
 
 ## License
 

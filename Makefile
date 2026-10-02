@@ -78,7 +78,7 @@ typecheck: ## Type-check frontend code with tsc.
 ## Test ##
 
 .PHONY: test
-test: rust-test frontend-test ## Run all Rust and frontend tests.
+test: rust-test frontend-test tools-test ## Run Rust, frontend, and runtime-tool tests.
 
 .PHONY: rust-test
 rust-test: ## Run Rust workspace tests.
@@ -87,6 +87,10 @@ rust-test: ## Run Rust workspace tests.
 .PHONY: frontend-test
 frontend-test: ## Run frontend tests with Vitest.
 	pnpm test
+
+.PHONY: tools-test
+tools-test: ## Test the read-only runtime measurement tool.
+	python3 -m unittest discover -s tools -p 'test_*.py'
 
 ## Build & Run ##
 
