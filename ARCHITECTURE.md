@@ -1003,9 +1003,18 @@ differently:
   run on a worker thread so the dialog never blocks the caller) — and persists
   until cleared.
 
-The lid-close veto is a **required** part of keep-awake, not an optional add-on,
-and both directions go through it on the worker thread — which (not the
-command) commits the `active` flag. Turning on takes the idle assertion immediately and
+`KeepAwakeOptions.mode` selects `idleOnly` (the default) or `lidClosed`.
+The idle-only path creates and releases its assertion directly and never starts
+a lid-close worker, writes an ownership marker, or changes `disablesleep`.
+Creation failure is reported as `assertionFailed`; a failed release retains the
+assertion and a retry toward off instead of claiming the session stopped.
+Both modes share the timer and power guards. Mode changes are accepted only
+without an active assertion, pending transition, owned override, or unresolved
+launch recovery, including at both configuration command entry points.
+
+The lid-close veto is required within `lidClosed`, and both directions go
+through it on the worker thread — which (not the command) commits the `active`
+flag. Turning on takes the idle assertion immediately and
 shows on; if the veto then cannot be engaged (auth declined, or the sleep state
 is unreadable) the whole switch rolls back off. An enable whose read-back fails
 is not written off as "off": the flag was clear before the enable, so the worker
@@ -1038,7 +1047,10 @@ lock first — returns before its first `pmset`, so it can never re-enable the
 override the winner just cleared.
 
 Keep-awake is **runtime state** in `AppState` (`Mutex<KeepAwake>`), never
-persisted: it always starts off at launch. A toggle reaches it from the tray (a
+persisted: it always starts off in `idleOnly` at launch. The mode and other
+session controls are excluded from configuration backups. Existing ownership
+and recovery markers are reconciled independently of the default mode; a
+failed recovery cannot be bypassed by starting idle-only operation. A toggle reaches it from the tray (a
 `CheckMenuItem`), the panel (`get_keep_awake` / `set_keep_awake` commands), and
 `AppAction::ToggleKeepAwake` (hotkeys / taps). Every change emits
 `tomari:keep-awake-changed` and rebuilds the tray, so the panel's Start / Stop
@@ -1047,11 +1059,12 @@ reconcile workers, and the safety monitor all emit, and each snapshots under the
 state lock but emits outside it, so the events themselves can arrive out of
 order. Every snapshot the frontend can receive — reads and events alike —
 therefore takes a `revision` under that same lock, so a snapshot issued later
-always outranks one issued earlier. The panel treats the event, never a command's
-return value, as the state; it subscribes before its first read (an event emitted
-in that gap would simply be lost) and drops any snapshot older than one it has
-already applied, rather than being stranded on a transition that has since
-finished.
+always outranks one issued earlier. The panel applies command results and events
+through the same revision check. It subscribes before its first read and drops
+any snapshot older than one it has already applied, so a late response cannot
+replace a completed transition with stale state. Diagnostics includes the mode:
+an active idle-only assertion does not require the global sleep flag to be set,
+while owned residual state is still actionable in either mode.
 
 A backend monitor keeps session-only safety policy independent of the settings
 window. It refreshes AC/battery data, the actual kernel `SleepDisabled` flag,
@@ -1222,10 +1235,24 @@ the mechanism off.
 | ---------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Accessibility    | Moving windows (AX), key and menu-bar drag synthesis, reading menu bar items | `AXIsProcessTrustedWithOptions` (with prompt)                                                                            |
 | Input Monitoring | The keyboard tap and the drag-to-snap tap          | `CGRequestListenEventAccess`. Attempting to create a tap without it adds Tomari to the Input Monitoring list so the user can enable it |
-| Administrator    | Keep-awake's lid-close veto (`pmset disablesleep`) | macOS auth dialog via `osascript … with administrator privileges`; required to turn Keep Awake on — the lid-close veto is part of the switch, so declining cancels it |
+| Administrator    | Keep-awake's lid-closed mode and owned-override recovery (`pmset disablesleep`) | macOS auth dialog via `osascript … with administrator privileges`; required on start and stop in lid-closed mode. Standard mode needs no authorization. Declining never changes the selected mode. |
 
 Global shortcuts need neither permission. The pure engines are testable
 without permissions too (unit tests).
+
+`permissions.rs` shares explicit pane navigation between Setup and tray actions.
+It invokes the native request first, then opens the matching System Settings URL
+on every denied request; navigation failure reaches the caller. The command runs
+off the main thread and bounds the `open` subprocess to three seconds.
+
+Settings translates live-apply warnings into feature-specific recovery actions.
+`restart_app` is an explicit operation: the frontend drains autosaves and rejects
+a failed save, while the backend records a one-shot Settings reopen marker and
+uses the lifecycle leader's normal cleanup before relaunching. Packaged apps
+relaunch through LaunchServices without waiting for the new instance while the
+old process still holds its lock; unbundled development uses Tauri restart. It
+releases the configuration gate before shutdown drains that gate. Missing
+permissions never trigger an automatic restart loop.
 
 ## 11. Testing
 
@@ -1254,10 +1281,14 @@ without permissions too (unit tests).
   `react/exhaustive-deps` wants in the dependency array while the compiler
   infers `.current` and would drop it.
 - **CI** (GitHub Actions): four jobs — frontend (ubuntu), Rust tests (macOS 27),
-  cargo-deny (ubuntu), and an unsigned macOS debug bundle build (`tauri build
+  cargo-deny (ubuntu), and an ad-hoc-signed macOS debug bundle build (`tauri build
   --debug`) that exercises the same `tauri.conf.json` bundle config a release
   build uses, so a broken bundle setting fails on every push instead of first
-  showing up on a tag. Release tags additionally re-run the frontend, Rust and
+  showing up on a tag. The bundle has an explicit ad-hoc signing identity and
+  CI checks its complete resource seal with `codesign --verify --deep --strict`;
+  the linker's executable-only signature is insufficient for a valid app bundle.
+  This does not establish Developer ID trust or notarization.
+  Release tags additionally re-run the frontend, Rust and
   cargo-deny jobs before publishing (`.github/workflows/release.yaml`), so a
   release build is gated on the same checks as a regular push — a tag pushed
   from a commit that never went through CI cannot publish an artifact whose

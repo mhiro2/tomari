@@ -5,10 +5,59 @@ and CI builds establish logic and packaging coverage; they do not establish
 that input interception, Accessibility, authorization, or cleanup work in a
 logged-in desktop session. This document defines that separate release gate.
 
-**Status: the matrix and performance baselines below are not yet executed.**
+**Status: the release matrix and performance baselines remain unexecuted.**
 Adding this procedure or passing the measurement tool's tests does not mark a
 Tomari build as validated. Record actual results for each candidate. Do not
 describe a synthetic process measurement as an application baseline.
+
+### Development checks on 2026-10-02
+
+The following targeted checks used the local ad-hoc debug bundle, version 0.0.2,
+on Apple Silicon with macOS 27.0.1 (26A434). This was the existing development
+account, not a clean release-test account, so these observations do not mark
+the full matrix below as passed.
+
+The final bundled executable, rebuilt after tightening warning-action routing,
+passed signature verification and a native UI smoke check. Its SHA-256 was
+`f7c3dd51bfa7d042c7c702c5a595594e7b085d582c11b64ece44de9aea3e97a1`.
+
+- The modifier editor created and deleted a disabled Shift/Hyper rule and
+  rejected a duplicate Caps Lock slot. Real remapping and ANSI/JIS typing remain
+  blocked by stale Accessibility registration and missing Input Monitoring.
+- A native export had mode `0600`. File selection, preview, cancellation,
+  re-selection, import, relaunch, and restoration from the surviving pre-import
+  snapshot succeeded. The import used the original configuration; all four
+  portable tables matched their pre-test contents afterward. This does not
+  cover every changed-data, conflict, or failure scenario in R17–R19.
+- macOS classified the exported JSON as plain text and disabled Open under the
+  file-type filter. Removing that filter made it selectable; the size limit and
+  strict content validation remain. The three backup controls measure 208 × 34
+  CSS pixels at the minimum 860-pixel window width; the Japanese heading stays
+  on one line. Layout was also checked in the native 940-pixel window.
+- Both permission buttons opened the matching System Settings pane, including
+  Input Monitoring after prior denial. TCC logs confirmed an obsolete code
+  requirement despite the old Accessibility entry appearing enabled. Re-adding
+  the final bundle and testing actual input remains a user-controlled step.
+- The previous bundle failed strict signature verification. Explicit whole-app
+  ad-hoc signing passed `codesign --verify --deep --strict` with the correct
+  bundle identifier and resource seal. Developer ID and notarization remain
+  deferred; changed ad-hoc binaries still need permission re-registration.
+- A read-only `hidutil` check returned four keyboard-capable services. Their
+  macOS 27 table output is now parsed consistently; differing per-service
+  mappings are refused. Mapping writes and custom-mapping restoration remain
+  untested in this desktop session.
+- Lid-open Prevent Sleep started without an authorization prompt, appeared as
+  a real `PreventUserIdleSystemSleep` assertion, and left `disablesleep`
+  unchanged. Diagnostics reported it healthy. Manual stop and an explicit
+  restart both removed the assertion; restart reopened Settings with the
+  session off. The separately invoked native IOKit create/release test passed.
+- Direct executable relaunch could not be reacquired by the native UI tool.
+  The explicit restart action now launches the packaged app through macOS
+  LaunchServices; two subsequent restarts returned to the visible Settings
+  window. No automatic permission-triggered restart is used.
+
+Administrator prompts, lid closure, battery guards, sleep/wake, display changes,
+updates, and the eight-hour performance session remain outside these checks.
 
 ## Record the candidate and environment
 
@@ -52,9 +101,9 @@ mark its case passed because the control is absent.
 | R06 | Save positions A/B, restore repeatedly, move to another display, undo, and redo using Settings and shortcuts. | Every action addresses the intended external app/window; A/B alternation and history remain coherent. Opening Settings does not make Tomari the target. | Not run |
 | R07 | Disconnect/reconnect the external display, change scaling/arrangement, then restore and undo. | The window stays within an available usable display; an unavailable or changed target produces a recoverable result rather than moving a different window. | Not run |
 | R08 | Exercise edge snapping and modifier-drag move/resize; release the modifier or button during a drag and disable the feature between gestures. | The preview and final geometry agree, ordinary pointer input resumes, and a completed or canceled gesture cannot move a later window. | Not run |
-| R09 | Start and stop Prevent Sleep, accepting and declining each administrator prompt; cancel from Settings and retry. | Operation state stays in progress until authorization settles; retry follows the failed direction. The kernel sleep flag and Tomari ownership match Diagnostics, without overlapping prompts. | Not run |
-| R10 | In a controlled session, test a deadline, AC removal, and the low-battery policy; test lid closure while monitoring the machine locally. | Each condition initiates the documented shutdown flow once. Declined authorization remains visible and retryable; do not infer sleep is restored from a button state alone. Record untested battery/lid conditions as Blocked. | Not run |
-| R11 | Quit normally and force-quit in separate Prevent Sleep sessions; relaunch after the forced exit. | Normal exit completes cleanup; the crash path presents ownership recovery. Leaving the external state unchanged or restoring sleep follows the explicit recovery choice. | Not run |
+| R09 | Start and stop Standard Prevent Sleep, then select lid-closed mode while stopped and accept/decline its administrator prompts; cancel and retry. Attempt a mode change while active, pending, or in recovery. | Standard creates/releases its assertion without authorization or changes to `disablesleep`; Diagnostics reports it healthy. Lid-closed state stays pending until authorization settles; denial does not switch modes. Mode changes are refused while active or unresolved, and retry follows the failed direction. | Not run |
+| R10 | In each mode, test a deadline, AC removal, and the low-battery policy in a controlled session; test lid closure while monitoring locally. | Each condition initiates the selected mode's stop once. Standard stops without authorization and does not claim lid-close protection. Declined lid-closed authorization remains visible and retryable. Record untested battery/lid conditions as Blocked. | Not run |
+| R11 | Quit normally and force-quit in separate sessions of each mode; relaunch after forced exit. Decline recovery of a prior lid-closed override, then try Standard. | Standard's assertion is released on exit. Lid-closed normal exit completes cleanup and its crash path offers explicit recovery. Relaunch defaults to Standard but refuses to bypass an unresolved owned override; foreign overrides remain untouched. | Not run |
 | R12 | On macOS 27+, inspect Menu Bar settings and try any saved menu-bar shortcut. | Unsupported tidying stays inactive: no divider/handle is inserted and an unavailable action does not reserve its shortcut. Other features remain usable. | Not run |
 | R13 | Hide the tray icon, relaunch Tomari, and invoke the panel URL; launch a second instance while Settings is open. | The existing Settings window remains recoverable and only one instance owns automation. External window actions still honor their opt-in control. | Not run |
 | R14 | Upgrade the prior release with configured positions/remaps and a granted test profile. Repeat with a failed download and then retry. | Settings persist; failed delivery leaves a usable installed app. A successful restart cleans up the old runtime and starts one new instance. Record actual permission retention or re-grant behavior for the signing model used. | Not run |

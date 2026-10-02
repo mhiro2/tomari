@@ -28,8 +28,9 @@ fields. Raw keyboard/pointer input, menu bar Accessibility labels, process
 details, configured shortcuts and actions, database rows, error text, and
 filesystem paths are excluded by construction.
 
-The administrator password for Prevent Sleep is deliberately not on the
-checklist — it is asked for each time rather than granted once (see below).
+Standard Prevent Sleep needs none of these permissions. The administrator
+password for its optional lid-closed mode is deliberately not on the checklist:
+it is requested for each operation rather than granted once (see below).
 
 ## Accessibility
 
@@ -37,6 +38,7 @@ Required for **moving windows**, **switching the IME**, **sending keys**, and
 **reading or rearranging menu bar items**. macOS prompts you the first time one
 of these is used. Grant it under
 **System Settings → Privacy & Security → Accessibility**.
+On macOS 27 this pane is labeled **Device Control and Data Access** in English.
 
 It is also a precondition for the two event taps that *modify* input —
 **keyboard customization** (modifier tap/hold, remapping, the hyper key) and
@@ -71,17 +73,20 @@ To keep working with the **display closed**, Prevent Sleep (keep awake) uses
 `pmset disablesleep`, which requires your **administrator password**. This is
 separate from Accessibility and Input Monitoring.
 
-This lid-close layer is part of Prevent Sleep, so the password prompt appears both
-when you **enable** it (declining cancels Prevent Sleep entirely — there is no
-display-open-only fallback) and when you **disable** it (clearing the override
-needs the same authorization; declining leaves Prevent Sleep on, since sleep is
-still prevented until it is cleared).
+Choose **Lid is open** for idle-sleep prevention without a password.
+This default mode holds an IOKit assertion and does not write `disablesleep`.
+Choose **Lid is open or closed** while stopped for the additional
+lid-close layer. Only that mode prompts both when you **enable** it (declining
+cancels the operation without switching modes) and when you **disable** it
+(declining leaves Prevent Sleep on until the override is cleared).
 
 The switch remains unavailable for the entire authorization prompt. You can
 cancel that prompt from Settings, and retry a declined or unconfirmed change.
-Automatic deadlines, AC disconnects, and the optional low-battery auto-off
-initiate this same administrator-approved clear, so macOS can show the password
-prompt when a safety guard fires.
+Automatic deadlines, AC disconnects, and the optional low-battery auto-off use
+the selected mode's stop operation. Standard releases its assertion without a
+prompt; lid-closed mode needs the same administrator-approved clear. Recovery
+of an owned override from an earlier run also requires authorization, even
+though a fresh launch otherwise defaults to Standard.
 
 ## Trying things without permissions
 
@@ -95,18 +100,33 @@ Tomari is currently signed ad-hoc rather than with a Developer ID certificate
 (see the [README](../README.md#installation)). macOS ties Accessibility and
 Input Monitoring grants to the binary's code signature (CDHash), and an
 ad-hoc signature is regenerated on every build. As a result, **updating
-Tomari currently invalidates both grants**, and macOS silently drops the app
-from both permission lists — you will need to re-add and re-enable
-Accessibility and Input Monitoring after each update, the same way you did on
-first install. This is a known limitation until proper Developer ID signing
-and notarization are in place; it is not something you can work around from
-inside the app.
+Tomari currently invalidates both grants**. The old entry may disappear or
+remain visibly enabled while macOS rejects the new build's identity. Quit
+Tomari, remove the old Tomari entry from each permission list, add the current
+Tomari.app, enable it, and launch that same app again. Merely toggling the old
+entry may retain the old code requirement. This also applies to local rebuilds
+with an unchanged version number. This is a known limitation until Developer ID
+signing and notarization are in place; it is not something you can work around
+from inside the app.
 
 Tomari does detect it, though: each run stores which permissions were granted,
 and a launch that finds a previously granted permission missing *and* a changed
 app version opens the settings window with an update-specific Setup dialog. If
-the version has not changed — you revoked a permission yourself — nothing opens
+the version has not changed, including a local rebuild, nothing opens
 automatically; the tray items and the settings sidebar's **Needs attention**
 status point it out. (Detection needs a stored snapshot to compare against, so
 it starts working from the first update *after* the release that introduced
 it.)
+
+The permission buttons explicitly open the relevant System Settings pane on
+every ungranted request, including after a previous denial. If the pane cannot
+be opened, Setup displays the error. The buttons do not grant or reset access.
+Local bundles are signed ad-hoc as complete applications; build verification
+checks the resource seal, but does not preserve grants across changed binaries.
+
+When a feature cannot start, Settings names the affected feature and offers
+permission setup or an explicit **Restart Tomari** action where appropriate.
+Setup also offers a restart after opening a permission pane. Restart waits for
+pending settings saves and uses the same cleanup path as normal quit. A failed
+save prevents the restart. Tomari never restarts automatically in response to
+a missing grant, since restarting cannot repair an obsolete grant entry.
