@@ -43,7 +43,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "27.0"
+      "minimumSystemVersion": "27.0",
+      "signingIdentity": "-"
     },
     "category": "Productivity",
     "shortDescription": "Keyboard customization and window management for macOS.",

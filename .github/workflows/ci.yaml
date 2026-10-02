@@ -124,3 +124,5 @@ jobs:
         run: |
           TAURI_SIGNING_PRIVATE_KEY="$(cat "${RUNNER_TEMP}/updater-key")" \
             pnpm tauri build --debug
+      - name: Verify application bundle signature
+        run: codesign --verify --deep --strict --verbose=2 target/debug/bundle/macos/Tomari.app
