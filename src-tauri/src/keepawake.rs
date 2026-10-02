@@ -1,7 +1,7 @@
 //! Sleep prevention ("keep awake") for long-running background work — e.g.
 //! letting an AI agent keep running after the laptop lid is shut.
 //!
-//! macOS exposes two layers with very different guarantees, so we use both:
+//! macOS exposes two layers with different guarantees, selected per session:
 //!
 //! * An **IOKit power assertion** (`PreventUserIdleSystemSleep`) stops the
 //!   system from idle-sleeping. It needs no permission and is released cleanly,
@@ -15,7 +15,8 @@
 //! Keep-awake is **session state**: it always starts off at launch and is never
 //! persisted as "on".
 //!
-//! The lid-close veto is **required**, not optional, and both directions go
+//! Normal mode holds only the idle assertion and never requests authorization.
+//! In lid-closed mode the veto is **required**, and both directions go
 //! through it on a worker thread — which (not the toggle) commits `active`. An
 //! engage takes the idle assertion immediately and shows on; if the veto then
 //! cannot be engaged (auth declined, or an unreadable sleep state) the whole
@@ -209,11 +210,21 @@ pub enum LowBatteryAction {
     TurnOff,
 }
 
-/// Session-only safety controls. `ends_at_ms` is an absolute Unix timestamp so
-/// the backend, tray, and panel agree even if the panel is closed.
+/// The selected sleep-prevention guarantee, reset at every launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepAwakeMode {
+    #[default]
+    IdleOnly,
+    LidClosed,
+}
+
+/// Session-only mode and safety controls. `ends_at_ms` is an absolute Unix
+/// timestamp so every surface agrees even if the panel is closed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeepAwakeOptions {
+    pub mode: KeepAwakeMode,
     /// Relative timer preset. Re-armed on every transition to on.
     pub duration_secs: Option<u64>,
     /// Materialized deadline, or a user-selected absolute end time.
@@ -239,6 +250,7 @@ pub enum KeepAwakeNotice {
     LowBattery,
     TimerElapsed,
     AuthorizationDeclined,
+    AssertionFailed,
     /// The lid-close override was enabled but its state could not be read back,
     /// and clearing it again could not be confirmed either: the Mac may be unable
     /// to sleep although keep-awake shows off. Retry clears it.
@@ -356,13 +368,35 @@ fn accepts_requests(state: &AppState) -> bool {
     state.lifecycle.is_running() && !SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// A mode change must never bypass an outstanding assertion or lid-close cleanup.
+fn update_options(k: &mut KeepAwake, options: KeepAwakeOptions) -> bool {
+    if options.mode != k.options.mode {
+        if k.active
+            || k.assertion.is_some()
+            || k.phase.is_pending()
+            || k.ownership.may_own()
+            || k.leftover_undecided
+        {
+            return false;
+        }
+        // Supersede any completed failed start and clear its obsolete retry.
+        k.generation = k.generation.wrapping_add(1);
+        k.phase = KeepAwakePhase::Off;
+        k.notice = None;
+        k.retry_target = None;
+        k.auto_off_attempted = false;
+    }
+    k.options = options;
+    true
+}
+
 /// Turn sleep prevention on or off, returning the resulting status.
 pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
-    if !accepts_requests(state.inner()) {
+    let Some(_runtime_effect) = state.lifecycle.runtime_effect() else {
         return status(state.inner());
-    }
-    {
+    };
+    let request_generation = {
         let mut k = state.keep_awake.lock_safe();
         if !accepts_requests(state.inner()) {
             return status_from(&k);
@@ -380,8 +414,13 @@ pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) ->
             );
             return status_from(&k);
         }
-        if let Some(options) = options {
-            k.options = options;
+        if let Some(options) = options
+            && !update_options(&mut k, options)
+        {
+            return status_from(&k);
+        }
+        if enabled && k.options.mode == KeepAwakeMode::IdleOnly && k.ownership.may_own() {
+            return status_from(&k);
         }
         k.notice = None;
         k.retry_target = None;
@@ -404,8 +443,22 @@ pub fn set(app: &AppHandle, enabled: bool, options: Option<KeepAwakeOptions>) ->
             notify(app);
             return status(state.inner());
         }
+        // Commit the chosen mode and transition together. Otherwise a mode
+        // edit in between could turn an ordinary start into an admin request.
+        if enabled {
+            begin_enable(&mut k, create_assertion)
+        } else {
+            begin_disable(&mut k)
+        }
+    };
+    notify(app);
+    #[cfg(target_os = "macos")]
+    if let Some(request_generation) = request_generation {
+        spawn_reconcile(app.clone(), enabled, request_generation);
     }
-    if enabled { engage(app) } else { disengage(app) }
+    #[cfg(not(target_os = "macos"))]
+    let _ = request_generation;
+    status(state.inner())
 }
 
 /// Flip sleep prevention. Used by the tray item and the `ToggleKeepAwake`
@@ -421,8 +474,8 @@ pub fn toggle(app: &AppHandle) -> KeepAwakeStatus {
     set(app, !active, None)
 }
 
-/// Update the session-only timer and power guards without changing the master
-/// switch. Active sessions pick up the new policy on the next monitor tick.
+/// Update session controls without changing the master switch. Mode changes
+/// require a fully stopped session; active sessions can update their safety policy.
 pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     if !accepts_requests(state.inner()) {
@@ -432,7 +485,9 @@ pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus 
     if !accepts_requests(state.inner()) {
         return status_from(&k);
     }
-    k.options = options;
+    if !update_options(&mut k, options) {
+        return status_from(&k);
+    }
     if !k.active && k.options.duration_secs.is_some() {
         k.options.ends_at_ms = None;
     } else if k.active && k.options.duration_secs.is_some() && k.options.ends_at_ms.is_none() {
@@ -448,8 +503,8 @@ pub fn configure(app: &AppHandle, options: KeepAwakeOptions) -> KeepAwakeStatus 
 ///
 /// A retry toward *off* while keep-awake is already off is the recovery of a
 /// lid-close override that is only possibly ours (`lidCloseUnconfirmed`): there
-/// is nothing to turn off in the ordinary sense — `disengage` would return at
-/// once — so it runs the clear directly, as its own stamped transition.
+/// is no ordinary running session, so it runs the clear directly as its own
+/// stamped transition.
 pub fn retry(app: &AppHandle) -> KeepAwakeStatus {
     let state = app.state::<AppState>();
     if !accepts_requests(state.inner()) {
@@ -714,7 +769,7 @@ fn refresh_system_status(app: &AppHandle, full: bool) {
         k.long_running_processes = processes;
 
         // A guard must not interrupt an administrator prompt that is already up,
-        // and must fire at most once per session: `disengage` needs its own
+        // and must fire at most once per session: a lid-closed stop needs its own
         // (declinable) prompt, so re-deciding every tick while a declined
         // auto-off sits in `Failed` would reopen that dialog every ten seconds.
         // Note the block is *not* `phase != On` — that would also disarm every
@@ -832,126 +887,102 @@ fn arm_duration(options: &mut KeepAwakeOptions) {
     }
 }
 
-fn engage(app: &AppHandle) -> KeepAwakeStatus {
-    let state = app.state::<AppState>();
-    let Some(_runtime_effect) = state.lifecycle.runtime_effect() else {
-        return status(state.inner());
-    };
-    // Once shutdown cleanup has begun, refuse to turn on — otherwise a worker
-    // spawned here could re-enable the lid-close override after cleanup cleared
-    // it (notably during the updater's restart), leaving the Mac unable to sleep.
-    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
-        return status(state.inner());
-    }
-    // Whether the idle-sleep assertion was actually taken. Only then do we have
-    // a live "on" worth reconciling the lid-close veto for.
-    #[cfg(target_os = "macos")]
-    let engaged;
-    // The generation stamped on this engage, captured under the lock that bumps
-    // it so the spawned worker reconciles against *this* request, not whatever
-    // the latest generation happens to be by the time it wins `LID_OP_LOCK`.
-    #[cfg(target_os = "macos")]
-    let request_generation;
+/// Start the selected mode while the caller holds the state lock. Returning a
+/// generation requests the administrator-backed lid-close worker; normal mode
+/// cannot reach it. Injectable assertion calls keep transition tests OS-free.
+fn begin_enable(k: &mut KeepAwake, create: impl FnOnce() -> Result<u32, i32>) -> Option<u64> {
+    if k.active
+        || k.assertion.is_some()
+        || k.phase.is_pending()
+        || k.leftover_undecided
+        || (k.options.mode == KeepAwakeMode::IdleOnly && k.ownership.may_own())
     {
-        let mut k = state.keep_awake.lock_safe();
-        if k.active {
-            // Already on — nothing to do. Pending phases were rejected by `set`
-            // before reaching here; cancellation uses `spawn_reconcile` directly
-            // to reverse an in-flight operation under a new generation.
-            return status_from(&k);
-        }
-        // Re-check shutdown *under the lock*. `prepare_shutdown` sets
-        // SHUTTING_DOWN before it takes this lock, so an engage that raced it
-        // past the unlocked check above would otherwise still slip through here,
-        // create an assertion, and spawn a worker that re-engages the lid-close
-        // override after cleanup already cleared it — stranding the Mac awake
-        // past exit. Bailing here closes that window.
-        if !accepts_requests(state.inner()) {
-            return status_from(&k);
-        }
-        // Relative presets begin when the session actually engages, including
-        // tray and shortcut starts that happen after the panel was closed.
-        arm_duration(&mut k.options);
-        // The idle-sleep assertion is the foundation of keep-awake — it needs no
-        // permission and is what actually holds sleep off for the lid-open case.
-        // Take it synchronously and flip `active` on *only once it succeeds*, so a
-        // rare IOKit failure can never leave the switch reported "on" with nothing
-        // behind it. The admin-authed lid-close veto is reconciled in the
-        // background below; it is a required part of keep-awake, so declining its
-        // prompt rolls the whole switch back off (see `reconcile_lid_close`).
-        #[cfg(target_os = "macos")]
-        {
-            match create_assertion() {
-                Ok(id) => {
-                    k.assertion = Some(id);
-                    k.active = true;
+        return None;
+    }
+    k.generation = k.generation.wrapping_add(1);
+    match create() {
+        Ok(id) => {
+            k.assertion = Some(id);
+            k.active = true;
+            arm_duration(&mut k.options);
+            match k.options.mode {
+                KeepAwakeMode::IdleOnly => {
+                    k.lid_close = LidCloseState::Off;
+                    k.phase = KeepAwakePhase::On;
+                    None
+                }
+                KeepAwakeMode::LidClosed => {
                     k.lid_close = LidCloseState::Pending;
                     k.phase = KeepAwakePhase::Enabling;
-                    k.generation = k.generation.wrapping_add(1);
-                    request_generation = k.generation;
-                    engaged = true;
-                }
-                Err(rc) => {
-                    tracing::warn!(
-                        rc,
-                        "failed to create power assertion; keep-awake not engaged"
-                    );
-                    request_generation = k.generation;
-                    engaged = false;
+                    Some(k.generation)
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            k.active = true;
+        Err(rc) => {
+            tracing::warn!(
+                rc,
+                "failed to create power assertion; keep-awake not engaged"
+            );
+            k.active = false;
             k.lid_close = LidCloseState::Off;
-            k.phase = KeepAwakePhase::On;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::AssertionFailed);
+            k.retry_target = Some(true);
+            None
         }
     }
-    // Re-sync every surface — including a tray checkmark a click just toggled on,
-    // which a failed engage must reset. On success, engage the lid-close veto in
-    // the background so its admin-auth dialog never blocks the caller.
-    notify(app);
-    #[cfg(target_os = "macos")]
-    if engaged {
-        spawn_reconcile(app.clone(), true, request_generation);
-    }
-    status(state.inner())
 }
 
-/// Stamp a turn-off onto state the caller already holds the lock for, returning
-/// the generation a reconcile worker must carry (`None` when there is no worker
-/// to spawn). Split out from [`disengage`] so a caller that *decided* to turn off
-/// under the lock — the safety monitor — can commit that decision in the same
-/// critical section: otherwise an option edit landing in the gap would have a
-/// stale verdict applied to it, and a toggle in the same gap could leave two
-/// workers racing the same transition.
+/// Keep the assertion ID on failure so Stop, Retry, and shutdown can release it
+/// again. Reporting Off before IOKit confirms the release would hide a live hold.
+fn release_held_assertion(k: &mut KeepAwake, release: impl FnOnce(u32) -> Result<(), i32>) -> bool {
+    if let Some(id) = k.assertion {
+        if let Err(rc) = release(id) {
+            tracing::warn!(
+                rc,
+                "failed to release power assertion; keeping its recovery handle"
+            );
+            k.active = true;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::AssertionFailed);
+            k.retry_target = Some(false);
+            return false;
+        }
+        k.assertion = None;
+    }
+    k.active = false;
+    true
+}
+
+/// Stamp a turn-off under the same lock that decided it, including automatic
+/// safety stops. Only lid-closed sessions or unresolved ownership need a worker.
 fn begin_disable(k: &mut KeepAwake) -> Option<u64> {
-    if !k.active {
+    begin_disable_with(k, release_assertion)
+}
+
+fn begin_disable_with(
+    k: &mut KeepAwake,
+    release: impl FnOnce(u32) -> Result<(), i32>,
+) -> Option<u64> {
+    if !k.active && k.assertion.is_none() && !k.ownership.may_own() {
         k.phase = KeepAwakePhase::Off;
         return None;
     }
-    #[cfg(target_os = "macos")]
-    {
-        // Do *not* flip `active` or release the assertion yet. Turning off means
-        // clearing the lid-close override, which needs an admin dialog that can
-        // be declined — and until it is cleared, sleep is still prevented. The
-        // worker commits the off (`active = false`, assertion released) only once
-        // the clear succeeds; a declined clear keeps keep-awake on rather than
-        // show it off while sleep stays blocked. Stamp this transition so an
-        // explicit cancellation can supersede it.
-        k.generation = k.generation.wrapping_add(1);
-        k.phase = KeepAwakePhase::Disabling;
-        Some(k.generation)
+    k.generation = k.generation.wrapping_add(1);
+    if k.options.mode == KeepAwakeMode::IdleOnly && !k.ownership.may_own() {
+        if release_held_assertion(k, release) {
+            k.lid_close = LidCloseState::Off;
+            k.phase = KeepAwakePhase::Off;
+            k.retry_target = None;
+            if k.notice == Some(KeepAwakeNotice::AssertionFailed) {
+                k.notice = None;
+            }
+        }
+        return None;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // No lid-close veto off-platform, so the off is immediate.
-        k.active = false;
-        k.lid_close = LidCloseState::Off;
-        k.phase = KeepAwakePhase::Off;
-        None
-    }
+    // Keep the assertion until the required lid-close clear is confirmed.
+    k.phase = KeepAwakePhase::Disabling;
+    Some(k.generation)
 }
 
 /// Publish a stamped turn-off and hand the (slow, admin-authed) clear to a
@@ -966,26 +997,6 @@ fn finish_disable(app: &AppHandle, request_generation: Option<u64>) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = request_generation;
-}
-
-fn disengage(app: &AppHandle) -> KeepAwakeStatus {
-    let state = app.state::<AppState>();
-    if !accepts_requests(state.inner()) {
-        return status(state.inner());
-    }
-    let request_generation = {
-        let mut k = state.keep_awake.lock_safe();
-        if !accepts_requests(state.inner()) {
-            return status_from(&k);
-        }
-        if !k.active {
-            k.phase = KeepAwakePhase::Off;
-            return status_from(&k);
-        }
-        begin_disable(&mut k)
-    };
-    finish_disable(app, request_generation);
-    status(state.inner())
 }
 
 /// Emit the change event and rebuild the tray menu (on the main thread, as the
@@ -1164,7 +1175,7 @@ fn reconcile_lid_close_with<S: LidCloseSys>(
         // cannot be written, don't enable — recovery couldn't be guaranteed.
         // This pure step never touches `active`; the worker turns
         // `Unavailable`-for-a-wanted-on into a full roll-back, since the veto is
-        // a required part of keep-awake.
+        // a required part of lid-closed mode.
         Some(false) => {
             if !sys.write_marker() {
                 // No failsafe on disk → don't enable; there would be no record
@@ -1326,6 +1337,84 @@ fn reconcile_writeback(
     }
 }
 
+/// Commit a lid-close result without dropping a failed assertion release.
+fn commit_reconcile(
+    k: &mut KeepAwake,
+    writeback: ReconcileWriteback,
+    create: impl FnOnce() -> Result<u32, i32>,
+    release: impl FnOnce(u32) -> Result<(), i32>,
+) {
+    match writeback {
+        ReconcileWriteback::Superseded => {}
+        ReconcileWriteback::On => {
+            k.active = true;
+            k.lid_close = LidCloseState::Engaged;
+            if k.assertion.is_none() {
+                match create() {
+                    Ok(id) => k.assertion = Some(id),
+                    Err(rc) => {
+                        tracing::warn!(rc, "failed to re-create power assertion");
+                        k.phase = KeepAwakePhase::Failed;
+                        k.notice = Some(KeepAwakeNotice::AssertionFailed);
+                        // The override is engaged; Retry must finish cleanup.
+                        k.retry_target = Some(false);
+                        return;
+                    }
+                }
+            }
+            k.phase = KeepAwakePhase::On;
+            k.notice = None;
+            k.retry_target = None;
+            // An automatic stop canceled by the user must not reopen an
+            // administrator prompt on every tick. Only set re-arms guards.
+        }
+        ReconcileWriteback::Off => {
+            k.lid_close = LidCloseState::Off;
+            if release_held_assertion(k, release) {
+                k.phase = KeepAwakePhase::Off;
+                k.retry_target = None;
+                if matches!(
+                    k.notice,
+                    Some(KeepAwakeNotice::LidCloseUnconfirmed | KeepAwakeNotice::AssertionFailed)
+                ) {
+                    k.notice = None;
+                }
+            }
+        }
+        ReconcileWriteback::RecoveryFailed => {
+            k.active = k.assertion.is_some();
+            k.lid_close = LidCloseState::Off;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+            k.retry_target = Some(false);
+        }
+        ReconcileWriteback::EnableFailed => {
+            k.lid_close = LidCloseState::Off;
+            if release_held_assertion(k, release) {
+                k.phase = KeepAwakePhase::Failed;
+                k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
+                k.retry_target = Some(true);
+            }
+        }
+        ReconcileWriteback::EnableUnconfirmed => {
+            release_held_assertion(k, release);
+            // A possibly live override takes precedence over an assertion
+            // failure; Retry clears both before this session can change mode.
+            k.lid_close = LidCloseState::Off;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
+            k.retry_target = Some(false);
+        }
+        ReconcileWriteback::DisableFailed => {
+            k.active = true;
+            k.lid_close = LidCloseState::Engaged;
+            k.phase = KeepAwakePhase::Failed;
+            k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
+            k.retry_target = Some(false);
+        }
+    }
+}
+
 /// Decide the exit-time cleanup, returning the resulting ownership. Clears the
 /// override when we own it, or when a leftover marker says we might (an engage
 /// that crashed after writing the marker but before recording ownership). A
@@ -1473,13 +1562,8 @@ pub fn cleanup_blocking(app: &AppHandle) {
     let state = app.state::<AppState>();
     {
         let mut k = state.keep_awake.lock_safe();
-        k.active = false;
-        k.phase = KeepAwakePhase::Off;
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(id) = k.assertion.take() {
-                release_assertion(id);
-            }
+        if release_held_assertion(&mut k, release_assertion) {
+            k.phase = KeepAwakePhase::Off;
         }
     }
     #[cfg(target_os = "macos")]
@@ -1570,7 +1654,7 @@ fn spawn_reconcile(app: AppHandle, desired_on: bool, request_generation: u64) {
 /// keep-awake state. Serialized by `LID_OP_LOCK`, including a reverse operation
 /// queued by explicit cancellation.
 ///
-/// The lid-close veto is a required part of keep-awake and both directions go
+/// The lid-close veto is required in lid-closed mode and both directions go
 /// through it, so the worker — not the toggle — commits `active`:
 /// * Turning **on**: if the veto cannot be engaged (auth declined, or sleep state
 ///   unreadable) the whole switch rolls back off.
@@ -1621,87 +1705,17 @@ fn reconcile_lid_close(app: &AppHandle, desired_on: bool, request_generation: u6
         // worker was spawned. Reading it here (after winning `LID_OP_LOCK`)
         // instead would compare against whatever the latest transition set and
         // could commit a stale authorization result ahead of its reverse worker.
-        match reconcile_writeback(
+        let writeback = reconcile_writeback(
             k.generation != request_generation,
             desired_on,
             k.active,
             outcome.lid_close,
             outcome.ownership,
-        ) {
-            ReconcileWriteback::Superseded => return,
-            ReconcileWriteback::On => {
-                // Keep-awake on: the idle assertion must be held (it is — engage
-                // took it, and a deferred-off cycle never released it), and the
-                // veto shows engaged. Re-acquire defensively if it is somehow gone.
-                if k.assertion.is_none() {
-                    match create_assertion() {
-                        Ok(id) => k.assertion = Some(id),
-                        Err(rc) => tracing::warn!(rc, "failed to re-create power assertion"),
-                    }
-                }
-                k.active = true;
-                k.lid_close = LidCloseState::Engaged;
-                k.phase = KeepAwakePhase::On;
-                k.notice = None;
-                k.retry_target = None;
-                // `auto_off_attempted` is deliberately *not* cleared here.
-                // Cancelling an automatic turn-off lands right in this arm, and
-                // the condition that triggered it (on battery, battery low) is
-                // usually still true — re-arming would put the administrator
-                // prompt back on screen on the very next monitor tick. Only an
-                // explicit request from the user re-arms it, in `set`.
-            }
-            ReconcileWriteback::Off => {
-                if let Some(id) = k.assertion.take() {
-                    release_assertion(id);
-                }
-                k.active = false;
-                k.lid_close = LidCloseState::Off;
-                k.phase = KeepAwakePhase::Off;
-                k.retry_target = None;
-                // A confirmed clear is exactly what resolves this notice.
-                if k.notice == Some(KeepAwakeNotice::LidCloseUnconfirmed) {
-                    k.notice = None;
-                }
-            }
-            ReconcileWriteback::RecoveryFailed => {
-                k.active = false;
-                k.lid_close = LidCloseState::Off;
-                k.phase = KeepAwakePhase::Failed;
-                k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
-                k.retry_target = Some(false);
-            }
-            ReconcileWriteback::EnableFailed => {
-                if let Some(id) = k.assertion.take() {
-                    release_assertion(id);
-                }
-                k.active = false;
-                k.lid_close = LidCloseState::Off;
-                k.phase = KeepAwakePhase::Failed;
-                k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
-                k.retry_target = Some(true);
-            }
-            ReconcileWriteback::EnableUnconfirmed => {
-                if let Some(id) = k.assertion.take() {
-                    release_assertion(id);
-                }
-                // Off, but not clean: the override may be live. The notice says
-                // so, `owns_lid_close` stays true, and a retry runs the *clear*
-                // (not another enable) so the user can finish the recovery.
-                k.active = false;
-                k.lid_close = LidCloseState::Off;
-                k.phase = KeepAwakePhase::Failed;
-                k.notice = Some(KeepAwakeNotice::LidCloseUnconfirmed);
-                k.retry_target = Some(false);
-            }
-            ReconcileWriteback::DisableFailed => {
-                k.active = true;
-                k.lid_close = LidCloseState::Engaged;
-                k.phase = KeepAwakePhase::Failed;
-                k.notice = Some(KeepAwakeNotice::AuthorizationDeclined);
-                k.retry_target = Some(false);
-            }
+        );
+        if writeback == ReconcileWriteback::Superseded {
+            return;
         }
+        commit_reconcile(&mut k, writeback, create_assertion, release_assertion);
     }
     notify(app);
 }
@@ -2194,8 +2208,8 @@ fn create_assertion() -> Result<u32, i32> {
 }
 
 #[cfg(target_os = "macos")]
-fn release_assertion(id: u32) {
-    sys::release(id);
+fn release_assertion(id: u32) -> Result<(), i32> {
+    sys::release(id)
 }
 
 #[cfg(target_os = "macos")]
@@ -2270,6 +2284,10 @@ mod sys {
             assertion_id: *mut u32,
         ) -> i32;
         fn IOPMAssertionRelease(assertion_id: u32) -> i32;
+        #[cfg(test)]
+        fn IOPMAssertionCopyProperties(
+            assertion_id: u32,
+        ) -> core_foundation_sys::dictionary::CFDictionaryRef;
     }
 
     /// Create a `PreventUserIdleSystemSleep` assertion, returning its id (or the
@@ -2289,10 +2307,21 @@ mod sys {
         if rc == 0 { Ok(id) } else { Err(rc) }
     }
 
-    pub fn release(id: u32) {
+    pub fn release(id: u32) -> Result<(), i32> {
         let rc = unsafe { IOPMAssertionRelease(id) };
-        if rc != 0 {
-            tracing::warn!(rc, "IOPMAssertionRelease failed");
+        if rc == 0 { Ok(()) } else { Err(rc) }
+    }
+
+    #[cfg(test)]
+    pub fn assertion_exists(id: u32) -> bool {
+        // SAFETY: the ID comes from IOKit. Copy returns either null for a
+        // missing assertion or an owned dictionary released before returning.
+        let properties = unsafe { IOPMAssertionCopyProperties(id) };
+        if properties.is_null() {
+            false
+        } else {
+            unsafe { core_foundation_sys::base::CFRelease(properties.cast()) };
+            true
         }
     }
 }
@@ -2300,6 +2329,303 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_mode_is_the_default_but_the_wire_mode_is_required() {
+        assert_eq!(KeepAwake::default().options.mode, KeepAwakeMode::IdleOnly);
+        let options = serde_json::to_value(KeepAwakeOptions::default()).unwrap();
+        assert_eq!(options["mode"], "idleOnly");
+        let mut missing = options.clone();
+        missing.as_object_mut().unwrap().remove("mode");
+        assert!(serde_json::from_value::<KeepAwakeOptions>(missing).is_err());
+        let mut unknown = options;
+        unknown["mode"] = serde_json::json!("automatic");
+        assert!(serde_json::from_value::<KeepAwakeOptions>(unknown).is_err());
+    }
+
+    #[test]
+    fn normal_mode_uses_only_an_assertion_and_preserves_a_foreign_override() {
+        let mut k = KeepAwake {
+            kernel_sleep_disabled: Some(true),
+            ..KeepAwake::default()
+        };
+        assert_eq!(begin_enable(&mut k, || Ok(42)), None);
+        assert!(k.active);
+        assert_eq!(k.phase, KeepAwakePhase::On);
+        assert_eq!(k.assertion, Some(42));
+        assert_eq!(k.lid_close, LidCloseState::Off);
+        assert_eq!(k.ownership, Ownership::Unowned);
+        assert_eq!(
+            begin_disable_with(&mut k, |id| {
+                assert_eq!(id, 42);
+                Ok(())
+            }),
+            None
+        );
+        assert!(!k.active);
+        assert_eq!(k.phase, KeepAwakePhase::Off);
+        assert_eq!(k.assertion, None);
+        assert_eq!(k.kernel_sleep_disabled, Some(true));
+    }
+
+    #[test]
+    fn both_modes_report_assertion_creation_failure_and_allow_retry() {
+        for mode in [KeepAwakeMode::IdleOnly, KeepAwakeMode::LidClosed] {
+            let mut k = KeepAwake::default();
+            k.options.mode = mode;
+            assert_eq!(begin_enable(&mut k, || Err(-1)), None);
+            assert!(!k.active);
+            assert_eq!(k.assertion, None);
+            assert_eq!(k.phase, KeepAwakePhase::Failed);
+            assert_eq!(k.notice, Some(KeepAwakeNotice::AssertionFailed));
+            assert_eq!(k.retry_target, Some(true));
+        }
+    }
+
+    #[test]
+    fn normal_stop_retains_a_failed_release_for_retry() {
+        let mut k = KeepAwake::default();
+        begin_enable(&mut k, || Ok(42));
+        assert_eq!(begin_disable_with(&mut k, |_| Err(-1)), None);
+        assert!(k.active);
+        assert_eq!(k.assertion, Some(42));
+        assert_eq!(k.phase, KeepAwakePhase::Failed);
+        assert_eq!(k.notice, Some(KeepAwakeNotice::AssertionFailed));
+        assert_eq!(k.retry_target, Some(false));
+        assert_eq!(
+            begin_disable_with(&mut k, |id| {
+                assert_eq!(id, 42);
+                Ok(())
+            }),
+            None
+        );
+        assert!(!k.active);
+        assert_eq!(k.assertion, None);
+        assert_eq!(k.phase, KeepAwakePhase::Off);
+        assert_eq!(k.notice, None);
+        assert_eq!(k.retry_target, None);
+    }
+
+    #[test]
+    fn mode_changes_require_a_fully_stopped_session() {
+        let blocked = [
+            KeepAwake {
+                active: true,
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                assertion: Some(42),
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                phase: KeepAwakePhase::Enabling,
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                phase: KeepAwakePhase::Disabling,
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                ownership: Ownership::Confirmed,
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                ownership: Ownership::PossiblyOwned,
+                ..KeepAwake::default()
+            },
+            KeepAwake {
+                leftover_undecided: true,
+                ..KeepAwake::default()
+            },
+        ];
+        for mut k in blocked {
+            let before = status_from(&k);
+            assert!(!update_options(
+                &mut k,
+                KeepAwakeOptions {
+                    mode: KeepAwakeMode::LidClosed,
+                    ac_only: true,
+                    ..KeepAwakeOptions::default()
+                }
+            ));
+            assert_eq!(status_from(&k), before);
+        }
+    }
+
+    #[test]
+    fn a_clean_failed_start_can_change_mode_and_forgets_its_retry() {
+        let mut k = KeepAwake {
+            phase: KeepAwakePhase::Failed,
+            notice: Some(KeepAwakeNotice::AuthorizationDeclined),
+            retry_target: Some(true),
+            auto_off_attempted: true,
+            generation: 7,
+            options: KeepAwakeOptions {
+                mode: KeepAwakeMode::LidClosed,
+                ..KeepAwakeOptions::default()
+            },
+            ..KeepAwake::default()
+        };
+        assert!(update_options(&mut k, KeepAwakeOptions::default()));
+        assert_eq!(k.options.mode, KeepAwakeMode::IdleOnly);
+        assert_eq!(k.phase, KeepAwakePhase::Off);
+        assert_eq!(k.notice, None);
+        assert_eq!(k.retry_target, None);
+        assert!(!k.auto_off_attempted);
+        assert_eq!(k.generation, 8);
+    }
+
+    #[test]
+    fn active_sessions_can_change_safety_policy_without_changing_mode() {
+        let mut k = KeepAwake::default();
+        begin_enable(&mut k, || Ok(42));
+        assert!(update_options(
+            &mut k,
+            KeepAwakeOptions {
+                ac_only: true,
+                ends_at_ms: Some(123),
+                ..KeepAwakeOptions::default()
+            }
+        ));
+        assert!(k.active);
+        assert_eq!(k.assertion, Some(42));
+        assert!(k.options.ac_only);
+        assert_eq!(k.options.ends_at_ms, Some(123));
+    }
+
+    #[test]
+    fn normal_start_cannot_bypass_unresolved_lid_close_ownership() {
+        for ownership in [Ownership::PossiblyOwned, Ownership::Confirmed] {
+            let mut k = KeepAwake {
+                ownership,
+                phase: KeepAwakePhase::Failed,
+                notice: Some(KeepAwakeNotice::LidCloseUnconfirmed),
+                retry_target: Some(false),
+                ..KeepAwake::default()
+            };
+            let before = status_from(&k);
+            assert_eq!(
+                begin_enable(&mut k, || panic!("must finish recovery first")),
+                None
+            );
+            assert_eq!(status_from(&k), before);
+            assert!(begin_disable_with(&mut k, |_| panic!("clear the override first")).is_some());
+            assert_eq!(k.phase, KeepAwakePhase::Disabling);
+        }
+    }
+
+    #[test]
+    fn lid_closed_start_still_requires_authorization_without_falling_back() {
+        let mut k = KeepAwake::default();
+        k.options.mode = KeepAwakeMode::LidClosed;
+        assert_eq!(begin_enable(&mut k, || Ok(42)), Some(k.generation));
+        assert_eq!(k.phase, KeepAwakePhase::Enabling);
+        let sys = FakeSys::new(Some(false)).pmset_fails();
+        let outcome = reconcile_lid_close_with(&sys, true, k.ownership);
+        k.ownership = outcome.ownership;
+        let writeback =
+            reconcile_writeback(false, true, k.active, outcome.lid_close, outcome.ownership);
+        commit_reconcile(
+            &mut k,
+            writeback,
+            || panic!("must not create fallback"),
+            |_| Ok(()),
+        );
+        assert!(!k.active);
+        assert_eq!(k.assertion, None);
+        assert_eq!(k.phase, KeepAwakePhase::Failed);
+        assert_eq!(k.notice, Some(KeepAwakeNotice::AuthorizationDeclined));
+        assert_eq!(k.options.mode, KeepAwakeMode::LidClosed);
+        assert_eq!(k.retry_target, Some(true));
+    }
+
+    #[test]
+    fn failed_lid_closed_rollback_retains_the_assertion_for_cleanup() {
+        let mut k = KeepAwake::default();
+        k.options.mode = KeepAwakeMode::LidClosed;
+        begin_enable(&mut k, || Ok(42));
+        commit_reconcile(
+            &mut k,
+            ReconcileWriteback::EnableFailed,
+            || unreachable!(),
+            |_| Err(-1),
+        );
+        assert!(k.active);
+        assert_eq!(k.assertion, Some(42));
+        assert_eq!(k.notice, Some(KeepAwakeNotice::AssertionFailed));
+        assert_eq!(k.retry_target, Some(false));
+        commit_reconcile(
+            &mut k,
+            ReconcileWriteback::Off,
+            || unreachable!(),
+            |_| Ok(()),
+        );
+        assert!(!k.active);
+        assert_eq!(k.assertion, None);
+        assert_eq!(k.phase, KeepAwakePhase::Off);
+    }
+
+    #[test]
+    fn safety_guards_stop_both_modes_through_their_selected_path() {
+        for mode in [KeepAwakeMode::IdleOnly, KeepAwakeMode::LidClosed] {
+            for notice in [
+                KeepAwakeNotice::TimerElapsed,
+                KeepAwakeNotice::AcDisconnected,
+                KeepAwakeNotice::LowBattery,
+            ] {
+                let mut k = KeepAwake::default();
+                k.options.mode = mode;
+                begin_enable(&mut k, || Ok(42));
+                k.phase = KeepAwakePhase::On;
+                k.options.ends_at_ms = (notice == KeepAwakeNotice::TimerElapsed).then_some(1);
+                k.options.ac_only = notice == KeepAwakeNotice::AcDisconnected;
+                k.options.low_battery_action = LowBatteryAction::TurnOff;
+                assert_eq!(
+                    safety_decision(
+                        k.active,
+                        false,
+                        k.options,
+                        PowerSource::Battery,
+                        Some(10),
+                        2
+                    ),
+                    SafetyDecision::TurnOff(notice)
+                );
+                k.notice = Some(notice);
+                let worker = begin_disable_with(&mut k, |_| Ok(()));
+                assert_eq!(worker.is_some(), mode == KeepAwakeMode::LidClosed);
+                assert_eq!(k.active, mode == KeepAwakeMode::LidClosed);
+                assert_eq!(k.notice, Some(notice));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a real macOS IOKit session; briefly prevents idle sleep without authorization"]
+    fn native_normal_mode_creates_and_releases_its_iokit_assertion() {
+        struct AssertionCleanup(Option<u32>);
+        impl Drop for AssertionCleanup {
+            fn drop(&mut self) {
+                if let Some(id) = self.0 {
+                    let _ = release_assertion(id);
+                }
+            }
+        }
+        let mut k = KeepAwake::default();
+        let worker = begin_enable(&mut k, create_assertion);
+        let mut cleanup = AssertionCleanup(k.assertion);
+        assert_eq!(worker, None);
+        assert_eq!(k.phase, KeepAwakePhase::On);
+        let id = k.assertion.expect("IOKit must return an assertion handle");
+        assert!(sys::assertion_exists(id));
+        assert_eq!(begin_disable(&mut k), None);
+        assert_eq!(k.assertion, None);
+        cleanup.0 = None;
+        assert!(!k.active);
+        assert_eq!(k.phase, KeepAwakePhase::Off);
+        assert!(!sys::assertion_exists(id));
+    }
 
     #[test]
     fn power_status_reports_source_and_percentage() {
@@ -2342,6 +2668,7 @@ mod tests {
     #[test]
     fn safety_guards_prioritize_deadline_then_power_then_battery() {
         let options = KeepAwakeOptions {
+            mode: KeepAwakeMode::LidClosed,
             duration_secs: None,
             ends_at_ms: Some(1_000),
             ac_only: true,
@@ -2375,6 +2702,7 @@ mod tests {
     #[test]
     fn safety_guards_do_not_interrupt_an_authorization_transition() {
         let options = KeepAwakeOptions {
+            mode: KeepAwakeMode::LidClosed,
             duration_secs: None,
             ends_at_ms: Some(0),
             ac_only: true,
@@ -2404,6 +2732,7 @@ mod tests {
     #[test]
     fn a_spent_end_time_is_stale_but_a_relative_preset_never_is() {
         let at_time = KeepAwakeOptions {
+            mode: KeepAwakeMode::IdleOnly,
             duration_secs: None,
             ends_at_ms: Some(1_000),
             ac_only: false,

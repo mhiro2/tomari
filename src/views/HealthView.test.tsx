@@ -54,6 +54,7 @@ const HEALTHY: DiagnosticsSnapshot = {
     dividerAvailable: true,
   },
   keepAwake: {
+    mode: 'idleOnly',
     active: false,
     phase: 'off',
     markerPresent: false,
@@ -150,6 +151,7 @@ describe('HealthView', () => {
         ? Promise.resolve({
             ...HEALTHY,
             keepAwake: {
+              mode: 'lidClosed',
               active: true,
               phase: 'disabling',
               markerPresent: true,
@@ -173,6 +175,7 @@ describe('HealthView', () => {
         ? Promise.resolve({
             ...HEALTHY,
             keepAwake: {
+              mode: 'lidClosed',
               active: true,
               phase: 'on',
               markerPresent: false,
@@ -186,6 +189,37 @@ describe('HealthView', () => {
 
     expect(await screen.findByText('No health issues detected')).toBeInTheDocument();
     expect(within(row('Prevent Sleep')).getByText('Ready')).toBeInTheDocument();
+  });
+
+  it.each([false, true, null])(
+    'reports active idle prevention as healthy with kernel flag %s',
+    async (kernelSleepDisabled) => {
+      mockInvoke.mockResolvedValue({
+        ...HEALTHY,
+        keepAwake: { ...HEALTHY.keepAwake, active: true, phase: 'on', kernelSleepDisabled },
+      });
+      renderView();
+
+      expect(await screen.findByText('No health issues detected')).toBeInTheDocument();
+      const sleep = row('Prevent Sleep');
+      expect(within(sleep).getByText('Ready')).toBeInTheDocument();
+      expect(within(sleep).getByText(/Idle sleep is prevented/)).toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    { mode: 'idleOnly', markerPresent: true, ownsLidClose: true, kernelSleepDisabled: false },
+    { mode: 'lidClosed', markerPresent: true, ownsLidClose: true, kernelSleepDisabled: false },
+    { mode: 'lidClosed', markerPresent: false, ownsLidClose: true, kernelSleepDisabled: true },
+  ])('reports inconsistent active ownership or lid-close state: %o', async (state) => {
+    mockInvoke.mockResolvedValue({
+      ...HEALTHY,
+      keepAwake: { ...HEALTHY.keepAwake, ...state, active: true, phase: 'on' },
+    });
+    renderView();
+
+    expect(await screen.findByText('1 item needs action')).toBeInTheDocument();
+    expect(within(row('Prevent Sleep')).getByText('Action needed')).toBeInTheDocument();
   });
 
   it('ignores a foreign kernel sleep override while Prevent Sleep is off', async () => {

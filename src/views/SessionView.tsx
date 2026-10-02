@@ -15,6 +15,7 @@ import { formatCmdError } from '../lib/errors';
 import { useT, type MessageKey, type Translator } from '../lib/i18n';
 import type {
   KeepAwakeNotice,
+  KeepAwakeMode,
   KeepAwakeOptions,
   KeepAwakePhase,
   KeepAwakeStatus,
@@ -27,6 +28,7 @@ type TimerMode = 'never' | '30m' | '1h' | 'time';
 const padTimePart = (value: number) => String(value).padStart(2, '0');
 
 const DEFAULT_OPTIONS: KeepAwakeOptions = {
+  mode: 'idleOnly',
   durationSecs: null,
   endsAtMs: null,
   acOnly: false,
@@ -60,6 +62,7 @@ const NOTICE_LABEL: Record<KeepAwakeNotice, MessageKey> = {
   timerElapsed: 'settings.noticeTimerElapsed',
   authorizationDeclined: 'settings.noticeAuthorizationDeclined',
   lidCloseUnconfirmed: 'settings.noticeLidCloseUnconfirmed',
+  assertionFailed: 'settings.noticeAssertionFailed',
   leftoverOverride: 'settings.noticeLeftoverOverride',
 };
 
@@ -125,6 +128,7 @@ export function SessionView() {
   // Highest revision applied so far. Several backend threads emit, each
   // snapshotting before it emits, so an older snapshot can still arrive last.
   const appliedRevision = useRef(-1);
+  const commandInFlight = useRef(false);
 
   const reportLoadError = useEffectEvent((e: unknown) => {
     // A slower startup read may fail after an event or fallback poll already
@@ -257,13 +261,17 @@ export function SessionView() {
   // has already published a newer event. This command path also keeps the
   // controls usable when event subscription is unavailable.
   async function run(command: () => Promise<KeepAwakeStatus>) {
-    if (commandBusy) return;
+    if (commandInFlight.current) return;
+    commandInFlight.current = true;
     setCommandBusy(true);
     setError(null);
     try {
       applyStatus(await command());
     } catch (e) {
       setError(formatCmdError(e, t));
+      // Discard an optimistic option edit even if the confirming read fails.
+      // A newer event still wins through the revision guard.
+      if (status !== null) applyStatus(status);
       try {
         // The command may have failed before changing anything, so no event is
         // coming: re-read instead of leaving the panel on an optimistic draft.
@@ -272,6 +280,7 @@ export function SessionView() {
         // Preserve the last event-backed status when re-sync is unavailable.
       }
     } finally {
+      commandInFlight.current = false;
       setCommandBusy(false);
     }
   }
@@ -285,12 +294,12 @@ export function SessionView() {
     void run(() => api.setKeepAwake(next, draftOptions));
   }
 
-  // Option writes are cheap, last-write-wins on the backend, and never prompt,
-  // so they bypass the `run` gate: dropping one because a transition happened to
-  // be in flight would leave the panel showing an edit the backend never got.
+  // Serialize configuration and transitions, and adopt command responses even
+  // if no event arrives. A start must use the last confirmed configuration.
   function saveOptions(next: KeepAwakeOptions) {
+    if (busy || commandInFlight.current) return;
     setDraftOptions(next);
-    api.configureKeepAwake(next).catch((e: unknown) => setError(formatCmdError(e, t)));
+    void run(() => api.configureKeepAwake(next));
   }
 
   function changeTimer(nextMode: TimerMode) {
@@ -302,7 +311,8 @@ export function SessionView() {
   // A plain re-read, so unlike a transition its result *is* the new state: it is
   // the only way back when the initial load failed and no event will arrive.
   async function retryStatus() {
-    if (busy) return;
+    if (busy || commandInFlight.current) return;
+    commandInFlight.current = true;
     setCommandBusy(true);
     setError(null);
     try {
@@ -310,16 +320,28 @@ export function SessionView() {
     } catch (e) {
       setError(formatCmdError(e, t));
     } finally {
+      commandInFlight.current = false;
       setCommandBusy(false);
     }
   }
 
   const active = status?.active ?? false;
   const ready = status !== null;
+  const recoveringLidClose = status?.ownsLidClose || status?.leftoverUndecided;
+  const usesAdministrator = draftOptions.mode === 'lidClosed' || recoveringLidClose;
+  const modeLocked = !ready || busy || active || !!recoveringLidClose;
   const endsAtMs = status?.options.endsAtMs;
   const countdown = active && typeof endsAtMs === 'number' ? formatCountdown(endsAtMs, now) : null;
 
-  const phaseLabel = ready ? t(PHASE_LABEL[status.phase]) : t('common.loading');
+  const phaseLabel = !ready
+    ? t('common.loading')
+    : phasePending && usesAdministrator
+      ? t(
+          status.phase === 'enabling'
+            ? 'settings.keepAwakeEnablingAdmin'
+            : 'settings.keepAwakeDisablingAdmin',
+        )
+      : t(PHASE_LABEL[status.phase]);
   const tone: 'neutral' | 'on' | 'pending' | 'danger' = !ready
     ? 'neutral'
     : phasePending
@@ -337,6 +359,33 @@ export function SessionView() {
         description={t('settings.sessionPageDescription')}
       />
 
+      <SettingsList label={t('settings.keepAwakeMode')}>
+        <SettingsRow
+          title={t('settings.keepAwakeMode')}
+          description={t(
+            recoveringLidClose && draftOptions.mode === 'idleOnly'
+              ? 'settings.keepAwakeModeRecoveryHint'
+              : draftOptions.mode === 'idleOnly'
+                ? 'settings.keepAwakeIdleHint'
+                : 'settings.keepAwakeLidHint',
+          )}
+          trail={
+            <select
+              className="input"
+              aria-label={t('settings.keepAwakeMode')}
+              value={draftOptions.mode}
+              disabled={modeLocked}
+              onChange={(event) =>
+                saveOptions({ ...draftOptions, mode: event.target.value as KeepAwakeMode })
+              }
+            >
+              <option value="idleOnly">{t('settings.keepAwakeIdle')}</option>
+              <option value="lidClosed">{t('settings.keepAwakeLid')}</option>
+            </select>
+          }
+        />
+      </SettingsList>
+
       <FeatureSwitch
         title={t('settings.keepAwakeAction')}
         description={
@@ -344,7 +393,7 @@ export function SessionView() {
           // message (label plus any instruction) as a single announcement.
           <output className="session-phase" aria-atomic="true">
             {phaseLabel}
-            {phasePending && ` ${t('settings.authorizationPendingHint')}`}
+            {phasePending && usesAdministrator && ` ${t('settings.authorizationPendingHint')}`}
           </output>
         }
         tone={tone}
@@ -357,11 +406,8 @@ export function SessionView() {
             </span>
           )
         }
-        // Preventing sleep is an authorized operation, not a stored preference,
-        // so the master control is a verb button rather than a toggle. The
-        // ellipsis on Start warns that the administrator prompt follows. While
-        // a prompt is open, Cancel is the live action and the main button waits
-        // disabled; after a failure Retry sits beside it.
+        // Lid-closed operations can prompt for administrator approval. Ordinary
+        // idle prevention starts and stops without a prompt.
         control={
           <>
             <button
@@ -374,7 +420,9 @@ export function SessionView() {
               disabled={busy || !ready || failed}
               onClick={() => toggle(!active)}
             >
-              {active ? t('settings.keepAwakeStop') : t('settings.keepAwakeStart')}
+              {active
+                ? t(usesAdministrator ? 'settings.keepAwakeStopAdmin' : 'settings.keepAwakeStop')
+                : t(usesAdministrator ? 'settings.keepAwakeStartAdmin' : 'settings.keepAwakeStart')}
             </button>
             {(phasePending || failed) && (
               // After the main button in DOM order and focused on arrival, so a

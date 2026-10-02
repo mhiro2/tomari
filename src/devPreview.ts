@@ -4,6 +4,7 @@ import type {
   ConfigurationWarnings,
   DiagnosticsSnapshot,
   Hotkey,
+  KeepAwakeOptions,
   KeepAwakeStatus,
   MenuBarInventory,
   ModifierRule,
@@ -86,6 +87,7 @@ export async function installDevPreview() {
     lidClose: 'off',
     phase: 'off',
     options: {
+      mode: 'idleOnly',
       durationSecs: null,
       endsAtMs: null,
       acOnly: false,
@@ -150,6 +152,7 @@ export async function installDevPreview() {
       dividerAvailable: false,
     },
     keepAwake: {
+      mode: 'idleOnly',
       active: false,
       phase: 'off',
       markerPresent: false,
@@ -339,7 +342,18 @@ export async function installDevPreview() {
       case 'get_configuration_warnings':
         return configurationWarnings;
       case 'get_diagnostics':
-        return diagnostics;
+        return {
+          ...diagnostics,
+          generatedAtMs: Date.now(),
+          keepAwake: {
+            mode: keepAwake.options.mode,
+            active: keepAwake.active,
+            phase: keepAwake.phase,
+            markerPresent: keepAwake.ownsLidClose,
+            kernelSleepDisabled: keepAwake.kernelSleepDisabled,
+            ownsLidClose: keepAwake.ownsLidClose,
+          },
+        };
       case 'get_apply_warnings':
         return { warnings: [], unprobed: ['menuBar'] };
       case 'get_configuration_backup_status':
@@ -423,11 +437,37 @@ export async function installDevPreview() {
       case 'accessibility_status':
         return true;
       case 'get_keep_awake':
-      case 'set_keep_awake':
-      case 'configure_keep_awake':
+        return structuredClone(keepAwake);
+      case 'set_keep_awake': {
+        const { enabled, options } = payload as { enabled: boolean; options?: KeepAwakeOptions };
+        if (options) keepAwake.options = { ...options };
+        keepAwake.active = enabled;
+        keepAwake.phase = enabled ? 'on' : 'off';
+        keepAwake.ownsLidClose = enabled && keepAwake.options.mode === 'lidClosed';
+        keepAwake.lidClose = keepAwake.ownsLidClose ? 'engaged' : 'off';
+        keepAwake.kernelSleepDisabled = keepAwake.ownsLidClose;
+        if (enabled && keepAwake.options.durationSecs !== null) {
+          keepAwake.options.endsAtMs = Date.now() + keepAwake.options.durationSecs * 1_000;
+        }
+        keepAwake.notice = null;
+        keepAwake.revision += 1;
+        return structuredClone(keepAwake);
+      }
+      case 'configure_keep_awake': {
+        const { options } = payload as { options: KeepAwakeOptions };
+        if (keepAwake.active && options.mode !== keepAwake.options.mode) {
+          throw { code: 'invalidInput', message: 'Stop the session before changing modes.' };
+        }
+        keepAwake.options = { ...options };
+        if (keepAwake.active && options.durationSecs !== null) {
+          keepAwake.options.endsAtMs = Date.now() + options.durationSecs * 1_000;
+        }
+        keepAwake.revision += 1;
+        return structuredClone(keepAwake);
+      }
       case 'cancel_keep_awake_transition':
       case 'retry_keep_awake_transition':
-        return keepAwake;
+        return structuredClone(keepAwake);
       case 'get_menu_bar':
         return { enabled: false, collapsed: false, supported: false };
       case 'list_modifier_rules':

@@ -217,19 +217,23 @@ have run for five minutes, so you can see at a glance whether something worth
 protecting is still running. The list is informational only: it never enables
 the feature by itself, and the switch above it is the one place to turn it on.
 
-How it works, in two layers that engage together:
+Choose a mode before starting:
 
-1. An IOKit power assertion (`PreventUserIdleSystemSleep`) prevents idle sleep.
-2. macOS ignores that assertion once the display is closed, so Tomari also runs
-   `pmset disablesleep` to keep working with the lid closed. **This requires your
-   administrator password.**
+- **Lid is open** is the default. An IOKit power assertion
+  (`PreventUserIdleSystemSleep`) prevents idle system sleep without administrator
+  authorization. It does not prevent lid-close sleep or change the system-wide
+  `disablesleep` setting. The display can still sleep.
+- **Lid is open or closed** adds `pmset disablesleep` to that
+  assertion. Starting and stopping this mode require your administrator password.
+  Declining a start cancels that operation without switching modes;
+  declining a stop leaves the session on until the override is cleared.
 
-Both layers are part of one operation, and turning it **on or off** needs the
-password: declining when enabling cancels Prevent Sleep entirely (no display-open
-fallback), and declining when disabling leaves it on (sleep is still prevented
-until the override is cleared).
+The mode can change only while stopped, with no pending transition or unresolved
+Tomari-owned sleep override. Timer and power policies can still change during a
+session. The selection is session-only, returns to lid-open mode after relaunch, and
+is not included in configuration backups.
 
-The UI models those operations explicitly as **enabling** and **disabling**.
+The UI models authorization operations explicitly as **enabling** and **disabling**.
 Every toggle surface is locked for the full lifetime of the administrator
 prompt—not merely until the backend worker starts. Canceling from Settings
 safely drives the kernel back toward the preceding stable state; a
@@ -248,9 +252,10 @@ that has already passed is treated as spent: turning Prevent Sleep on clears it
 and starts an unbounded session rather than refusing, and Settings drops the
 stale time from the picker. Pick a new end time to bound the new session.
 
-Automatic turn-off starts the same verified disable flow as a manual switch,
-so macOS may request administrator approval to clear `disablesleep`. Because you
-can decline it, a guard turns Prevent Sleep off at most once per session rather
+Automatic turn-off uses the selected mode's manual stop path. Lid-open mode releases
+its assertion without authorization; lid-closed mode requests administrator
+approval to clear `disablesleep`. Because you can decline that approval, a guard
+attempts to turn Prevent Sleep off at most once per session rather
 than reopening the password prompt every few seconds; the Prevent Sleep page
 then offers Retry next to the main button (which stays disabled until the retry
 settles). The safety
@@ -262,8 +267,10 @@ an idle Tomari stays quiet. The System state section separately reports the real
 either value from the switch.
 
 The state lasts **only for the current session**: Tomari always starts with
-Prevent Sleep off, and cleanup at exit clears `disablesleep`. If the app crashed
-while it was on, the next launch finds the failsafe record it left and shows a
+Prevent Sleep off. The idle assertion is released at exit and by macOS if the
+process exits unexpectedly. Lid-closed cleanup also clears Tomari's owned
+`disablesleep` override. If that mode crashed while it was on, the next launch
+finds the failsafe record it left and shows a
 notice in the Session view — but it does not clear the setting on its own,
 because by then the setting could just as well have been turned on by you or by
 another app. You choose: **Turn sleep back on** clears it (an administrator

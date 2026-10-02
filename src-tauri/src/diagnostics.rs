@@ -89,6 +89,7 @@ pub struct MenuBarDiagnostics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeepAwakeDiagnostics {
+    pub mode: keepawake::KeepAwakeMode,
     pub active: bool,
     pub phase: keepawake::KeepAwakePhase,
     pub marker_present: bool,
@@ -244,6 +245,7 @@ fn menu_bar_diagnostics(enabled: bool, state: &AppState) -> MenuBarDiagnostics {
 
 fn keep_awake_diagnostics(status: KeepAwakeStatus) -> KeepAwakeDiagnostics {
     KeepAwakeDiagnostics {
+        mode: status.options.mode,
         active: status.active,
         phase: status.phase,
         marker_present: keepawake::diagnostics_marker_present(),
@@ -408,6 +410,7 @@ mod tests {
                 divider_available: true,
             },
             keep_awake: KeepAwakeDiagnostics {
+                mode: keepawake::KeepAwakeMode::IdleOnly,
                 active: false,
                 phase: keepawake::KeepAwakePhase::Off,
                 marker_present: false,

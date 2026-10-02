@@ -7,7 +7,7 @@ import { SessionView } from './SessionView';
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 // The master control is a verb button whose label follows the state.
-const MAIN_ACTION = /Start Preventing Sleep…|Stop Preventing Sleep/;
+const MAIN_ACTION = /Start Preventing Sleep|Stop Preventing Sleep/;
 
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
@@ -21,7 +21,13 @@ const OFF: KeepAwakeStatus = {
   active: false,
   lidClose: 'off',
   phase: 'off',
-  options: { durationSecs: null, endsAtMs: null, acOnly: false, lowBatteryAction: 'warn' },
+  options: {
+    mode: 'idleOnly',
+    durationSecs: null,
+    endsAtMs: null,
+    acOnly: false,
+    lowBatteryAction: 'warn',
+  },
   notice: null,
   powerSource: 'ac',
   batteryPercent: 82,
@@ -36,6 +42,7 @@ const OFF: KeepAwakeStatus = {
 const ENABLING: KeepAwakeStatus = {
   ...OFF,
   active: true,
+  options: { ...OFF.options, mode: 'lidClosed' },
   lidClose: 'pending',
   phase: 'enabling',
   revision: 2,
@@ -43,6 +50,7 @@ const ENABLING: KeepAwakeStatus = {
 const ON: KeepAwakeStatus = {
   ...OFF,
   active: true,
+  options: { ...OFF.options, mode: 'lidClosed' },
   lidClose: 'engaged',
   phase: 'on',
   kernelSleepDisabled: true,
@@ -61,7 +69,7 @@ class Rejection {
 }
 
 function mockCommands(overrides: Record<string, unknown> = {}) {
-  mockInvoke.mockImplementation((cmd: string) => {
+  mockInvoke.mockImplementation((cmd: string, args) => {
     if (cmd in overrides) {
       const result = overrides[cmd];
       return result instanceof Rejection ? Promise.reject(result.reason) : Promise.resolve(result);
@@ -71,6 +79,11 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
         return Promise.resolve(OFF);
       case 'set_keep_awake':
         return Promise.resolve(ON);
+      case 'configure_keep_awake':
+        return Promise.resolve({
+          ...OFF,
+          options: (args as { options: KeepAwakeStatus['options'] }).options,
+        });
       default:
         return Promise.resolve(null);
     }
@@ -96,6 +109,119 @@ describe('SessionView', () => {
       }
       return Promise.resolve(() => {});
     });
+  });
+
+  it('defaults to permission-free idle prevention and keeps safety options available while active', async () => {
+    const idleOn: KeepAwakeStatus = { ...OFF, active: true, phase: 'on', revision: 2 };
+    mockCommands({ set_keep_awake: idleOn });
+    render(<SessionView />);
+
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    expect(mode).toHaveValue('idleOnly');
+    expect(
+      screen.getByText(/Prevents idle sleep without administrator approval/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start Preventing Sleep' }));
+
+    const stop = await screen.findByRole('button', { name: 'Stop Preventing Sleep' });
+    await waitFor(() => expect(stop).toBeEnabled());
+    expect(mode).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'After a set time' })).toBeEnabled();
+    expect(screen.getByRole('switch', { name: 'When unplugged from power' })).toBeEnabled();
+    expect(screen.queryByText(/waiting for administrator approval/)).not.toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith('set_keep_awake', {
+      enabled: true,
+      options: OFF.options,
+    });
+  });
+
+  it('serializes a mode change with Start and adopts its response without an event', async () => {
+    let finishConfiguration!: (value: KeepAwakeStatus) => void;
+    mockInvoke.mockImplementation((cmd) => {
+      if (cmd === 'get_keep_awake') return Promise.resolve(OFF);
+      if (cmd === 'configure_keep_awake') {
+        return new Promise<KeepAwakeStatus>((resolve) => {
+          finishConfiguration = resolve;
+        });
+      }
+      if (cmd === 'set_keep_awake') return Promise.resolve(ENABLING);
+      return Promise.resolve(null);
+    });
+    render(<SessionView />);
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    fireEvent.change(mode, { target: { value: 'lidClosed' } });
+    const start = screen.getByRole('button', { name: 'Start Preventing Sleep…' });
+    expect(start).toBeDisabled();
+    expect(mode).toBeDisabled();
+    fireEvent.click(start);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'set_keep_awake')).toHaveLength(0);
+
+    const lidOptions: KeepAwakeStatus['options'] = { ...OFF.options, mode: 'lidClosed' };
+    await act(async () => finishConfiguration({ ...OFF, options: lidOptions, revision: 2 }));
+    expect(start).toBeEnabled();
+    expect(mode).toHaveValue('lidClosed');
+    fireEvent.click(start);
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('set_keep_awake', {
+        enabled: true,
+        options: lidOptions,
+      }),
+    );
+    expect(await screen.findByText(/waiting for administrator approval/)).toBeInTheDocument();
+  });
+
+  it('restores the confirmed mode after a rejected option write', async () => {
+    mockCommands({ configure_keep_awake: new Rejection(new Error('mode busy')) });
+    render(<SessionView />);
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    fireEvent.change(mode, { target: { value: 'lidClosed' } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('mode busy');
+    await waitFor(() => expect(mode).toHaveValue('idleOnly'));
+    expect(screen.getByRole('button', { name: 'Start Preventing Sleep' })).toBeEnabled();
+  });
+
+  it('allows switching modes after a failed start without retained ownership', async () => {
+    mockCommands({ get_keep_awake: { ...OFF, phase: 'failed', notice: 'assertionFailed' } });
+    render(<SessionView />);
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+
+    expect(mode).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'macOS could not apply the sleep-prevention change',
+    );
+    fireEvent.change(mode, { target: { value: 'lidClosed' } });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Start Preventing Sleep…' })).toBeEnabled(),
+    );
+  });
+
+  it('discards a rejected mode draft when the confirming read also fails', async () => {
+    let reads = 0;
+    mockInvoke.mockImplementation((cmd) => {
+      if (cmd === 'get_keep_awake') {
+        return ++reads === 1 ? Promise.resolve(OFF) : Promise.reject(new Error('read failed'));
+      }
+      return Promise.reject(new Error('write failed'));
+    });
+    render(<SessionView />);
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    fireEvent.change(mode, { target: { value: 'lidClosed' } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('write failed');
+    await waitFor(() => expect(mode).toBeEnabled());
+    expect(mode).toHaveValue('idleOnly');
+  });
+
+  it('keeps mode changes locked after a failed stop that still holds an idle assertion', async () => {
+    mockCommands({
+      get_keep_awake: { ...OFF, active: true, phase: 'failed', notice: 'assertionFailed' },
+    });
+    render(<SessionView />);
+
+    expect(await screen.findByRole('combobox', { name: 'Prevent sleep while' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop Preventing Sleep' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
   });
 
   it('ignores a second click while a toggle is in flight', async () => {
@@ -170,7 +296,7 @@ describe('SessionView', () => {
 
     await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
     fireEvent.click(toggle);
-    await waitFor(() => expect(toggle).toHaveTextContent('Start Preventing Sleep…'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Start Preventing Sleep'));
 
     expect(
       mockInvoke.mock.calls
@@ -292,7 +418,7 @@ describe('SessionView', () => {
     await waitFor(() =>
       expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_keep_awake')).toHaveLength(2),
     );
-    expect(toggle).toHaveTextContent('Start Preventing Sleep…');
+    expect(toggle).toHaveTextContent('Start Preventing Sleep');
     expect(toggle).not.toBeDisabled();
   });
 
@@ -312,7 +438,7 @@ describe('SessionView', () => {
     // A failed initial read must not expose a clickable switch backed by a
     // guessed off state.
     const toggle = screen.getByRole('button', { name: MAIN_ACTION });
-    expect(toggle).toHaveTextContent('Start Preventing Sleep…');
+    expect(toggle).toHaveTextContent('Start Preventing Sleep');
     expect(toggle).toBeDisabled();
     const timer = screen.getByRole('combobox', { name: 'After a set time' });
     const acOnly = screen.getByRole('switch', { name: 'When unplugged from power' });
@@ -334,7 +460,7 @@ describe('SessionView', () => {
   it('updates from the tomari:keep-awake-changed event', async () => {
     render(<SessionView />);
     const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
-    expect(toggle).toHaveTextContent('Start Preventing Sleep…');
+    expect(toggle).toHaveTextContent('Start Preventing Sleep');
 
     keepAwakeChanged?.(ON);
 
@@ -361,7 +487,7 @@ describe('SessionView', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     // The toggle finishes (not stuck busy) even though the re-sync failed.
     await waitFor(() => expect(toggle).not.toBeDisabled());
-    expect(toggle).toHaveTextContent('Start Preventing Sleep…');
+    expect(toggle).toHaveTextContent('Start Preventing Sleep');
   });
 
   it('cancels an administrator prompt without issuing another normal toggle', async () => {
@@ -428,6 +554,8 @@ describe('SessionView', () => {
     // decision are offered, and Start stays locked until one is taken.
     const main = await screen.findByRole('button', { name: MAIN_ACTION });
     expect(main).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Prevent sleep while' })).toBeDisabled();
+    expect(screen.getByText(/Restoring it requires administrator approval/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Turn sleep back on' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Leave it as it is' }));
 
@@ -462,6 +590,7 @@ describe('SessionView', () => {
       const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'configure_keep_awake');
       expect(call?.[1]).toEqual({
         options: {
+          mode: 'idleOnly',
           durationSecs: 30 * 60,
           endsAtMs: null,
           acOnly: false,
@@ -509,7 +638,13 @@ describe('SessionView', () => {
     await waitFor(() => {
       const call = mockInvoke.mock.calls.findLast(([cmd]) => cmd === 'configure_keep_awake');
       expect(call?.[1]).toEqual({
-        options: { durationSecs: null, endsAtMs: null, acOnly: false, lowBatteryAction: 'warn' },
+        options: {
+          mode: 'idleOnly',
+          durationSecs: null,
+          endsAtMs: null,
+          acOnly: false,
+          lowBatteryAction: 'warn',
+        },
       });
     });
   });

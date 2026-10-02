@@ -1461,10 +1461,9 @@ pub fn get_keep_awake(state: State<'_, AppState>) -> crate::keepawake::KeepAwake
 }
 
 /// Turn sleep prevention on or off from the panel toggle. Returns the resulting
-/// status; the lid-close veto is engaged in the background (it prompts for the
-/// administrator password), so `phase` remains `enabling` / `disabling` until
-/// it settles via the `tomari:keep-awake-changed` event. Every toggle surface
-/// stays disabled during those phases.
+/// status. Normal mode takes effect immediately without authorization. In
+/// lid-closed mode the administrator-backed veto settles in the background via
+/// the `tomari:keep-awake-changed` event; toggles stay disabled while pending.
 #[tauri::command]
 pub fn set_keep_awake(
     app: AppHandle,

@@ -454,7 +454,8 @@ function keepAwakeItem(
   t: Translator,
   { onNavigate }: Navigation,
 ): HealthItem {
-  const { active, phase, markerPresent, kernelSleepDisabled, ownsLidClose } = snapshot.keepAwake;
+  const { mode, active, phase, markerPresent, kernelSleepDisabled, ownsLidClose } =
+    snapshot.keepAwake;
   const id = 'keepAwake';
   const title = t('health.keepAwake');
   const action = destinationAction(
@@ -476,9 +477,17 @@ function keepAwakeItem(
       ? { id, title, tone: 'attention', description: t('health.keepAwake.residual'), action }
       : { id, title, tone: 'inactive', description: t('health.keepAwake.off') };
   }
-  const ownershipCoherent = markerPresent === ownsLidClose;
-  return phase === 'on' && ownershipCoherent && kernelSleepDisabled === true
-    ? { id, title, tone: 'ready', description: t('health.keepAwake.on') }
+  const stateCoherent =
+    mode === 'idleOnly'
+      ? !markerPresent && !ownsLidClose
+      : markerPresent === ownsLidClose && kernelSleepDisabled === true;
+  return phase === 'on' && stateCoherent
+    ? {
+        id,
+        title,
+        tone: 'ready',
+        description: t(mode === 'idleOnly' ? 'health.keepAwake.idleOn' : 'health.keepAwake.on'),
+      }
     : { id, title, tone: 'attention', description: t('health.keepAwake.mismatch'), action };
 }
 

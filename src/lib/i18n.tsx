@@ -314,7 +314,7 @@ const en = {
   'setup.updateRegrant':
     "Tomari's permissions went missing after the update — a known limitation for now. Please grant them again.",
   'setup.adminNote':
-    'Prevent Sleep is separate: it asks for your administrator password each time instead of a one-time grant.',
+    'Prevent Sleep needs no permission for ordinary use with the lid open. Only the lid-closed mode asks for your administrator password when changing the lid-close setting.',
 
   'window.axNeeded': 'Accessibility access needed',
   'window.pageDescription': 'Set saved positions and the shortcuts or gestures that move windows.',
@@ -463,14 +463,27 @@ const en = {
 
   'settings.keepAwakeToggle': 'Prevent Sleep',
   'settings.sessionPageDescription':
-    'Keep downloads, builds, and other long jobs running—even with the MacBook lid closed. This is temporary and always turns off when Tomari quits.',
+    'Keep downloads, builds, and other long jobs running. Choose whether to keep working with the MacBook lid closed. Sessions are temporary and do not restart when Tomari opens.',
+  'settings.keepAwakeMode': 'Prevent sleep while',
+  'settings.keepAwakeIdle': 'Lid is open',
+  'settings.keepAwakeLid': 'Lid is open or closed',
+  'settings.keepAwakeIdleHint':
+    'Prevents idle sleep without administrator approval. Closing the lid and choosing Sleep still work normally. Stop the session before changing modes.',
+  'settings.keepAwakeLidHint':
+    'Also prevents sleep when the MacBook lid closes. Changing the lid-close setting requires administrator approval when starting or stopping. Stop the session before changing modes.',
+  'settings.keepAwakeModeRecoveryHint':
+    'Resolve the previous lid-close setting before changing modes. Restoring it requires administrator approval.',
   'settings.keepAwakeAction': 'Keep this Mac awake',
-  'settings.keepAwakeStart': 'Start Preventing Sleep…',
+  'settings.keepAwakeStart': 'Start Preventing Sleep',
+  'settings.keepAwakeStartAdmin': 'Start Preventing Sleep…',
   'settings.keepAwakeStop': 'Stop Preventing Sleep',
+  'settings.keepAwakeStopAdmin': 'Stop Preventing Sleep…',
   'settings.keepAwakeActive': 'Sleep is being prevented',
   'settings.keepAwakeInactive': 'Your Mac sleeps normally',
-  'settings.keepAwakeEnabling': 'Turning on — waiting for administrator approval.',
-  'settings.keepAwakeDisabling': 'Turning off — waiting for administrator approval.',
+  'settings.keepAwakeEnabling': 'Turning on…',
+  'settings.keepAwakeDisabling': 'Turning off…',
+  'settings.keepAwakeEnablingAdmin': 'Turning on — waiting for administrator approval.',
+  'settings.keepAwakeDisablingAdmin': 'Turning off — waiting for administrator approval.',
   'settings.keepAwakeFailed': 'The last change was not applied',
   'settings.lidClose': 'Work with lid closed',
   'settings.lidActive': 'Active',
@@ -504,9 +517,9 @@ const en = {
   'settings.advancedState': 'Details',
   'settings.kernelState': 'macOS sleep-disabled flag',
   'settings.kernelStateHint':
-    'The SleepDisabled value read directly from macOS, independently of the switch above.',
-  'settings.kernelBlocked': 'Sleep disabled',
-  'settings.kernelAllowed': 'Sleep allowed',
+    'The SleepDisabled value read directly from macOS. Ordinary idle sleep prevention does not change this lid-close setting.',
+  'settings.kernelBlocked': 'Lid-close sleep disabled',
+  'settings.kernelAllowed': 'Lid-close sleep allowed',
   'settings.ownership': 'Lid-close setting changed by',
   'settings.ownershipHint': 'Tomari only restores the lid-close setting it changed itself.',
   'settings.ownedByTomari': 'Tomari',
@@ -522,7 +535,9 @@ const en = {
   'settings.noticeAuthorizationDeclined':
     'The administrator change was declined or could not be confirmed.',
   'settings.noticeLidCloseUnconfirmed':
-    'Keep Awake is off, but the lid-close sleep setting could not be confirmed and may still be active. Retry to restore it.',
+    'The lid-close sleep setting could not be confirmed and may still be active. Retry to restore it.',
+  'settings.noticeAssertionFailed':
+    'macOS could not apply the sleep-prevention change. Check the current state and try again.',
   'settings.noticeLeftoverOverride':
     'Sleep with the lid closed is currently disabled on this Mac. A previous Tomari session may have left it that way, but it could also have been set by you or another app since. Choose whether to turn sleep back on or leave it as it is.',
   'settings.leftoverClear': 'Turn sleep back on',
@@ -637,6 +652,8 @@ const en = {
   'health.keepAwake': 'Prevent Sleep',
   'health.keepAwake.off': 'Prevent Sleep is off.',
   'health.keepAwake.on': 'Prevent Sleep is on and your Mac will stay awake.',
+  'health.keepAwake.idleOn':
+    'Idle sleep is prevented. Closing the lid and choosing Sleep still work normally.',
   'health.keepAwake.enabling': 'Prevent Sleep is being enabled. Wait, then refresh.',
   'health.keepAwake.disabling': 'Prevent Sleep is being disabled. Wait, then refresh.',
   'health.keepAwake.failed': 'Prevent Sleep could not be applied. Open its settings and try again.',
@@ -979,7 +996,7 @@ const ja: Record<MessageKey, string> = {
   'setup.updateRegrant':
     'アップデート後に権限が外れてしまったようです（現時点の Tomari の既知の制約です）。もう一度許可してください。',
   'setup.adminNote':
-    'スリープ防止は権限とは別で、使うたびに管理者パスワードを確認します。ここでの許可は不要です。',
+    '蓋を開いた通常のスリープ防止には権限の許可は不要です。蓋を閉じても継続するモードで、蓋閉じ時の設定を変更するときだけ管理者パスワードを確認します。',
 
   'window.axNeeded': 'アクセシビリティへのアクセスが必要です',
   'window.pageDescription':
@@ -1129,14 +1146,27 @@ const ja: Record<MessageKey, string> = {
 
   'settings.keepAwakeToggle': 'スリープ防止',
   'settings.sessionPageDescription':
-    'ダウンロードやビルドなどの長い処理を、MacBook の蓋を閉じても続けます。一時的な設定で、Tomari を終了すると必ず解除されます。',
+    'ダウンロードやビルドなどの長い処理を続けます。MacBook の蓋を閉じても継続するか選べます。一時的な設定で、Tomari の起動時に自動で再開しません。',
+  'settings.keepAwakeMode': 'スリープを防ぐ範囲',
+  'settings.keepAwakeIdle': '蓋を開いている間',
+  'settings.keepAwakeLid': '蓋を閉じても継続',
+  'settings.keepAwakeIdleHint':
+    '管理者認証なしで、操作していない間の自動スリープを防ぎます。蓋を閉じたときや手動でのスリープは通常どおり動作します。範囲を変更するには一度停止してください。',
+  'settings.keepAwakeLidHint':
+    'MacBook の蓋を閉じたときもスリープを防ぎます。開始・停止で蓋閉じ時の設定を変更するときは管理者認証が必要です。範囲を変更するには一度停止してください。',
+  'settings.keepAwakeModeRecoveryHint':
+    '前回の蓋閉じ時の設定を確認してから、範囲を変更できます。設定を元に戻すには管理者認証が必要です。',
   'settings.keepAwakeAction': 'この Mac のスリープを防ぐ',
-  'settings.keepAwakeStart': 'スリープ防止を開始…',
+  'settings.keepAwakeStart': 'スリープ防止を開始',
+  'settings.keepAwakeStartAdmin': 'スリープ防止を開始…',
   'settings.keepAwakeStop': 'スリープ防止を停止',
+  'settings.keepAwakeStopAdmin': 'スリープ防止を停止…',
   'settings.keepAwakeActive': 'スリープを防いでいます',
   'settings.keepAwakeInactive': '通常どおりスリープします',
-  'settings.keepAwakeEnabling': 'オンにしています。管理者の承認を待っています。',
-  'settings.keepAwakeDisabling': 'オフにしています。管理者の承認を待っています。',
+  'settings.keepAwakeEnabling': 'オンにしています…',
+  'settings.keepAwakeDisabling': 'オフにしています…',
+  'settings.keepAwakeEnablingAdmin': 'オンにしています。管理者の承認を待っています。',
+  'settings.keepAwakeDisablingAdmin': 'オフにしています。管理者の承認を待っています。',
   'settings.keepAwakeFailed': '直前の変更を適用できませんでした',
   'settings.lidClose': '蓋を閉じても継続',
   'settings.lidActive': '有効',
@@ -1170,9 +1200,9 @@ const ja: Record<MessageKey, string> = {
   'settings.advancedState': '詳細',
   'settings.kernelState': 'macOS のスリープ禁止フラグ',
   'settings.kernelStateHint':
-    '上のスイッチとは別に、macOS から直接読み取った SleepDisabled の値です。',
-  'settings.kernelBlocked': 'スリープ禁止',
-  'settings.kernelAllowed': 'スリープ可能',
+    'macOS から直接読み取った SleepDisabled の値です。通常の自動スリープ防止では、この蓋閉じ時の設定は変更しません。',
+  'settings.kernelBlocked': '蓋閉じ時のスリープ禁止',
+  'settings.kernelAllowed': '蓋閉じ時のスリープ可能',
   'settings.ownership': '蓋を閉じたときの設定の変更元',
   'settings.ownershipHint': 'Tomari は、自分で変更した蓋閉じ時の設定だけを元に戻します。',
   'settings.ownedByTomari': 'Tomari',
@@ -1188,7 +1218,9 @@ const ja: Record<MessageKey, string> = {
   'settings.noticeAuthorizationDeclined':
     '管理者による変更が拒否されたか、結果を確認できませんでした。',
   'settings.noticeLidCloseUnconfirmed':
-    'スリープ防止はオフですが、ふたを閉じたときのスリープ設定を確認できず、まだ有効なままかもしれません。再試行すると元に戻します。',
+    'ふたを閉じたときのスリープ設定を確認できず、まだ有効なままかもしれません。再試行すると元に戻します。',
+  'settings.noticeAssertionFailed':
+    'macOS にスリープ防止の変更を適用できませんでした。現在の状態を確認して再試行してください。',
   'settings.noticeLeftoverOverride':
     'この Mac では現在、ふたを閉じてもスリープしない設定になっています。前回の Tomari が残した可能性がありますが、その後にあなたや別のアプリが設定した可能性もあります。スリープを元に戻すか、このままにするかを選んでください。',
   'settings.leftoverClear': 'スリープを元に戻す',
@@ -1304,6 +1336,8 @@ const ja: Record<MessageKey, string> = {
   'health.keepAwake': 'スリープ防止',
   'health.keepAwake.off': 'スリープ防止はオフです。',
   'health.keepAwake.on': 'スリープ防止はオンで、Mac はスリープしません。',
+  'health.keepAwake.idleOn':
+    '操作していない間の自動スリープを防いでいます。蓋を閉じたときや手動でのスリープは通常どおり動作します。',
   'health.keepAwake.enabling': 'スリープ防止を有効にしています。完了後に更新してください。',
   'health.keepAwake.disabling': 'スリープ防止を無効にしています。完了後に更新してください。',
   'health.keepAwake.failed': 'スリープ防止を適用できませんでした。設定を開いて再試行してください。',

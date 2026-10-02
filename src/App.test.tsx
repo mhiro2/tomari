@@ -61,6 +61,7 @@ const SHORTCUT_DIAGNOSTICS: DiagnosticsSnapshot = {
     dividerAvailable: false,
   },
   keepAwake: {
+    mode: 'idleOnly',
     active: false,
     phase: 'off',
     markerPresent: false,
@@ -131,6 +132,7 @@ function defaultCommand(cmd: string): Promise<unknown> {
         lidClose: 'off',
         phase: 'off',
         options: {
+          mode: 'idleOnly',
           durationSecs: null,
           endsAtMs: null,
           acOnly: false,

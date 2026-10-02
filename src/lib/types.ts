@@ -207,6 +207,7 @@ export interface DiagnosticsSnapshot {
     dividerAvailable: boolean;
   };
   keepAwake: {
+    mode: KeepAwakeMode;
     active: boolean;
     phase: KeepAwakePhase;
     markerPresent: boolean;
@@ -283,6 +284,7 @@ export interface ConfigurationBackupOutcome {
 // declined veto turns keep-awake off entirely rather than reporting it.)
 export type LidCloseState = 'off' | 'pending' | 'engaged' | 'unavailable';
 export type KeepAwakePhase = 'off' | 'enabling' | 'on' | 'disabling' | 'failed';
+export type KeepAwakeMode = 'idleOnly' | 'lidClosed';
 export type PowerSource = 'ac' | 'battery' | 'unknown';
 export type LowBatteryAction = 'warn' | 'turnOff';
 export type KeepAwakeNotice =
@@ -292,11 +294,13 @@ export type KeepAwakeNotice =
   | 'timerElapsed'
   | 'authorizationDeclined'
   | 'lidCloseUnconfirmed'
+  | 'assertionFailed'
   // A previous run's marker was found at launch with the lid-close override
   // still set; whose it is now cannot be told, so the user decides.
   | 'leftoverOverride';
 
 export interface KeepAwakeOptions {
+  mode: KeepAwakeMode;
   durationSecs: number | null;
   endsAtMs: number | null;
   acOnly: boolean;

@@ -42,10 +42,11 @@ provides in charge.
 
 ### Keep Awake
 
-- Keep long-running jobs alive **even with the lid closed**. Toggle it from the
-  tray, settings, or a global shortcut. Turning it on or off asks for your
-  administrator password; the switch stays locked while that prompt is open,
-  and the prompt can be canceled or retried from Settings. Optional deadlines,
+- Prevent idle sleep **without administrator authorization** in the default
+  lid-open mode. Choose the lid-closed mode while stopped to keep working with
+  the lid closed; that mode asks for your administrator password on start and
+  stop, with cancellation and retry in Settings. Toggle the selected mode from
+  the tray, settings, or a global shortcut. Optional deadlines,
   AC-only operation, low-battery protection, a live countdown, kernel/ownership
   diagnostics, and long-running developer-job detection keep the session bounded.
 
