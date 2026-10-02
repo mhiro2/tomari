@@ -1,6 +1,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { ApplyWarningPanel } from './components/ApplyWarningPanel';
 import { BrandIcon, SectionIcon, type SectionName } from './components/icons';
 import { Banner, PermissionStatus } from './components/ui';
 import * as api from './lib/api';
@@ -97,7 +98,7 @@ function SettingsRoot() {
 
 function OperationalShell() {
   const t = useT();
-  const { saveError, applyWarnings, configurationWarnings, configurationBusy } = useSettings();
+  const { saveError, configurationWarnings, configurationBusy } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
   const [healthDestination, setHealthDestination] = useState<HealthDestination | null>(null);
   const [configurationFocusRequest, setConfigurationFocusRequest] = useState(0);
@@ -341,17 +342,11 @@ function OperationalShell() {
           </aside>
         )}
 
-        {applyWarnings.length > 0 && section !== 'general' && (
-          <output className="apply-banner">
-            <span>
-              <strong>{t('settings.applyWarningTitle')}</strong>
-              <small>{t('settings.applyWarningShell')}</small>
-            </span>
-            <button type="button" className="btn btn--ghost" onClick={() => setSection('general')}>
-              {t('settings.reviewWarning')}
-            </button>
-          </output>
-        )}
+        <ApplyWarningPanel
+          permissions={permissionsKnown ? permissions : null}
+          onOpenPermissions={openSetup}
+          onOpenDiagnostics={() => selectSection('health')}
+        />
 
         <main
           ref={mainRef}
@@ -544,6 +539,7 @@ function SetupDialog({
   onDismiss: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const { configurationBusy } = useSettings();
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -570,7 +566,7 @@ function SetupDialog({
       aria-label={label}
       onCancel={(event) => {
         event.preventDefault();
-        onDismiss();
+        if (!configurationBusy) onDismiss();
       }}
     >
       <SetupView

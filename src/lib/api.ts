@@ -37,6 +37,8 @@ import type {
   MoveRecallResult,
 } from './types';
 
+export const restartApp = (): Promise<void> => invoke('restart_app');
+
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 
 // Read-only snapshot of persisted hotkeys and modifier rules that were

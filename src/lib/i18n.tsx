@@ -296,6 +296,8 @@ const en = {
   'setup.requesting': 'Opening…',
   'setup.openAgain': 'Open Again',
   'setup.returnHint': 'After allowing it in System Settings, return to Tomari.',
+  'setup.requestedHint':
+    'If Tomari still cannot use a permission, restart it. If it still appears ungranted after updating Tomari, remove the old Tomari entry in System Settings and add the current app again, even if its switch is on.',
   'setup.later': 'Set up later',
   'setup.done': 'Start using Tomari',
   'setup.allSet': 'All set — Tomari is ready to use.',
@@ -561,27 +563,31 @@ const en = {
   'settings.checking': 'Checking…',
   'settings.saveFailed': 'Could not save settings: {error}',
 
-  'settings.applyWarningTitle': 'Saved, but not fully applied',
-  'settings.applyWarningShell':
-    'macOS could not apply part of the latest change. Review the details and how to retry.',
-  'settings.reviewWarning': 'Review',
+  'app.restart': 'Restart Tomari',
+  'app.restarting': 'Restarting Tomari…',
+  'app.restartFailed': 'Tomari could not restart: {error}',
+  'app.restartHint':
+    'Restart Tomari to try starting these features again. If the problem continues, open Diagnostics.',
+  'settings.openPermissionSettings': 'Open Permission Settings',
+  'settings.openDiagnostics': 'Open Diagnostics',
   'settings.applyWarning.launchAtLogin':
-    'Launch at login was saved but could not be applied to the system. Toggle it off and on to try again.',
+    'Tomari could not change automatic startup. Check Login Items in System Settings.',
   'settings.applyWarning.menuBar':
-    'The menu bar setting was saved but could not be applied. Toggle it off and on to try again.',
+    'Menu Bar organization is not working. Diagnostics can check whether this macOS version supports it.',
   'settings.applyWarning.keyboardTap':
-    'Keyboard customization was saved but its event tap could not start. Check Accessibility and Input Monitoring access, then toggle it off and on.',
+    'Keyboard customization is not running. Modifier-key taps, holds, and remaps may not work.',
   'settings.applyWarning.globalShortcuts':
-    'Keyboard customization was saved, but live shortcuts could not be updated. Toggle Keyboard off and on to try again.',
+    'Some shortcuts are unavailable. Another app may be using the same keys; review Shortcuts in Keyboard settings.',
   'settings.applyWarning.dragToSnapTap':
-    'Drag to snap was saved but its event tap could not start. Check Input Monitoring access, then toggle it off and on.',
+    'Drag to snap is not running. Dragging a window to the screen edge will not snap it.',
   'settings.applyWarning.dragToMoveTap':
-    'Drag to move was saved but its event tap could not start. Check Accessibility and Input Monitoring access, then toggle it off and on.',
+    'Drag to move is not running. Dragging with modifier keys will not move or resize windows.',
   'settings.applyWarning.capsLockRemap':
-    'The setting was saved, but the Caps Lock remap could not be updated. Toggle it off and on to try again.',
+    'The Caps Lock assignment is unavailable. Caps Lock may still use its previous behavior.',
   'settings.applyWarning.commandImeRules':
-    'The Command-key IME switch was saved but could not be applied to the live keyboard. Toggle it off and on to try again.',
-  'settings.applyWarning.generic': 'A setting was saved but could not be applied to the system.',
+    'Command-key input switching is not working. Tapping Command may not change the input source.',
+  'settings.applyWarning.generic':
+    'Tomari could not start one of its features. Open Diagnostics to check what is available.',
 
   'health.title': 'Diagnostics',
   'health.pageDescription':
@@ -979,6 +985,8 @@ const ja: Record<MessageKey, string> = {
   'setup.requesting': '開いています…',
   'setup.openAgain': 'もう一度開く',
   'setup.returnHint': 'システム設定で許可したら、Tomari に戻ってください。',
+  'setup.requestedHint':
+    '許可しても機能しない場合は Tomari を再起動してください。アプリを更新した後も未許可のままなら、システム設定のスイッチがオンでも古い Tomari を削除し、今のアプリを追加し直してください。',
   'setup.later': 'あとで設定する',
   'setup.done': 'Tomari を使い始める',
   'setup.allSet': '準備完了です。Tomari を使い始められます。',
@@ -1244,27 +1252,31 @@ const ja: Record<MessageKey, string> = {
   'settings.checking': '確認中…',
   'settings.saveFailed': '設定を保存できませんでした: {error}',
 
-  'settings.applyWarningTitle': '保存しましたが、適用しきれませんでした',
-  'settings.applyWarningShell':
-    '直前の変更の一部を macOS に適用できませんでした。詳細と再試行方法を確認してください。',
-  'settings.reviewWarning': '確認する',
+  'app.restart': 'Tomari を再起動',
+  'app.restarting': 'Tomari を再起動しています…',
+  'app.restartFailed': 'Tomari を再起動できませんでした: {error}',
+  'app.restartHint':
+    'Tomari を再起動すると、これらの機能の開始をもう一度試します。改善しない場合は診断を開いてください。',
+  'settings.openPermissionSettings': '権限の設定を開く',
+  'settings.openDiagnostics': '診断を開く',
   'settings.applyWarning.launchAtLogin':
-    'ログイン時に起動の設定は保存しましたが、システムに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
+    'Tomari の自動起動を変更できませんでした。システム設定の「ログイン項目」を確認してください。',
   'settings.applyWarning.menuBar':
-    'メニューバーの設定は保存しましたが、適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
+    'メニューバーの整理が動作していません。診断で、この macOS が対応しているか確認できます。',
   'settings.applyWarning.keyboardTap':
-    'キーボードカスタマイズは保存しましたが、イベントタップを開始できませんでした。アクセシビリティと入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+    'キーボードのカスタマイズが動作していません。修飾キーのタップ・長押し・割り当て変更が使えない可能性があります。',
   'settings.applyWarning.globalShortcuts':
-    'キーボードカスタマイズは保存しましたが、実行中のショートカットを更新できませんでした。キーボードをオフにしてからもう一度オンにしてください。',
+    '一部のショートカットが使えません。ほかのアプリとキーが重複している可能性があります。キーボード設定の「ショートカット」を確認してください。',
   'settings.applyWarning.dragToSnapTap':
-    'ドラッグでスナップは保存しましたが、イベントタップを開始できませんでした。入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+    'ドラッグでスナップが動作していません。ウィンドウを画面端にドラッグしても整列しません。',
   'settings.applyWarning.dragToMoveTap':
-    'ドラッグで移動は保存しましたが、イベントタップを開始できませんでした。アクセシビリティと入力監視の許可を確認して、オフにしてからもう一度オンにしてください。',
+    'ドラッグで移動が動作していません。修飾キーを押しながらのドラッグでウィンドウを移動・サイズ変更できません。',
   'settings.applyWarning.capsLockRemap':
-    '設定は保存しましたが、Caps Lock の割り当てを更新できませんでした。オフにしてからもう一度オンにすると再試行します。',
+    'Caps Lock の割り当て変更が使えません。以前の動作のままになっている可能性があります。',
   'settings.applyWarning.commandImeRules':
-    'Command キーでの IME 切り替えは保存しましたが、動作中のキーボードに適用できませんでした。オフにしてからもう一度オンにすると再試行します。',
-  'settings.applyWarning.generic': '設定は保存しましたが、システムに適用できませんでした。',
+    'Command キーでの入力切り替えが動作していません。Command をタップしても入力ソースが変わらない可能性があります。',
+  'settings.applyWarning.generic':
+    'Tomari の一部の機能を開始できませんでした。診断で利用できる機能を確認してください。',
 
   'health.title': '診断',
   'health.pageDescription':

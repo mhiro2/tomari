@@ -143,6 +143,41 @@ describe('SetupView', () => {
     expect(onGranted).not.toHaveBeenCalled();
   });
 
+  it('offers explicit restart and current-app permission guidance after a grant request', async () => {
+    mockCommands({ request_accessibility: false });
+    renderView();
+    expect(screen.queryByRole('button', { name: 'Restart Tomari' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open System Settings for Accessibility' }));
+
+    expect(await screen.findByText(/remove the old Tomari entry/)).toHaveTextContent(
+      'even if its switch is on',
+    );
+    const restart = screen.getByRole('button', { name: 'Restart Tomari' });
+    await waitFor(() => expect(restart).toBeEnabled());
+    fireEvent.click(restart);
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('restart_app'));
+    expect(screen.getByRole('button', { name: 'Restarting Tomari…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Set up later' })).toBeDisabled();
+  });
+
+  it('keeps restart failures visible in Setup and unlocks permission actions', async () => {
+    mockCommands({ request_accessibility: false, restart_app: new Error('cannot restart') });
+    renderView();
+    fireEvent.click(screen.getByRole('button', { name: 'Open System Settings for Accessibility' }));
+    const restart = await screen.findByRole('button', { name: 'Restart Tomari' });
+    await waitFor(() => expect(restart).toBeEnabled());
+    fireEvent.click(restart);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Tomari could not restart: cannot restart',
+    );
+    expect(restart).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Open System Settings for Accessibility' }),
+    ).toBeEnabled();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'restart_app')).toHaveLength(1);
+  });
+
   it('offers "Set up later" while something is missing', () => {
     const onDismiss = vi.fn();
     renderView({ onDismiss });

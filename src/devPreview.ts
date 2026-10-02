@@ -324,6 +324,8 @@ export async function installDevPreview() {
 
   const previewCommand: Parameters<typeof mockIPC>[0] = (cmd, payload) => {
     switch (cmd) {
+      case 'restart_app':
+        throw { code: 'other', message: 'Restart is available in the macOS app.' };
       case 'get_settings': {
         if (recoveryKind !== null) {
           throw {

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from 'react';
 import { SettingsBackupPanel } from '../components/SettingsBackupPanel';
 import { Banner, FeaturePageHeader, SettingsList, SettingsRow, SwitchRow } from '../components/ui';
 import * as api from '../lib/api';
-import { applyWarningText } from '../lib/applyWarnings';
 import { cmdErrorMessage } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
@@ -34,7 +33,7 @@ export function GeneralView({
   onAutoCheckHandled?: () => void;
 }) {
   const t = useT();
-  const { settings, applyWarnings, update } = useSettings();
+  const { settings, update } = useSettings();
   const [version, setVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateState>({ phase: 'idle' });
   // Turning the menu bar icon off hides the only visible affordance of an
@@ -142,17 +141,6 @@ export function GeneralView({
         />
       </SettingsList>
 
-      {applyWarnings.length > 0 && (
-        <Banner tone="warn">
-          <div className="banner__body">
-            <strong>{t('settings.applyWarningTitle')}</strong>
-            {applyWarnings.map((code) => (
-              <p key={code}>{applyWarningText(code, t)}</p>
-            ))}
-          </div>
-        </Banner>
-      )}
-
       {confirmHideTray && (
         <Banner tone="warn">
           <div className="banner__body">
@@ -233,9 +221,6 @@ export function GeneralView({
     </div>
   );
 }
-
-// Map a save_settings apply-warning code to its localized message, falling back
-// to a generic line for any code this build doesn't recognize.
 
 function updateDesc(state: UpdateState, t: Translator): string | null {
   switch (state.phase) {

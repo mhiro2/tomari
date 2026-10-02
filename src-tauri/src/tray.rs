@@ -223,12 +223,10 @@ pub fn set_visible(app: &AppHandle, visible: bool) -> bool {
 fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "setup:accessibility" => {
-            request_accessibility();
-            refresh(app);
+            request_permission(app, crate::permissions::PermissionPane::Accessibility);
         }
         "setup:input" => {
-            request_input_monitoring();
-            refresh(app);
+            request_permission(app, crate::permissions::PermissionPane::InputMonitoring);
         }
         "open" => {
             let _ = actions::show_panel(app);
@@ -264,16 +262,25 @@ fn on_menu(app: &AppHandle, id: &str) {
     }
 }
 
-fn request_accessibility() {
-    #[cfg(target_os = "macos")]
-    {
-        tomari_window::request_permission();
-    }
-}
-
-fn request_input_monitoring() {
-    #[cfg(target_os = "macos")]
-    {
-        crate::eventtap::request_input_monitoring();
-    }
+fn request_permission(app: &AppHandle, pane: crate::permissions::PermissionPane) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = match pane {
+            crate::permissions::PermissionPane::Accessibility => {
+                crate::commands::request_accessibility(app.clone()).await
+            }
+            crate::permissions::PermissionPane::InputMonitoring => {
+                crate::commands::request_input_monitoring(app.clone()).await
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(?pane, %error, "could not open permission settings from the tray");
+        }
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if handle.state::<AppState>().lifecycle.is_running() {
+                refresh(&handle);
+            }
+        });
+    });
 }

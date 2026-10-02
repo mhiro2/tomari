@@ -30,9 +30,11 @@ mod mailbox;
 mod menubar;
 #[cfg(target_os = "macos")]
 mod overlay;
+mod permissions;
 mod ratelimit;
 mod recovery_markers;
 mod regrant;
+mod relaunch;
 mod shortcuts;
 mod state;
 #[cfg(target_os = "macos")]
@@ -184,6 +186,7 @@ fn main() {
             commands::validate_accelerator,
             commands::check_for_update,
             commands::install_update,
+            commands::restart_app,
             commands::get_keep_awake,
             commands::set_keep_awake,
             commands::configure_keep_awake,

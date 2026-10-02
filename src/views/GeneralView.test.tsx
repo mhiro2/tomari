@@ -226,17 +226,4 @@ describe('GeneralView', () => {
       });
     });
   });
-
-  it('explains when live global shortcuts could not be updated', async () => {
-    mockCommands({ save_settings: { applyWarnings: ['globalShortcuts'] } });
-    renderView(<GeneralView />);
-
-    fireEvent.click(await screen.findByRole('switch', { name: 'Launch at login' }));
-
-    expect(
-      await screen.findByText(
-        'Keyboard customization was saved, but live shortcuts could not be updated. Toggle Keyboard off and on to try again.',
-      ),
-    ).toBeInTheDocument();
-  });
 });

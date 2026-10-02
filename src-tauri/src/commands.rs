@@ -768,6 +768,31 @@ pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -
     Ok(())
 }
 
+/// Relaunch after an explicit user request, reopening Settings after cleanup.
+#[tauri::command]
+pub async fn restart_app(app: AppHandle) -> CmdResult<()> {
+    off_main(app, |app, state| {
+        let target = crate::relaunch::prepare(app)?;
+        {
+            let config = state
+                .lock_config_mutation()
+                .ok_or_else(|| CmdError::other("Tomari is shutting down"))?;
+            let result =
+                crate::recovery_markers::arm_show_panel_after_recovery(&app.state::<AppPaths>())
+                    .map_err(|error| {
+                        CmdError::other(format!("could not prepare to reopen Settings: {error}"))
+                    });
+            // The marker does not change configuration. Release this gate
+            // before shutdown drains it, including when the marker write fails.
+            config.discard();
+            result?;
+        }
+        crate::lifecycle::shutdown_then_if_leader(app, || crate::relaunch::restart(app, &target))
+            .ok_or_else(|| CmdError::other("Tomari is already restarting or shutting down"))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn list_hotkeys(app: AppHandle) -> CmdResult<Vec<Hotkey>> {
     off_main(app, |app, state| {
@@ -1363,15 +1388,14 @@ pub fn accessibility_status(state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-pub fn request_accessibility() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        tomari_window::request_permission()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+pub async fn request_accessibility(app: AppHandle) -> CmdResult<bool> {
+    off_main(app, |_, state| {
+        if !state.lifecycle.is_running() {
+            return Err(CmdError::other("Tomari is shutting down"));
+        }
+        crate::permissions::request(crate::permissions::PermissionPane::Accessibility)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1387,15 +1411,14 @@ pub fn input_monitoring_status() -> bool {
 }
 
 #[tauri::command]
-pub fn request_input_monitoring() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        crate::eventtap::request_input_monitoring()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+pub async fn request_input_monitoring(app: AppHandle) -> CmdResult<bool> {
+    off_main(app, |_, state| {
+        if !state.lifecycle.is_running() {
+            return Err(CmdError::other("Tomari is shutting down"));
+        }
+        crate::permissions::request(crate::permissions::PermissionPane::InputMonitoring)
+    })
+    .await
 }
 
 /// Temporarily unregister all global shortcuts (`suspended = true`) so a chord

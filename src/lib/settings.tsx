@@ -230,11 +230,13 @@ function usePanelWarningRefresh(
 function useConfigurationTransfer({
   settingsRef,
   recoveryRequired,
+  saveErrorRef,
   onApplied,
   onUnconfirmed,
 }: {
   settingsRef: ReadonlyRef<AppSettings | null>;
   recoveryRequired: ReadonlyRef<boolean>;
+  saveErrorRef: ReadonlyRef<unknown>;
   onApplied: (outcome: ConfigurationBackupOutcome) => void;
   onUnconfirmed: () => Promise<void>;
 }) {
@@ -262,6 +264,7 @@ function useConfigurationTransfer({
           code: 'settingsRecoveryRequired',
         });
       }
+      if (saveErrorRef.current !== null) throw saveErrorRef.current;
       return await operation();
     } finally {
       configurationOperation.current = false;
@@ -375,7 +378,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settingsRecovery, setSettingsRecovery] = useState<SettingsRecoveryState | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [saveError, setSaveError] = useState<unknown>(null);
+  const [saveError, setSaveErrorState] = useState<unknown>(null);
+  const saveErrorRef = useRef<unknown>(null);
+  const setSaveError = useCallback((error: unknown) => {
+    saveErrorRef.current = error;
+    setSaveErrorState(error);
+  }, []);
   const [applyWarnings, setApplyWarnings] = useState<string[]>([]);
   // Bumped whenever a live-state read starts and whenever a save's outcome
   // sets `applyWarnings`, so only the newest read may apply its result: an
@@ -406,15 +414,18 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   // Recovery commands restart the real app, but a resolved test harness uses
   // this same transition back into the ordinary settings shell.
-  const applySettings = useCallback((next: AppSettings) => {
-    settled.current = true;
-    recoveryRequired.current = false;
-    settingsRef.current = next;
-    setSettings(next);
-    setSettingsRecovery(null);
-    setLoadError(null);
-    setSaveError(null);
-  }, []);
+  const applySettings = useCallback(
+    (next: AppSettings) => {
+      settled.current = true;
+      recoveryRequired.current = false;
+      settingsRef.current = next;
+      setSettings(next);
+      setSettingsRecovery(null);
+      setLoadError(null);
+      setSaveError(null);
+    },
+    [setSaveError],
+  );
 
   const requireSettingsRecovery = useCallback(
     (kind: SettingsRecoveryKind) => {
@@ -430,7 +441,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       setApplyWarnings([]);
       clearConfigurationWarnings();
     },
-    [clearConfigurationWarnings],
+    [clearConfigurationWarnings, setSaveError],
   );
 
   // Read the warnings the live state warrants right now. Best effort: a
@@ -554,7 +565,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
     // Edits arrived mid-save → persist the latest once more.
     if (dirty.current) await flushRef.current?.();
-  }, [applySettings, requireSettingsRecovery]);
+  }, [applySettings, requireSettingsRecovery, setSaveError]);
 
   useEffect(() => {
     flushRef.current = flush;
@@ -569,6 +580,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   } = useConfigurationTransfer({
     settingsRef,
     recoveryRequired,
+    saveErrorRef,
     onApplied: (outcome) => {
       applySettings(outcome.settings);
       warningsGeneration.current += 1;

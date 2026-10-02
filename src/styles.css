@@ -1006,14 +1006,15 @@ select.input {
   color: #ee9389;
 }
 
-.apply-banner span {
+.apply-banner__body {
   display: flex;
   min-width: 0;
   flex: 1;
   flex-direction: column;
 }
 
-.apply-banner small {
+.apply-banner p {
+  margin: 0 0 5px;
   color: #d5ac83;
 }
 

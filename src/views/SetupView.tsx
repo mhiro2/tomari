@@ -11,6 +11,7 @@ import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { acceleratorChips } from '../lib/format';
 import { useT } from '../lib/i18n';
+import { useRestartApp } from '../lib/restart';
 import { useSettings } from '../lib/settings';
 
 export interface SetupPermissions {
@@ -34,9 +35,13 @@ export function SetupView({
 }) {
   const t = useT();
   const { settings } = useSettings();
+  const { restart, restarting, error: restartError, busy: restartBusy } = useRestartApp();
   const [error, setError] = useState<string | null>(null);
   const [requesting, setRequesting] = useState<keyof SetupPermissions | null>(null);
   const [requested, setRequested] = useState<Partial<Record<keyof SetupPermissions, boolean>>>({});
+  const requestInFlight = useRef(false);
+  const busy = requesting !== null || restartBusy;
+  const hasRequested = Object.values(requested).some(Boolean);
   const allGranted = permissions.accessibility && permissions.inputMonitoring;
   // The view replaces the shell (often unmounting the very button that opened
   // it), so move focus to the heading — otherwise keyboard and screen-reader
@@ -69,16 +74,18 @@ export function SetupView({
   }, []);
 
   async function request(key: keyof SetupPermissions, call: () => Promise<boolean>) {
-    if (requesting !== null) return;
+    if (requestInFlight.current || restartBusy) return;
+    requestInFlight.current = true;
     setRequesting(key);
+    setRequested((current) => ({ ...current, [key]: true }));
     setError(null);
     try {
       const ok = await call();
       if (ok) onGranted({ [key]: true });
-      else setRequested((current) => ({ ...current, [key]: true }));
     } catch (e) {
       setError(formatCmdError(e, t));
     } finally {
+      requestInFlight.current = false;
       setRequesting(null);
     }
   }
@@ -94,9 +101,9 @@ export function SetupView({
 
       <Group
         note={
-          error ? (
+          error || restartError ? (
             <span className="hint--err" role="alert">
-              {error}
+              {[error, restartError].filter(Boolean).join(' ')}
             </span>
           ) : (
             t('setup.adminNote')
@@ -108,7 +115,7 @@ export function SetupView({
           title={t('setup.accessibility')}
           why={t('setup.accessibilityWhy')}
           busy={requesting === 'accessibility'}
-          disabled={requesting !== null}
+          disabled={busy}
           requested={requested.accessibility === true}
           onRequest={() => void request('accessibility', api.requestAccessibility)}
         />
@@ -117,11 +124,13 @@ export function SetupView({
           title={t('setup.inputMonitoring')}
           why={t('setup.inputMonitoringWhy')}
           busy={requesting === 'inputMonitoring'}
-          disabled={requesting !== null}
+          disabled={busy}
           requested={requested.inputMonitoring === true}
           onRequest={() => void request('inputMonitoring', api.requestInputMonitoring)}
         />
       </Group>
+
+      {hasRequested && !allGranted && <p className="hint">{t('setup.requestedHint')}</p>}
 
       {allGranted && (
         <>
@@ -135,12 +144,22 @@ export function SetupView({
       )}
 
       <div className="setup__footer">
+        {hasRequested && (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={busy || settings === null}
+            onClick={() => void restart()}
+          >
+            {t(restarting ? 'app.restarting' : 'app.restart')}
+          </button>
+        )}
         {allGranted ? (
-          <button type="button" className="btn btn--primary" onClick={onDone}>
+          <button type="button" className="btn btn--primary" disabled={busy} onClick={onDone}>
             {t('setup.done')}
           </button>
         ) : (
-          <button type="button" className="btn btn--ghost" onClick={onDismiss}>
+          <button type="button" className="btn btn--ghost" disabled={busy} onClick={onDismiss}>
             {t('setup.later')}
           </button>
         )}

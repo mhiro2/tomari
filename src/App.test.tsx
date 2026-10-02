@@ -736,19 +736,48 @@ describe('App sidebar and page persistence', () => {
     expect(screen.getByRole('tab', { name: 'Shortcuts' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('keeps a partial-apply warning visible outside General', async () => {
-    mockCommands({ save_settings: { applyWarnings: ['launchAtLogin'] } });
+  it('keeps concrete feature failures visible in every section and opens diagnostics directly', async () => {
+    mockCommands({
+      save_settings: { applyWarnings: ['launchAtLogin'] },
+      get_diagnostics: SHORTCUT_DIAGNOSTICS,
+    });
     render(<App />);
     await screen.findByRole('heading', { name: 'Windows', level: 1 });
 
     fireEvent.click(nav('General'));
     fireEvent.click(await screen.findByRole('switch', { name: 'Launch at login' }));
-    expect(await screen.findByText('Saved, but not fully applied')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Tomari could not change automatic startup/),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/Tomari could not change automatic startup/)).toHaveLength(1);
 
     fireEvent.click(nav('Windows'));
-    expect(await screen.findByText(/macOS could not apply part/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
-    expect(await screen.findByRole('heading', { name: 'General', level: 1 })).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Tomari could not change automatic startup/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Diagnostics' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Diagnostics', level: 1 }),
+    ).toBeInTheDocument();
+  });
+
+  it('takes an input failure with missing access directly to permission setup', async () => {
+    mockCommands({
+      setup_status: { ...ALL_GRANTED, accessibility: false },
+      get_apply_warnings: { warnings: ['keyboardTap', 'capsLockRemap'], unprobed: [] },
+    });
+    render(<App />);
+
+    expect(await screen.findByText(/Keyboard customization is not running/)).toBeInTheDocument();
+    expect(screen.getByText(/Caps Lock assignment is unavailable/)).toBeInTheDocument();
+    const action = screen.getByRole('button', { name: 'Open Permission Settings' });
+    expect(action).toHaveClass('btn--primary');
+    expect(screen.queryByRole('button', { name: 'Restart Tomari' })).not.toBeInTheDocument();
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Open System Settings for Accessibility' }),
+    ).toBeInTheDocument();
   });
 
   it('keeps configuration warnings in the shell and moves focus to Keyboard details', async () => {
