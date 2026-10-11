@@ -14,20 +14,13 @@ import { DisplayView } from './views/DisplayView';
 import { GeneralView } from './views/GeneralView';
 import { HealthView, type HealthDestination } from './views/HealthView';
 import { KeyboardView } from './views/KeyboardView';
-import { MenuBarView } from './views/MenuBarView';
 import { SessionView } from './views/SessionView';
 import { SetupView, type SetupPermissions } from './views/SetupView';
 import { WindowView } from './views/WindowView';
 
 type Section = SectionName;
 
-const TOOL_SECTIONS = [
-  'window',
-  'display',
-  'keyboard',
-  'menubar',
-  'session',
-] as const satisfies Section[];
+const TOOL_SECTIONS = ['window', 'display', 'keyboard', 'session'] as const satisfies Section[];
 const APP_SECTIONS = ['general', 'health'] as const satisfies Section[];
 const SECTIONS = [...TOOL_SECTIONS, ...APP_SECTIONS] as const;
 const LAST_SECTION_KEY = 'tomari.settings.lastSection';
@@ -663,13 +656,6 @@ function SelectedView({
       <WindowView
         onOpenKeyboard={onOpenKeyboard}
         initialTab={healthDestination?.section === 'window' ? healthDestination.tab : undefined}
-      />
-    );
-  }
-  if (section === 'menubar') {
-    return (
-      <MenuBarView
-        initialTab={healthDestination?.section === 'menubar' ? healthDestination.tab : undefined}
       />
     );
   }

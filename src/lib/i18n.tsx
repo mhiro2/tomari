@@ -123,7 +123,7 @@ const en = {
   // the tray entry and the switch inside the section.
   'app.nav.keyboard': 'Keyboard',
   'app.nav.window': 'Windows',
-  'app.nav.menubar': 'Menu Bar',
+
   'app.nav.session': 'Prevent Sleep',
   'app.nav.general': 'General',
   'app.nav.health': 'Diagnostics',
@@ -504,60 +504,10 @@ const en = {
   'window.enableDragToMove': 'Enable Drag to Move & Resize',
   'window.dragToMoveHint': 'Hold ⌃⌥ and drag to move. Add ⌘ to resize.',
 
-  'menubar.title': 'Menu Bar',
-  'menubar.pageDescription':
-    'Choose which icons stay visible and how the hidden area opens and closes.',
-  'menubar.tabsLabel': 'Menu bar settings',
-  'menubar.tab.items': 'Items',
-  'menubar.tab.behavior': 'Behavior',
-  'menubar.diagramLabel': 'Current menu bar arrangement',
-  'menubar.arrangeInstruction': 'Use the buttons below to move items across Tomari’s divider.',
-  'menubar.offNote': 'Menu bar tidying is off — Tomari adds no divider to your menu bar.',
-  'menubar.unsupportedOs':
-    'macOS 27 no longer lets an app push status icons off the menu bar, so menu bar ' +
-    'tidying is unavailable. When your icons no longer fit, use the expand button ' +
-    'macOS shows beside them.',
-  'menubar.enable': 'Turn on menu bar tidying',
-  'menubar.showToggle': 'Show hidden icons',
-  'menubar.showDesc': 'Also from the ‹ item, the tray menu, or a shortcut.',
-  'menubar.iconsHidden': 'Hidden icons are tucked away',
-  'menubar.iconsVisible': 'Hidden icons are visible now',
-  'menubar.showAction': 'Show icons',
-  'menubar.hideAction': 'Hide again',
+  'app.nav.menubar': 'Menu Bar',
   'menubar.autoCollapse': 'Collapse automatically',
   'menubar.autoCollapseNever': 'Never',
   'menubar.autoCollapseSecs': 'After {secs} seconds',
-  'menubar.behaviorSection': 'Open and close',
-  'menubar.arrangeSection': 'Choosing what to hide',
-  'menubar.arrangeBody':
-    'Hold ⌘ and drag your menu bar icons so the ones you want tucked away sit left of the ≡ divider.',
-  'menubar.inventoryLoading': 'Reading menu bar items…',
-  'menubar.inventoryEmpty': 'No items detected in this section.',
-  'menubar.inventoryError': 'Could not read the menu bar. Try refreshing after expanding it.',
-  'menubar.inventoryUnsupported': 'Menu bar inspection is available on macOS.',
-  'menubar.inventoryDividerMissing':
-    'The divider is not available yet. Turn menu bar tidying off and on, then refresh.',
-  'menubar.inventoryPermission': 'Accessibility access is required to identify menu bar items.',
-  'menubar.grantAccessibility': 'Grant Access…',
-  'menubar.refreshItems': 'Refresh Items',
-  'menubar.hiddenItems': 'Hidden now',
-  'menubar.visibleItems': 'Always shown',
-  'menubar.itemCount': '{count}',
-  'menubar.itemOwner': 'From {owner}',
-  'menubar.zoneHidden': 'hidden',
-  'menubar.zoneVisible': 'always shown',
-  'menubar.moveHide': 'Hide',
-  'menubar.moveShow': 'Always Show',
-  'menubar.moveHideItem': 'Hide {item}',
-  'menubar.moveShowItem': 'Always show {item}',
-  'menubar.moving': 'Moving…',
-  'menubar.movingItem': 'Moving {item}…',
-  'menubar.moveStale':
-    'The menu bar changed before Tomari could move {item}. The list has been refreshed; try again.',
-  'menubar.moveFailed': 'Tomari could not move {item}.',
-  'menubar.moveManualFallback':
-    'Hold ⌘ and drag it across the divider in the real menu bar instead.',
-
   'settings.general': 'General',
   'settings.pageDescription':
     'Choose when Tomari starts, where it appears, and whether other apps may control it.',
@@ -762,15 +712,7 @@ const en = {
     '{invalid} saved shortcuts could not be loaded. Open Shortcuts to review them.',
   'health.shortcutsConflict':
     'Some shortcuts could not be registered. Another app may be using the same keys; {registered} are active.',
-  'health.menuBar': 'Menu Bar organization',
-  'health.menuBarOff': 'Menu Bar organization is off.',
-  'health.menuBarReady': 'Accessibility is granted and the Menu Bar divider is in place.',
-  'health.menuBarUnsupported':
-    'Menu Bar organization is not supported in this environment, so it stays off.',
-  'health.menuBarPermissionMissing':
-    'Accessibility permission is required to organize Menu Bar items. Open Setup to grant it.',
-  'health.menuBarDividerMissing':
-    'Tomari cannot find its Menu Bar divider. Open Menu Bar Settings to restore it.',
+
   'health.keepAwake': 'Prevent Sleep',
   'health.keepAwake.off': 'Prevent Sleep is off.',
   'health.keepAwake.on': 'Prevent Sleep is on and your Mac will stay awake.',
@@ -798,7 +740,7 @@ const en = {
   'health.action.modifiers': 'Open Modifier Keys',
   'health.action.windowMouse': 'Open Mouse Settings',
   'health.action.shortcuts': 'Open Shortcuts',
-  'health.action.menuBar': 'Open Menu Bar Settings',
+
   'health.action.keepAwake': 'Open Prevent Sleep',
   'health.supportBundle': 'Support bundle',
   'health.supportBundleDescription':
@@ -927,7 +869,7 @@ const ja: Record<MessageKey, string> = {
 
   'app.nav.keyboard': 'キーボード',
   'app.nav.window': 'ウィンドウ',
-  'app.nav.menubar': 'メニューバー',
+
   'app.nav.session': 'スリープ防止',
   'app.nav.general': '一般',
   'app.nav.health': '診断',
@@ -1309,60 +1251,10 @@ const ja: Record<MessageKey, string> = {
   'window.enableDragToMove': 'ドラッグで移動・リサイズを有効化',
   'window.dragToMoveHint': '⌃⌥ を押しながらドラッグして移動します。⌘ を加えるとリサイズします。',
 
-  'menubar.title': 'メニューバー',
-  'menubar.pageDescription': '表示する項目と、隠す領域の開閉方法を設定します。',
-  'menubar.tabsLabel': 'メニューバー設定',
-  'menubar.tab.items': '項目',
-  'menubar.tab.behavior': '動作',
-  'menubar.diagramLabel': '現在のメニューバー配置',
-  'menubar.arrangeInstruction': '下のボタンで、項目を Tomari の区切りの反対側へ移動します。',
-  'menubar.offNote': 'メニューバー整理はオフです。区切りは表示されません。',
-  'menubar.unsupportedOs':
-    'macOS 27 では、アプリがステータスアイコンをメニューバーの外へ押し出せなくなりました。' +
-    'このためメニューバー整理は使えません。アイコンが収まりきらないときは、' +
-    'macOS がアイコンの横に出す展開ボタンを使ってください。',
-  'menubar.enable': 'メニューバー整理を有効化',
-  'menubar.showToggle': '隠したアイコンを表示',
-  'menubar.showDesc': 'メニューバーの ‹、トレイ、ショートカットからも操作できます。',
-  'menubar.iconsHidden': '隠したアイコンは折りたたまれています',
-  'menubar.iconsVisible': '隠したアイコンを表示しています',
-  'menubar.showAction': 'アイコンを表示',
-  'menubar.hideAction': 'もう一度隠す',
+  'app.nav.menubar': 'メニューバー',
   'menubar.autoCollapse': '自動で折りたたむ',
   'menubar.autoCollapseNever': 'しない',
   'menubar.autoCollapseSecs': '{secs} 秒後',
-  'menubar.behaviorSection': '開閉のしかた',
-  'menubar.arrangeSection': '隠すものを決める',
-  'menubar.arrangeBody':
-    '⌘ を押しながらメニューバーのアイコンをドラッグして、隠したいものを ≡ より左に並べます。',
-  'menubar.inventoryLoading': 'メニューバー項目を読み取っています…',
-  'menubar.inventoryEmpty': 'この領域に項目は検出されませんでした。',
-  'menubar.inventoryError':
-    'メニューバーを読み取れませんでした。展開後にもう一度更新してください。',
-  'menubar.inventoryUnsupported': 'メニューバーの読み取りは macOS で利用できます。',
-  'menubar.inventoryDividerMissing':
-    '区切りを取得できません。メニューバー整理をオフにしてから再度オンにし、更新してください。',
-  'menubar.inventoryPermission': 'メニューバー項目の特定にはアクセシビリティ権限が必要です。',
-  'menubar.grantAccessibility': 'アクセスを許可…',
-  'menubar.refreshItems': '項目を更新',
-  'menubar.hiddenItems': '現在隠れる項目',
-  'menubar.visibleItems': '常に表示する項目',
-  'menubar.itemCount': '{count}',
-  'menubar.itemOwner': '{owner} から',
-  'menubar.zoneHidden': '隠れる',
-  'menubar.zoneVisible': '常に表示',
-  'menubar.moveHide': '隠す',
-  'menubar.moveShow': '常に表示',
-  'menubar.moveHideItem': '{item} を隠す',
-  'menubar.moveShowItem': '{item} を常に表示',
-  'menubar.moving': '移動中…',
-  'menubar.movingItem': '{item} を移動中…',
-  'menubar.moveStale':
-    '{item} の移動中にメニューバーが変わりました。一覧を更新したので、もう一度お試しください。',
-  'menubar.moveFailed': '{item} を移動できませんでした。',
-  'menubar.moveManualFallback':
-    '代わりに、実際のメニューバーで ⌘ を押しながら区切りの反対側へドラッグしてください。',
-
   'settings.general': '一般',
   'settings.pageDescription':
     'Tomari をいつ起動するか、どこに表示するか、ほかのアプリからの操作を許可するかを選びます。',
@@ -1568,15 +1460,7 @@ const ja: Record<MessageKey, string> = {
     '保存済みショートカットのうち {invalid} 件を読み込めませんでした。ショートカット設定で確認してください。',
   'health.shortcutsConflict':
     '一部のショートカットを登録できませんでした。他のアプリとキーが競合している可能性があります（{registered} 件は有効）。',
-  'health.menuBar': 'メニューバーの整理',
-  'health.menuBarOff': 'メニューバーの整理はオフです。',
-  'health.menuBarReady': 'アクセシビリティは許可され、メニューバーの区切りも配置されています。',
-  'health.menuBarUnsupported':
-    'この環境ではメニューバーの整理機能を利用できないため、オフのままです。',
-  'health.menuBarPermissionMissing':
-    'メニューバーを整理するにはアクセシビリティ権限が必要です。セットアップから許可してください。',
-  'health.menuBarDividerMissing':
-    'Tomari のメニューバー区切りを確認できません。メニューバー設定から復元してください。',
+
   'health.keepAwake': 'スリープ防止',
   'health.keepAwake.off': 'スリープ防止はオフです。',
   'health.keepAwake.on': 'スリープ防止はオンで、Mac はスリープしません。',
@@ -1605,7 +1489,7 @@ const ja: Record<MessageKey, string> = {
   'health.action.modifiers': '修飾キー設定を開く',
   'health.action.windowMouse': 'マウス設定を開く',
   'health.action.shortcuts': 'ショートカットを開く',
-  'health.action.menuBar': 'メニューバー設定を開く',
+
   'health.action.keepAwake': 'スリープ防止を開く',
   'health.supportBundle': 'サポートバンドル',
   'health.supportBundleDescription':

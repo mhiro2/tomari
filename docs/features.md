@@ -197,10 +197,9 @@ Tomari's own settings window.
 ## Menu bar tidying
 
 Menu bar tidying is unavailable on the supported macOS 27+ baseline. The
-previous divider mechanism cannot hide status icons there. The Menu Bar page
-shows an explanation, Diagnostics reports the feature as unsupported, and no
-divider or handle is created. Tomari leaves the system's overflow control in
-charge.
+previous divider mechanism cannot hide status icons there. The Menu Bar settings
+page and its Diagnostics row have been removed, and no divider or handle is
+created. Tomari leaves the system's overflow control in charge.
 
 Keyboard settings do not offer the menu bar action. A previously saved shortcut
 for that action remains inactive and does not reserve its keys. Other menu bar

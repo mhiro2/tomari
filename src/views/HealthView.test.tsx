@@ -107,8 +107,8 @@ describe('HealthView', () => {
     expect(await screen.findByText('No health issues detected')).toBeInTheDocument();
     expect(screen.getByText('Tomari 1.2.3 · aarch64 · checked just now')).toBeInTheDocument();
     // Summary dot plus one per row: permissions, three taps, Caps Lock,
-    // shortcuts, Menu Bar, Prevent Sleep, database, updater.
-    expect(document.querySelectorAll('.health-dot')).toHaveLength(11);
+    // shortcuts, Prevent Sleep, database, updater.
+    expect(document.querySelectorAll('.health-dot')).toHaveLength(10);
 
     const keyboard = row('Keyboard monitoring');
     expect(within(keyboard).getByText('Ready')).toBeInTheDocument();
@@ -237,7 +237,7 @@ describe('HealthView', () => {
     expect(screen.queryByText(/process remains/)).not.toBeInTheDocument();
   });
 
-  it('reports an unsupported menu bar as unsupported rather than merely off', async () => {
+  it('omits the removed menu bar feature from diagnostics', async () => {
     mockInvoke.mockImplementation((command) =>
       command === 'get_diagnostics'
         ? Promise.resolve({
@@ -248,12 +248,11 @@ describe('HealthView', () => {
     );
     renderView();
 
+    expect(await screen.findByText('No health issues detected')).toBeInTheDocument();
+    expect(screen.queryByText('Menu Bar organization')).not.toBeInTheDocument();
     expect(
-      await screen.findByText(
-        'Menu Bar organization is not supported in this environment, so it stays off.',
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByText('Menu Bar organization is off.')).not.toBeInTheDocument();
+      screen.queryByRole('button', { name: 'Open Menu Bar Settings' }),
+    ).not.toBeInTheDocument();
   });
 
   it('explains an outdated database schema instead of describing it as healthy', async () => {

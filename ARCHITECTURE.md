@@ -877,7 +877,7 @@ and applies none of them.
   did not apply. The recovery interlock mounts neither warning channel until
   settings are trustworthy.
 - **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
-  `WindowView` / `KeyboardView` / `MenuBarView` / `SessionView` /
+  `WindowView` / `KeyboardView` / `SessionView` /
   `GeneralView` directly; there is no Overview route. Each detail screen pairs
   a one-sentence purpose with explicit state. The master control is a
   `FeatureSwitch` row placed first in the content column (not in the page
@@ -891,8 +891,8 @@ and applies none of them.
   keeps the configuration visible but disables interaction. *Prevent Sleep*
   deliberately does not — its auto-off conditions stay editable while off so
   they can be set before turning it on. `WindowView` is segmented into Saved
-  Positions / Shortcuts / Mouse, `KeyboardView` into Modifier Keys / Shortcuts,
-  and `MenuBarView` into Items / Behavior. `FeaturePageHeader`, `FeatureSwitch`,
+  Positions / Shortcuts / Mouse and `KeyboardView` into Modifier Keys / Shortcuts.
+  `FeaturePageHeader`, `FeatureSwitch`,
   `SegmentedPageNav`, `SettingsList`, `SettingsRow`, and `PermissionStatus`
   provide the shared presentation vocabulary instead of treating all content
   as generic cards. Missing permissions appear once in the sidebar footer;
@@ -1142,8 +1142,8 @@ workers. It otherwise releases everything before the process exits. The pure
 
 This mechanism is unavailable on the supported macOS 27+ baseline. The backend
 availability gate prevents status-item creation, inventory scans, movement,
-and shortcut registration for this feature; the UI and Diagnostics report it
-as unsupported. The implementation below documents the withdrawn mechanism,
+and shortcut registration for this feature; the settings page, sidebar
+destination, and Diagnostics row have been removed. The implementation below documents the withdrawn mechanism,
 not a supported workflow. No macOS 26 compatibility target is maintained.
 
 Gather the status items you rarely look at behind a divider and push them off

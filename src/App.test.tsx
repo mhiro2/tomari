@@ -751,13 +751,23 @@ describe('App sidebar and page persistence', () => {
       within(tools)
         .getAllByRole('button')
         .map((button) => button.textContent),
-    ).toEqual(['Windows', 'Displays', 'Keyboard', 'Menu Bar', 'Prevent Sleep']);
+    ).toEqual(['Windows', 'Displays', 'Keyboard', 'Prevent Sleep']);
     expect(
       within(app)
         .getAllByRole('button')
         .map((button) => button.textContent),
     ).toEqual(['General', 'Diagnostics']);
     expect(within(sidebar()).queryByRole('button', { name: 'Home' })).not.toBeInTheDocument();
+  });
+
+  it('opens Windows when the saved destination was the removed Menu Bar page', async () => {
+    window.localStorage.setItem(LAST_SECTION_KEY, 'menubar');
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
+    expect(within(sidebar()).queryByRole('button', { name: 'Menu Bar' })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(LAST_SECTION_KEY)).toBe('window');
+    expect(mockInvoke).not.toHaveBeenCalledWith('list_menu_bar_items');
   });
 
   it('does not add feature state to a sidebar destination name', async () => {

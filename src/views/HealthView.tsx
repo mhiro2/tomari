@@ -11,7 +11,6 @@ type HealthTone = 'ready' | 'attention' | 'pending' | 'inactive';
 export type HealthDestination =
   | { section: 'keyboard'; tab: 'modifiers' | 'shortcuts' }
   | { section: 'window'; tab: 'mouse' }
-  | { section: 'menubar'; tab: 'items' }
   | { section: 'session' };
 
 type HealthAction = {
@@ -258,7 +257,6 @@ function systemTrustItems(
   navigation: Navigation,
 ): HealthItem[] {
   return [
-    menuBarItem(snapshot, t, navigation),
     keepAwakeItem(snapshot, t, navigation),
     databaseItem(snapshot, t),
     updaterItem(snapshot, t),
@@ -405,48 +403,6 @@ function shortcutsItem(
         ? t('health.shortcutsRegisteredOne')
         : t('health.shortcutsRegistered', { registered: registeredCount }),
   };
-}
-
-function menuBarItem(
-  snapshot: DiagnosticsSnapshot,
-  t: Translator,
-  { onNavigate, onOpenPermissions }: Navigation,
-): HealthItem {
-  const { enabled, supported, permissionGranted, dividerAvailable } = snapshot.menuBar;
-  const id = 'menuBar';
-  const title = t('health.menuBar');
-  // Unsupported outranks off: the switch reads off there precisely because the
-  // environment withdrew the mechanism, and "off" alone would look like a
-  // setting the user could simply turn back on.
-  if (!supported) {
-    return { id, title, tone: 'inactive', description: t('health.menuBarUnsupported') };
-  }
-  if (!enabled) {
-    return { id, title, tone: 'inactive', description: t('health.menuBarOff') };
-  }
-  if (!permissionGranted) {
-    return {
-      id,
-      title,
-      tone: 'attention',
-      description: t('health.menuBarPermissionMissing'),
-      action: makeAction(t('health.action.permissions'), onOpenPermissions),
-    };
-  }
-  if (!dividerAvailable) {
-    return {
-      id,
-      title,
-      tone: 'attention',
-      description: t('health.menuBarDividerMissing'),
-      action: destinationAction(
-        t('health.action.menuBar'),
-        { section: 'menubar', tab: 'items' },
-        onNavigate,
-      ),
-    };
-  }
-  return { id, title, tone: 'ready', description: t('health.menuBarReady') };
 }
 
 function keepAwakeItem(

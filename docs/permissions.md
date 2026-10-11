@@ -15,7 +15,7 @@ or disabling navigation.
 Outside that automatic setup flow, permission health is kept in one place: the
 settings sidebar footer. It reads **Permissions: Ready** when both grants are
 present. If either is missing it becomes **Needs attention**; selecting it
-reopens Setup. Individual Windows, Keyboard, and Menu Bar pages do not repeat
+reopens Setup. Individual Windows and Keyboard pages do not repeat
 permission banners. Their settings remain visible, and the backend still
 reports a permission error if an action requiring a missing grant is attempted.
 
