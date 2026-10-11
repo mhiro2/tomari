@@ -161,7 +161,14 @@ user put on the Caps Lock source itself (Caps → Escape, say): taking that slot
 over has to replace it, and `UserKeyMapping`
 records no provenance, so a live Caps Lock → F18 is equally plausibly the user's
 own. Ownership is therefore explicit, in a `capsmap.claim` record in the data
-directory. Nothing commits the record and the OS property together, so the
+directory. It is a JSON object containing the boot session and a map from HID
+service registry IDs to claim strings. Each keyboard is discovered through
+`hidutil list --ndjson`, selected by its device attributes, and checked against
+its registry ID before writes. Ambiguous matches are rejected. Different
+keyboards retain their own complete mapping and displaced Caps Lock destination.
+Records from a previous boot or disconnected service are discarded because
+those service instances and their mappings no longer exist.
+Nothing commits the record and the OS property together, so the
 record separates intending to take the slot from having taken it: absent (Tomari
 holds nothing — a live Caps Lock → F18 is the user's and is left alone),
 `pending [usage] plan src:dst ...` (write-ahead: the OS write is unconfirmed,

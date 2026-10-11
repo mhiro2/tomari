@@ -21,9 +21,9 @@
 //! understand is an error, never a partial list, so a format change or a
 //! truncated read cannot silently drop the mappings it failed to read.
 //! Reads and writes both match keyboard-capable services by their usage pairs.
-//! Every matched keyboard must have the same mapping; differing per-keyboard
-//! mappings are refused, including a newly connected keyboard whose mappings
-//! differ. No service is dropped from a read just to make a rewrite possible.
+//! Each keyboard is reconciled independently with its own boot-scoped claim.
+//! A targeted read must resolve to exactly the expected service before any
+//! write; ambiguous or disconnected services are left untouched.
 //!
 //! ## Owning the Caps Lock source
 //!
@@ -90,6 +90,7 @@
 //! reboot or removal — so we reconcile it on every tap (re)start and clear it on
 //! quit.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -116,12 +117,9 @@ const HIDUTIL_DEADLINE: Duration = Duration::from_secs(5);
 /// Run a keyboard-scoped property operation under [`HIDUTIL_DEADLINE`], returning its stdout
 /// on a clean exit. A timeout, non-zero exit or failure to start is an `Err`
 /// like any other, so every caller's fail-closed handling covers it.
-fn hidutil(operation: &str, value: &str) -> Result<Vec<u8>, String> {
-    let outcome = crate::childproc::output_with_deadline(
-        &mut hidutil_command(operation, value),
-        HIDUTIL_DEADLINE,
-    )
-    .map_err(|e| format!("failed to run hidutil: {e}"))?;
+fn run_hidutil(command: &mut Command) -> Result<Vec<u8>, String> {
+    let outcome = crate::childproc::output_with_deadline(command, HIDUTIL_DEADLINE)
+        .map_err(|e| format!("failed to run hidutil: {e}"))?;
     match outcome {
         crate::childproc::Outcome::Exited {
             status,
@@ -144,31 +142,20 @@ fn hidutil(operation: &str, value: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn hidutil_command(operation: &str, value: &str) -> Command {
+fn hidutil_command(matching: &str, operation: &str, value: &str) -> Command {
     // DeviceUsage matches any advertised usage pair, including a keyboard
     // interface on a composite device whose primary usage is something else.
     let mut command = Command::new("/usr/bin/hidutil");
-    command.args([
-        "property",
-        "--matching",
-        r#"{"DeviceUsagePage":1,"DeviceUsage":6}"#,
-        operation,
-        value,
-    ]);
+    command.args(["property", "--matching", matching, operation, value]);
     command
 }
 
-fn set_mapping(json: &str) -> Result<(), String> {
-    hidutil("--set", json).map(|_| ())
-}
+const KEYBOARD_MATCH: &str = r#"{"DeviceUsagePage":1,"DeviceUsage":6}"#;
 
-/// Read the current `UserKeyMapping` entries as `(src, dst)` usage pairs. `Err`
-/// whenever the list cannot be established *exactly* — `hidutil` unavailable, a
-/// non-zero exit, or output this parser does not fully understand — because
-/// every write replaces the whole property from what was read here. An
-/// approximate read would silently drop the entries it failed to understand.
-fn read_entries() -> Result<Vec<(u64, u64)>, String> {
-    let stdout = hidutil("--get", "UserKeyMapping")?;
+type ServiceMappings = BTreeMap<u64, Vec<(u64, u64)>>;
+
+fn read_services(matching: &str) -> Result<ServiceMappings, String> {
+    let stdout = run_hidutil(&mut hidutil_command(matching, "--get", "UserKeyMapping"))?;
     parse_entries(&String::from_utf8_lossy(&stdout))
 }
 
@@ -181,10 +168,10 @@ fn read_entries() -> Result<Vec<(u64, u64)>, String> {
 /// read would otherwise delete mappings that have nothing to do with Tomari.
 ///
 /// macOS 27 prints a `RegistryID Key Value` table with one property value per
-/// matched keyboard service. Each value is an old-style property list. A write
-/// can preserve these mappings only when every service reports the same list, so
-/// differing per-service mappings are rejected rather than flattened.
-fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
+/// matched keyboard service. Each value is an old-style property list. Keep
+/// service IDs and their full lists separate so one keyboard never supplies
+/// the replacement mapping for another.
+fn parse_entries(text: &str) -> Result<ServiceMappings, String> {
     let (header, mut rest) = text
         .trim()
         .split_once('\n')
@@ -193,7 +180,7 @@ fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
         return Err(malformed("unrecognized HID service table header"));
     }
     let mut registry_ids = std::collections::HashSet::new();
-    let mut common_entries = None;
+    let mut services = BTreeMap::new();
     while !rest.trim().is_empty() {
         let (registry_id, after_id) = rest
             .trim_start()
@@ -220,13 +207,7 @@ fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
             .ok_or_else(|| malformed("unterminated HID service property value"))?;
         let mut entries = parse_mapping(&format!("{value})"))?;
         entries.sort_unstable();
-        if let Some(common) = &common_entries {
-            if *common != entries {
-                return Err(malformed("HID services have different key mappings"));
-            }
-        } else {
-            common_entries = Some(entries);
-        }
+        services.insert(registry_id, entries);
         // The property itself may span multiple lines; a new service must
         // start on a new line, never after stray text beside a closing value.
         let (line_end, following) = after_value.split_once('\n').unwrap_or((after_value, ""));
@@ -235,7 +216,10 @@ fn parse_entries(text: &str) -> Result<Vec<(u64, u64)>, String> {
         }
         rest = following;
     }
-    common_entries.ok_or_else(|| malformed("no HID services were reported"))
+    if services.is_empty() {
+        return Err(malformed("no HID services were reported"));
+    }
+    Ok(services)
 }
 
 /// Parse one complete property value, including every source and destination.
@@ -491,40 +475,72 @@ fn claim_path() -> Result<PathBuf, String> {
         .map_err(|e| format!("could not resolve the data directory: {e}"))
 }
 
-/// The recorded claim. A missing record is [`Claim::Unowned`]; every *other*
-/// failure (permissions, I/O, corrupt contents) is an error, so a transition
-/// that depends on knowing what we displaced aborts rather than guessing.
-fn read_claim() -> Result<Claim, String> {
-    let path = claim_path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => parse_claim(&text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Claim::Unowned),
-        Err(e) => Err(format!("could not read the caps-lock claim record: {e}")),
-    }
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Claims {
+    boot: String,
+    services: BTreeMap<u64, String>,
 }
 
-/// Record `claim`, replacing whatever was there. Written via a temporary file
-/// and an atomic rename, so a crash mid-write cannot leave a torn record.
-fn write_claim(claim: Claim) -> Result<(), String> {
-    let Some(body) = serialize_claim(&claim) else {
-        return clear_claim();
+fn boot_session() -> Result<String, String> {
+    static BOOT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    BOOT.get_or_init(|| {
+        let mut buffer = [0_u8; 128];
+        let mut size = buffer.len();
+        // SAFETY: the buffer and length are writable and the key is NUL-terminated.
+        let result = unsafe {
+            libc::sysctlbyname(
+                c"kern.bootsessionuuid".as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result != 0 || size == 0 || size > buffer.len() {
+            return Err("could not identify the current boot session".into());
+        }
+        let boot = std::str::from_utf8(&buffer[..size])
+            .map_err(|e| e.to_string())?
+            .trim_end_matches('\0')
+            .to_owned();
+        if boot.is_empty() {
+            return Err("empty boot session".into());
+        }
+        Ok(boot)
+    })
+    .clone()
+}
+
+fn read_claims() -> Result<Claims, String> {
+    let boot = boot_session()?;
+    let claims: Claims = match std::fs::read_to_string(claim_path()?) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("could not read Caps Lock claims: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Claims::default(),
+        Err(e) => return Err(format!("could not read Caps Lock claims: {e}")),
     };
+    // Registry IDs and HID mappings belong to one boot; never reuse ownership
+    // after reboot even when a new service happens to receive the same ID.
+    if claims.boot != boot {
+        return Ok(Claims {
+            boot,
+            services: BTreeMap::new(),
+        });
+    }
+    for value in claims.services.values() {
+        parse_claim(value)?;
+    }
+    Ok(claims)
+}
+
+fn write_claims(claims: &Claims) -> Result<(), String> {
     let path = claim_path()?;
     let tmp = path.with_extension("claim.tmp");
+    let body = serde_json::to_vec(claims).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, body)
         .and_then(|()| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("could not record the caps-lock claim: {e}"))
-}
-
-/// Drop the record, releasing the claim. A record that is already gone is
-/// success.
-fn clear_claim() -> Result<(), String> {
-    let path = claim_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("could not drop the caps-lock claim record: {e}")),
-    }
+        .map_err(|e| format!("could not record Caps Lock claims: {e}"))
 }
 
 /// The side effects the Caps Lock remap drives, factored behind a trait so
@@ -866,24 +882,116 @@ fn reconcile_with(sys: &impl CapsMapSys, should_manage: bool) -> ReconcileOutcom
 }
 
 /// Production [`CapsMapSys`]: the real `hidutil` calls and on-disk record.
-struct RealSys;
+struct RealSys {
+    registry_id: u64,
+    matching: String,
+}
+
+fn select_service(
+    mut services: ServiceMappings,
+    registry_id: u64,
+) -> Result<Vec<(u64, u64)>, String> {
+    if services.len() != 1 || !services.contains_key(&registry_id) {
+        return Err("keyboard changed or cannot be selected uniquely".into());
+    }
+    Ok(services.remove(&registry_id).expect("checked service"))
+}
 
 impl CapsMapSys for RealSys {
     fn read_entries(&self) -> Result<Vec<(u64, u64)>, String> {
-        read_entries()
+        select_service(read_services(&self.matching)?, self.registry_id)
     }
     fn set_entries(&self, entries: &[(u64, u64)]) -> Result<(), String> {
-        set_mapping(&serialize_mapping(entries))
+        run_hidutil(&mut hidutil_command(
+            &self.matching,
+            "--set",
+            &serialize_mapping(entries),
+        ))
+        .map(|_| ())
     }
     fn read_claim(&self) -> Result<Claim, String> {
-        read_claim()
+        read_claims()?
+            .services
+            .get(&self.registry_id)
+            .map_or(Ok(Claim::Unowned), |value| parse_claim(value))
     }
     fn write_claim(&self, claim: Claim) -> Result<(), String> {
-        write_claim(claim)
+        let mut claims = read_claims()?;
+        if let Some(text) = serialize_claim(&claim) {
+            claims.services.insert(self.registry_id, text);
+        } else {
+            claims.services.remove(&self.registry_id);
+        }
+        write_claims(&claims)
     }
     fn clear_claim(&self) -> Result<(), String> {
-        clear_claim()
+        self.write_claim(Claim::Unowned)
     }
+}
+
+fn parse_keyboards(text: &str) -> Result<Vec<RealSys>, String> {
+    let mut keyboards = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        match value["type"].as_str() {
+            Some("device") => continue,
+            Some("service") => {}
+            _ => return Err("unrecognized HID inventory record".into()),
+        }
+        let registry_id = value["IORegistryEntryID"]
+            .as_u64()
+            .ok_or("missing keyboard registry ID")?;
+        if !ids.insert(registry_id) {
+            return Err("duplicate keyboard service".into());
+        }
+        let mut matching = serde_json::Map::new();
+        matching.insert("DeviceUsagePage".into(), 1.into());
+        matching.insert("DeviceUsage".into(), 6.into());
+        for key in [
+            "VendorID",
+            "ProductID",
+            "LocationID",
+            "PrimaryUsagePage",
+            "PrimaryUsage",
+        ] {
+            let number = value[key]
+                .as_u64()
+                .ok_or_else(|| format!("missing keyboard {key}"))?;
+            matching.insert(key.into(), number.into());
+        }
+        for key in ["Transport", "Product", "SerialNumber"] {
+            if let Some(text) = value[key].as_str() {
+                matching.insert(key.into(), text.into());
+            }
+        }
+        keyboards.push(RealSys {
+            registry_id,
+            matching: serde_json::Value::Object(matching).to_string(),
+        });
+    }
+    Ok(keyboards)
+}
+
+fn keyboards() -> Result<Vec<RealSys>, String> {
+    let mut command = Command::new("/usr/bin/hidutil");
+    command.args(["list", "--ndjson", "--matching", KEYBOARD_MATCH]);
+    let stdout = run_hidutil(&mut command)?;
+    parse_keyboards(&String::from_utf8_lossy(&stdout))
+}
+
+fn reconcile_keyboards(systems: &[impl CapsMapSys], should_manage: bool) -> ReconcileOutcome {
+    let mut outcome = ReconcileOutcome {
+        proxy_active: false,
+        reconciled: true,
+    };
+    for sys in systems {
+        let result = reconcile_with(sys, should_manage);
+        // A successfully mapped keyboard still emits F18 when another fails.
+        outcome.proxy_active |= result.proxy_active;
+        outcome.reconciled &= result.reconciled;
+    }
+    outcome
 }
 
 /// Serializes every Caps Lock reconcile. Each one is a read-modify-write across
@@ -936,10 +1044,20 @@ pub fn live_status() -> ReconcileOutcome {
 /// private payload is deliberately collapsed to its state before serialization.
 pub fn diagnostics() -> CapsDiagnostics {
     let _serialized = RECONCILE.lock_safe();
-    let ownership = match read_claim() {
-        Ok(Claim::Unowned) => CapsOwnership::Unowned,
-        Ok(Claim::Pending(_)) => CapsOwnership::Pending,
-        Ok(Claim::Held(_)) => CapsOwnership::Held,
+    let ownership = match read_claims() {
+        Ok(claims) => {
+            let pending = claims
+                .services
+                .values()
+                .any(|text| matches!(parse_claim(text), Ok(Claim::Pending(_))));
+            if pending {
+                CapsOwnership::Pending
+            } else if claims.services.is_empty() {
+                CapsOwnership::Unowned
+            } else {
+                CapsOwnership::Held
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "could not read Caps Lock ownership for diagnostics");
             CapsOwnership::Unknown
@@ -973,7 +1091,32 @@ pub fn matches(should_manage: bool) -> bool {
 #[must_use]
 pub fn reconcile(should_manage: bool) -> ReconcileOutcome {
     let _serialized = RECONCILE.lock_safe();
-    let outcome = reconcile_with(&RealSys, should_manage);
+    let outcome = match keyboards() {
+        Ok(systems) => {
+            match read_claims().and_then(|mut claims| {
+                claims
+                    .services
+                    .retain(|id, _| systems.iter().any(|sys| sys.registry_id == *id));
+                write_claims(&claims)
+            }) {
+                Ok(()) => reconcile_keyboards(&systems, should_manage),
+                Err(error) => {
+                    tracing::warn!(%error, "could not reconcile Caps Lock ownership records");
+                    ReconcileOutcome {
+                        proxy_active: live_status().proxy_active,
+                        reconciled: false,
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not enumerate keyboards for Caps Lock mapping");
+            ReconcileOutcome {
+                proxy_active: live_status().proxy_active,
+                reconciled: false,
+            }
+        }
+    };
     CAPS_STATUS.store(pack_status(outcome), Ordering::SeqCst);
     outcome
 }
@@ -1124,12 +1267,85 @@ mod tests {
     }
 
     #[test]
+    fn scoped_reads_reject_disconnected_replaced_and_ambiguous_keyboards() {
+        assert!(select_service(BTreeMap::new(), 1).is_err());
+        assert!(select_service(BTreeMap::from([(2, vec![])]), 1).is_err());
+        assert!(select_service(BTreeMap::from([(1, vec![]), (2, vec![])]), 1).is_err());
+        assert_eq!(
+            select_service(BTreeMap::from([(1, vec![(OTHER_SRC, OTHER_DST)])]), 1).unwrap(),
+            vec![(OTHER_SRC, OTHER_DST)]
+        );
+    }
+
+    #[test]
+    #[ignore = "reads the connected macOS keyboards without changing mappings"]
+    fn native_keyboard_discovery_and_scoped_reads() {
+        let systems = keyboards().unwrap();
+        assert!(!systems.is_empty());
+        for system in systems {
+            system.read_entries().unwrap();
+        }
+        assert!(!boot_session().unwrap().is_empty());
+    }
+
+    #[test]
+    fn distinct_keyboards_preserve_and_restore_their_own_mappings() {
+        let first = vec![(CAPS_USAGE, USER_CAPS_DST), (OTHER_SRC, OTHER_DST)];
+        let second = vec![(CAPS_USAGE, OTHER_DST)];
+        let systems = [
+            FakeSys::new(&first),
+            FakeSys::new(&second),
+            FakeSys::new(&[]),
+        ];
+        let outcome = reconcile_keyboards(&systems, true);
+        assert!(outcome.reconciled && outcome.proxy_active);
+        assert_eq!(systems[0].claim(), Claim::Held(Some(USER_CAPS_DST)));
+        assert_eq!(systems[1].claim(), Claim::Held(Some(OTHER_DST)));
+        assert_eq!(systems[2].claim(), Claim::Held(None));
+        assert!(systems[0].entries().contains(&(OTHER_SRC, OTHER_DST)));
+        let outcome = reconcile_keyboards(&systems, false);
+        assert!(outcome.reconciled && !outcome.proxy_active);
+        assert_eq!(
+            systems[0].entries(),
+            vec![(OTHER_SRC, OTHER_DST), (CAPS_USAGE, USER_CAPS_DST)]
+        );
+        assert_eq!(systems[1].entries(), second);
+        assert!(systems[2].entries().is_empty());
+    }
+
+    #[test]
+    fn one_failed_keyboard_does_not_hide_or_undo_another_keyboard() {
+        let systems = [FakeSys::new(&[]).unreadable(), FakeSys::new(&[])];
+        let outcome = reconcile_keyboards(&systems, true);
+        assert!(outcome.proxy_active);
+        assert!(!outcome.reconciled);
+        assert_eq!(systems[1].entries(), vec![(CAPS_USAGE, F18_USAGE)]);
+        assert_eq!(systems[0].claim(), Claim::Unowned);
+    }
+
+    #[test]
+    fn discovery_uses_services_and_requires_complete_identity() {
+        let service = serde_json::json!({"type":"service", "IORegistryEntryID":42, "VendorID":1, "ProductID":2, "LocationID":3, "PrimaryUsagePage":1, "PrimaryUsage":6, "Transport":"USB"});
+        let text = format!("{{\"type\":\"device\"}}\n{service}");
+        let systems = parse_keyboards(&text).unwrap();
+        assert_eq!(systems.len(), 1);
+        assert_eq!(systems[0].registry_id, 42);
+        let matching: serde_json::Value = serde_json::from_str(&systems[0].matching).unwrap();
+        assert_eq!(matching["LocationID"], 3);
+        assert_eq!(matching["DeviceUsage"], 6);
+        assert!(parse_keyboards(&format!("{service}\n{service}")).is_err());
+        assert!(parse_keyboards(r#"{"type":"service","IORegistryEntryID":42}"#).is_err());
+        assert!(parse_keyboards("broken").is_err());
+        assert!(parse_keyboards(r#"{"type":"unknown"}"#).is_err());
+    }
+
+    #[test]
     fn reads_and_writes_share_the_keyboard_usage_scope() {
         for (operation, value) in [
             ("--get", "UserKeyMapping"),
             ("--set", r#"{"UserKeyMapping":[]}"#),
         ] {
-            let command = hidutil_command(operation, value);
+            let command = hidutil_command(KEYBOARD_MATCH, operation, value);
             assert_eq!(command.get_program(), "/usr/bin/hidutil");
             let args: Vec<_> = command
                 .get_args()
@@ -1282,11 +1498,12 @@ mod tests {
                     100000cd6   UserKeyMapping   (null)\n\
                     1000083ab   UserKeyMapping   (null)\n\
                     1000083e0   UserKeyMapping   (null)\n";
-        assert_eq!(parse_entries(text), Ok(vec![]));
+        assert_eq!(parse_entries(text).unwrap().len(), 4);
+        assert!(parse_entries(text).unwrap().values().all(Vec::is_empty));
     }
 
     #[test]
-    fn parse_entries_requires_the_same_complete_mapping_for_each_service() {
+    fn parse_entries_preserves_each_services_complete_mapping() {
         let caps = format!(
             "{{ HIDKeyboardModifierMappingSrc = {CAPS_USAGE}; \
              HIDKeyboardModifierMappingDst = {F18_USAGE}; }}"
@@ -1302,11 +1519,16 @@ mod tests {
         );
         let mut expected = vec![(CAPS_USAGE, F18_USAGE), (OTHER_SRC, OTHER_DST)];
         expected.sort_unstable();
-        assert_eq!(parse_entries(&text), Ok(expected));
+        assert!(
+            parse_entries(&text)
+                .unwrap()
+                .values()
+                .all(|entries| *entries == expected)
+        );
         for value in ["(null)", "()", &format!("({caps})")] {
             assert!(
-                parse_entries(&format!("{text}100000b57   UserKeyMapping   {value}\n")).is_err(),
-                "a divergent service must not be overwritten: {value}"
+                parse_entries(&format!("{text}100000b57   UserKeyMapping   {value}\n")).is_ok(),
+                "a divergent service must be retained separately: {value}"
             );
         }
     }
@@ -1980,7 +2202,11 @@ mod tests {
         parse_entries(&format!(
             "RegistryID  Key                   Value\n100000ba7 UserKeyMapping {text}\n"
         ))
-        .is_ok_and(|e| e.contains(&(CAPS_USAGE, F18_USAGE)))
+        .is_ok_and(|services| {
+            services
+                .values()
+                .any(|entries| entries.contains(&(CAPS_USAGE, F18_USAGE)))
+        })
     }
 
     #[test]
