@@ -25,7 +25,13 @@ const SETTINGS: AppSettings = {
 let warnings: string[];
 const GRANTED_PERMISSIONS = { accessibility: true, inputMonitoring: true };
 
-function Harness({ permissions }: { permissions: typeof GRANTED_PERMISSIONS | null }) {
+function Harness({
+  permissions,
+  section,
+}: {
+  permissions: typeof GRANTED_PERMISSIONS | null;
+  section?: string;
+}) {
   const { settings, update, configurationBusy } = useSettings();
   return (
     <>
@@ -38,6 +44,7 @@ function Harness({ permissions }: { permissions: typeof GRANTED_PERMISSIONS | nu
       </button>
       <output data-testid="busy">{String(configurationBusy)}</output>
       <ApplyWarningPanel
+        section={section}
         permissions={permissions}
         onOpenPermissions={vi.fn()}
         onOpenDiagnostics={vi.fn()}
@@ -49,11 +56,12 @@ function Harness({ permissions }: { permissions: typeof GRANTED_PERMISSIONS | nu
 function renderPanel(
   lang: 'en' | 'ja' = 'en',
   permissions: typeof GRANTED_PERMISSIONS | null = GRANTED_PERMISSIONS,
+  section?: string,
 ) {
   return render(
     <SettingsProvider>
       <I18nProvider lang={lang}>
-        <Harness permissions={permissions} />
+        <Harness permissions={permissions} section={section} />
       </I18nProvider>
     </SettingsProvider>,
   );
@@ -74,6 +82,26 @@ describe('ApplyWarningPanel', () => {
       return Promise.resolve(null);
     });
   });
+
+  it.each([
+    ['keyboard', ['Caps Lock', 'Keyboard customization'], ['Drag to snap', 'launch at login']],
+    ['window', ['Drag to snap'], ['Caps Lock', 'launch at login']],
+    ['general', ['launch at login'], ['Caps Lock', 'Drag to snap']],
+    ['session', [], ['Caps Lock', 'Drag to snap', 'launch at login']],
+    ['health', ['Caps Lock', 'Drag to snap', 'launch at login'], []],
+  ])(
+    'limits warnings to %s and keeps all recovery details in diagnostics',
+    async (section, visible, hidden) => {
+      warnings = ['capsLockRemap', 'keyboardTap', 'dragToSnapTap', 'launchAtLogin'];
+      renderPanel('en', GRANTED_PERMISSIONS, section);
+      await waitFor(() => expect(screen.getByText('Edit')).toBeEnabled());
+      await waitFor(() => {
+        for (const text of visible) expect(screen.getByText(new RegExp(text))).toBeInTheDocument();
+      });
+      for (const text of hidden)
+        expect(screen.queryByText(new RegExp(text))).not.toBeInTheDocument();
+    },
+  );
 
   it('waits for queued autosaves before restarting and blocks duplicate requests', async () => {
     const base = mockInvoke.getMockImplementation();
@@ -165,7 +193,7 @@ describe('ApplyWarningPanel', () => {
   it('localizes concrete failures and restart actions in Japanese', async () => {
     warnings = ['capsLockRemap'];
     renderPanel('ja');
-    expect(await screen.findByText(/Caps Lock の割り当て変更が使えません/)).toBeInTheDocument();
+    expect(await screen.findByText(/Caps Lock の変更を適用できません/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Tomari を再起動' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '診断を開く' })).toBeInTheDocument();
   });

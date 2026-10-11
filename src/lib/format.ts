@@ -155,3 +155,10 @@ export function modifierWithSide(modifier: ModifierKey, side: KeySide, t: Transl
   const glyph = modifierGlyph(modifier);
   return side === 'either' ? glyph : `${sideLabel(side, t)} ${glyph}`;
 }
+
+/** Name the physical key, including sides only where the key has them. */
+export function physicalKeyLabel(modifier: ModifierKey, side: KeySide, t: Translator): string {
+  return modifier === 'capsLock' || modifier === 'function'
+    ? modifierLabel(modifier)
+    : `${sideLabel(side, t)} ${modifierLabel(modifier)}`;
+}

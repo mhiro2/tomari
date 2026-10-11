@@ -207,7 +207,9 @@ function sidebar() {
 }
 
 function nav(name: string) {
-  return within(sidebar()).getByRole('button', { name });
+  return within(sidebar()).getByRole('button', {
+    name,
+  });
 }
 
 describe('App settings recovery', () => {
@@ -838,7 +840,7 @@ describe('App sidebar and page persistence', () => {
     expect(screen.getByRole('tab', { name: 'Shortcuts' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('keeps concrete feature failures visible in every section and opens diagnostics directly', async () => {
+  it('keeps feature failures in their destination and marks Diagnostics', async () => {
     mockCommands({
       save_settings: { applyWarnings: ['launchAtLogin'] },
       get_diagnostics: SHORTCUT_DIAGNOSTICS,
@@ -848,16 +850,12 @@ describe('App sidebar and page persistence', () => {
 
     fireEvent.click(nav('General'));
     fireEvent.click(await screen.findByRole('switch', { name: 'Launch at login' }));
-    expect(
-      await screen.findByText(/Tomari could not change automatic startup/),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText(/Tomari could not change automatic startup/)).toHaveLength(1);
+    expect(await screen.findByText(/Could not change launch at login/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Could not change launch at login/)).toHaveLength(1);
 
     fireEvent.click(nav('Windows'));
-    expect(
-      await screen.findByText(/Tomari could not change automatic startup/),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Open Diagnostics' }));
+    expect(screen.queryByText(/Could not change launch at login/)).not.toBeInTheDocument();
+    fireEvent.click(nav('Diagnostics'));
     expect(
       await screen.findByRole('heading', { name: 'Diagnostics', level: 1 }),
     ).toBeInTheDocument();
@@ -870,8 +868,11 @@ describe('App sidebar and page persistence', () => {
     });
     render(<App />);
 
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+    expect(screen.queryByText(/Keyboard customization is not running/)).not.toBeInTheDocument();
+    fireEvent.click(nav('Keyboard'));
     expect(await screen.findByText(/Keyboard customization is not running/)).toBeInTheDocument();
-    expect(screen.getByText(/Caps Lock assignment is unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Could not apply the Caps Lock mapping/)).toBeInTheDocument();
     const action = screen.getByRole('button', { name: 'Open Permission Settings' });
     expect(action).toHaveClass('btn--primary');
     expect(screen.queryByRole('button', { name: 'Restart Tomari' })).not.toBeInTheDocument();
@@ -882,25 +883,16 @@ describe('App sidebar and page persistence', () => {
     ).toBeInTheDocument();
   });
 
-  it('keeps configuration warnings in the shell and moves focus to Keyboard details', async () => {
+  it('marks affected navigation and opens configuration details from Diagnostics', async () => {
     mockCommands({ get_configuration_warnings: CONFIGURATION_WARNINGS });
     render(<App />);
     await screen.findByRole('heading', { name: 'Windows', level: 1 });
-
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Saved keyboard items need attention (2)',
+    expect(screen.queryByText('Saved keyboard items need attention (2)')).not.toBeInTheDocument();
+    expect(nav('Keyboard')).toHaveAccessibleDescription('Action needed');
+    fireEvent.click(nav('Diagnostics'));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Saved keyboard items need attention (2)' }),
     );
-    expect(
-      screen.getByText(
-        'Invalid saved items were not deleted. Keyboard items without problems continue to work.',
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.click(nav('General'));
-    await screen.findByRole('heading', { name: 'General', level: 1 });
-    expect(screen.getByText('Saved keyboard items need attention (2)')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Review in Keyboard' }));
     const issueHeading = await screen.findByRole('heading', {
       name: 'Some saved keyboard items are not running',
       level: 2,
@@ -922,16 +914,7 @@ describe('App sidebar and page persistence', () => {
     });
     render(<App />);
 
-    expect(
-      await screen.findByText('確認が必要なキーボード項目があります（2 件）'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        '無効な保存済み項目は削除されていません。問題のないキーボード項目は引き続き動作します。',
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'キーボードで確認' }));
+    fireEvent.click(await screen.findByRole('button', { name: /キーボード/ }));
     expect(
       await screen.findByText('通常の文字入力を奪う可能性があるショートカットです。'),
     ).toBeInTheDocument();
@@ -956,7 +939,8 @@ describe('App sidebar and page persistence', () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Review in Keyboard' }));
+    await screen.findByRole('heading', { name: 'Windows', level: 1 });
+    fireEvent.click(nav('Keyboard'));
     const label = await screen.findByText(/^Safe x+…$/u);
     expect(label.textContent).not.toMatch(/[\p{Cc}\p{Cf}]/u);
     expect(Array.from(label.textContent ?? '')).toHaveLength(97);

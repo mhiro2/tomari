@@ -51,7 +51,7 @@ const TEXT_JA: Text = Text {
     undo: "ウィンドウ操作を元に戻す",
     redo: "ウィンドウ操作をやり直す",
     keep_awake: "スリープ防止",
-    reset_dimming: "画面の追加減光を解除",
+    reset_dimming: "すべての画面を元の明るさに戻す",
     display_settings: "ディスプレイ設定…",
     expand_menu_bar: "メニューバーのアイコンを表示",
     open_settings: "設定…",

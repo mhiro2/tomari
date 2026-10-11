@@ -25,3 +25,21 @@ export function applyWarningText(code: string, t: Translator): string {
       return t('settings.applyWarning.generic');
   }
 }
+
+export function warningSection(code: string): 'keyboard' | 'window' | 'general' | 'health' {
+  switch (code) {
+    case 'keyboardTap':
+    case 'globalShortcuts':
+    case 'capsLockRemap':
+    case 'commandImeRules':
+      return 'keyboard';
+    case 'dragToSnapTap':
+    case 'dragToMoveTap':
+      return 'window';
+    case 'launchAtLogin':
+    case 'menuBar':
+      return 'general';
+    default:
+      return 'health';
+  }
+}

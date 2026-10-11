@@ -354,47 +354,13 @@ export function SessionView() {
 
   return (
     <div className="view session-view">
-      <FeaturePageHeader
-        title={t('settings.keepAwakeToggle')}
-        description={t('settings.sessionPageDescription')}
-      />
-
-      <SettingsList label={t('settings.keepAwakeMode')}>
-        <SettingsRow
-          title={t('settings.keepAwakeMode')}
-          description={t(
-            recoveringLidClose && draftOptions.mode === 'idleOnly'
-              ? 'settings.keepAwakeModeRecoveryHint'
-              : draftOptions.mode === 'idleOnly'
-                ? 'settings.keepAwakeIdleHint'
-                : 'settings.keepAwakeLidHint',
-          )}
-          trail={
-            <select
-              className="input"
-              aria-label={t('settings.keepAwakeMode')}
-              value={draftOptions.mode}
-              disabled={modeLocked}
-              onChange={(event) =>
-                saveOptions({ ...draftOptions, mode: event.target.value as KeepAwakeMode })
-              }
-            >
-              <option value="idleOnly">{t('settings.keepAwakeIdle')}</option>
-              <option value="lidClosed">{t('settings.keepAwakeLid')}</option>
-            </select>
-          }
-        />
-      </SettingsList>
+      <FeaturePageHeader title={t('settings.keepAwakeToggle')} />
 
       <FeatureSwitch
-        title={t('settings.keepAwakeAction')}
+        announce
+        title={phaseLabel}
         description={
-          // One atomic live region, so a screen reader hears the whole phase
-          // message (label plus any instruction) as a single announcement.
-          <output className="session-phase" aria-atomic="true">
-            {phaseLabel}
-            {phasePending && usesAdministrator && ` ${t('settings.authorizationPendingHint')}`}
-          </output>
+          phasePending && usesAdministrator && <span>{t('settings.authorizationPendingHint')}</span>
         }
         tone={tone}
         trail={
@@ -482,6 +448,35 @@ export function SessionView() {
         </div>
       )}
 
+      <SettingsList className="session-scope">
+        <SettingsRow
+          title={t('settings.keepAwakeMode')}
+          description={
+            recoveringLidClose && !active
+              ? t('settings.keepAwakeModeRecoveryHint')
+              : active
+                ? t('settings.keepAwakeIdleHint')
+                : draftOptions.mode === 'lidClosed'
+                  ? t('settings.keepAwakeLidHint')
+                  : undefined
+          }
+          trail={
+            <select
+              className="input"
+              aria-label={t('settings.keepAwakeMode')}
+              value={draftOptions.mode}
+              disabled={modeLocked}
+              onChange={(event) =>
+                saveOptions({ ...draftOptions, mode: event.target.value as KeepAwakeMode })
+              }
+            >
+              <option value="idleOnly">{t('settings.keepAwakeIdle')}</option>
+              <option value="lidClosed">{t('settings.keepAwakeLid')}</option>
+            </select>
+          }
+        />
+      </SettingsList>
+
       <SafetySettings
         t={t}
         // Drafts are defaults until the first backend snapshot. Keep them
@@ -503,8 +498,10 @@ export function SessionView() {
         }}
         onOptionsChange={(overrides) => saveOptions({ ...draftOptions, ...overrides })}
       />
-      <SystemState t={t} status={status} />
-      <DetectedJobs t={t} status={status} />
+      <HelpDisclosure label={t('settings.advancedState')}>
+        <SystemState t={t} status={status} />
+        <DetectedJobs t={t} status={status} />
+      </HelpDisclosure>
     </div>
   );
 }
@@ -529,10 +526,9 @@ function SafetySettings({
   onOptionsChange: (overrides: Partial<KeepAwakeOptions>) => void;
 }) {
   return (
-    <SettingsList label={t('settings.safetyGuards')}>
+    <SettingsList className="session-stop-conditions" label={t('settings.safetyGuards')}>
       <SettingsRow
         title={t('settings.autoOff')}
-        description={t('settings.autoOffHint')}
         trail={
           <select
             className="input"
@@ -565,7 +561,6 @@ function SafetySettings({
       )}
       <SettingsRow
         title={t('settings.acOnly')}
-        description={t('settings.acOnlyHint')}
         trail={
           <Toggle
             checked={options.acOnly}
@@ -577,7 +572,6 @@ function SafetySettings({
       />
       <SettingsRow
         title={t('settings.lowBattery')}
-        description={t('settings.lowBatteryHint')}
         trail={
           <select
             className="input"

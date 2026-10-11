@@ -99,10 +99,7 @@ export function GeneralView({
 
   return (
     <div className="view">
-      <FeaturePageHeader
-        title={t('settings.general')}
-        description={t('settings.pageDescription')}
-      />
+      <FeaturePageHeader title={t('settings.general')} />
 
       <SettingsList label={t('settings.startup')}>
         <SwitchRow

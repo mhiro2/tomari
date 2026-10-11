@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { I18nProvider } from '../lib/i18n';
 import { SettingsProvider, useSettings } from '../lib/settings';
 import type { AppSettings, ConfigurationWarnings, Hotkey, ModifierRule } from '../lib/types';
 import { KeyboardView } from './KeyboardView';
@@ -112,6 +113,31 @@ describe('KeyboardView', () => {
     mockCommands();
   });
 
+  it('names physical keys and their sides without symbolic or duplicate labels', async () => {
+    mockCommands({
+      list_modifier_rules: [
+        RULE,
+        { ...RULE, id: 'left-control', modifier: 'control', side: 'left', label: 'Control' },
+        { ...RULE, id: 'right-option', modifier: 'option', side: 'right', label: 'Option' },
+        { ...RULE, id: 'either-shift', modifier: 'shift', side: 'either', label: 'Shift' },
+        { ...RULE, id: 'fn', modifier: 'function', side: 'either', label: 'Fn' },
+      ],
+    });
+    renderView(
+      <I18nProvider lang="ja">
+        <KeyboardView />
+      </I18nProvider>,
+    );
+    await screen.findByRole('table');
+    expect(
+      Array.from(document.querySelectorAll('.modifier-table__key'), (key) => key.textContent),
+    ).toEqual(['Caps Lock', '左 Control', '右 Option', '左右 Shift', 'Fn']);
+    expect(screen.getByRole('switch', { name: '左 Controlを有効化' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: '右 Option を単押ししたときの操作' }),
+    ).toBeInTheDocument();
+  });
+
   it('offers the menu bar tap action while macOS still supports tidying', async () => {
     renderView(<KeyboardView />);
 
@@ -145,7 +171,7 @@ describe('KeyboardView', () => {
     expect(within(table).getByRole('columnheader', { name: 'Hold' })).toBeInTheDocument();
     expect(within(table).getByRole('columnheader', { name: 'On' })).toBeInTheDocument();
     expect(within(table).getByRole('rowheader', { name: /Caps Lock/ })).toBeInTheDocument();
-    expect(within(table).getByText('Used as Control')).toBeInTheDocument();
+    expect(within(table).getByText('Control')).toBeInTheDocument();
 
     expect(screen.getByRole('heading', { name: 'Input switching' })).toBeInTheDocument();
     expect(screen.getByText('Left Command')).toBeInTheDocument();
@@ -209,8 +235,8 @@ describe('KeyboardView', () => {
     expect(within(table).getByRole('rowheader', { name: /Caps Lock/ })).toBeInTheDocument();
     expect(await screen.findByLabelText('Tap action for Caps Lock')).toBeDisabled();
     expect(screen.getByLabelText('Enable Caps Lock')).toBeDisabled();
-    expect(screen.getByLabelText('Enable Modifier keys and shortcuts')).not.toBeDisabled();
-    expect(screen.getByLabelText('Enable Modifier keys and shortcuts')).toHaveAttribute(
+    expect(screen.getByLabelText('Modifier keys and shortcuts')).not.toBeDisabled();
+    expect(screen.getByLabelText('Modifier keys and shortcuts')).toHaveAttribute(
       'aria-checked',
       'false',
     );
@@ -235,13 +261,12 @@ describe('KeyboardView', () => {
     await waitFor(() => expect(add).not.toBeDisabled());
     fireEvent.click(add);
     const editor = screen.getByRole('dialog', { name: 'Add Modifier Rule' });
-    fireEvent.change(within(editor).getByLabelText('Modifier rule label'), {
-      target: { value: 'Shift Hyper' },
+    fireEvent.change(within(editor).getByLabelText('Physical key'), {
+      target: { value: 'shift:either' },
     });
-    fireEvent.change(within(editor).getByLabelText('Physical key'), { target: { value: 'shift' } });
     fireEvent.change(within(editor).getByLabelText('While held'), { target: { value: 'hyper' } });
     fireEvent.click(within(editor).getByRole('button', { name: 'Save Rule' }));
-    await screen.findByRole('button', { name: 'Edit modifier rule Shift Hyper' });
+    await screen.findByRole('button', { name: 'Edit modifier rule Either Shift' });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(add).toHaveFocus();
     expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
@@ -265,20 +290,17 @@ describe('KeyboardView', () => {
     await waitFor(() => expect(repair).not.toBeDisabled());
     fireEvent.click(repair);
     const editor = screen.getByRole('dialog');
-    expect(within(editor).getByLabelText('Modifier rule label')).toHaveValue('');
-    fireEvent.change(within(editor).getByLabelText('Modifier rule label'), {
-      target: { value: 'Repaired rule' },
-    });
+    expect(within(editor).queryByLabelText('Modifier rule label')).not.toBeInTheDocument();
     fireEvent.change(within(editor).getByLabelText('Physical key'), {
-      target: { value: 'option' },
+      target: { value: 'option:either' },
     });
     fireEvent.click(within(editor).getByRole('button', { name: 'Save Rule' }));
-    await screen.findByRole('button', { name: 'Edit modifier rule Repaired rule' });
+    await screen.findByRole('button', { name: 'Edit modifier rule Either Option' });
     expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
       originalId: invalid.id,
       rule: expect.objectContaining({
         id: expect.stringMatching(/^rule-/u),
-        label: 'Repaired rule',
+        label: 'Either Option',
         enabled: false,
       }),
     });
@@ -303,7 +325,7 @@ describe('KeyboardView', () => {
     await waitFor(() => expect(create).not.toBeDisabled());
     fireEvent.click(create);
     expect(screen.getByRole('dialog', { name: 'Add Modifier Rule' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Modifier rule label')).toHaveValue('');
+    expect(screen.queryByLabelText('Modifier rule label')).not.toBeInTheDocument();
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
     expect(
       mockInvoke.mock.calls.some(

@@ -30,19 +30,10 @@ describe('SwitchRow', () => {
 });
 
 describe('FeaturePageHeader', () => {
-  it('shows one concise introduction without any control of its own', () => {
-    render(
-      <FeaturePageHeader
-        title="Windows"
-        description="Configure saved positions, shortcuts, and mouse controls."
-      />,
-    );
-
+  it('shows the page title without introductory copy', () => {
+    const { container } = render(<FeaturePageHeader title="Windows" />);
     expect(screen.getByRole('heading', { name: 'Windows', level: 1 })).toBeInTheDocument();
-    expect(
-      screen.getByText('Configure saved positions, shortcuts, and mouse controls.'),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(container.querySelector('p')).toBeNull();
   });
 });
 

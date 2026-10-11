@@ -12,7 +12,7 @@ import {
   Toggle,
 } from '../components/ui';
 import * as api from '../lib/api';
-import { formatCmdError } from '../lib/errors';
+import { formatCmdError, hasCmdErrorCode } from '../lib/errors';
 import { actionLabel, presetLabel, safeDisplayText } from '../lib/format';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
@@ -234,7 +234,9 @@ export function WindowView({
       if (generation !== contextGenerationRef.current) return null;
       setContext(null);
       setActiveSlot(null);
-      if (reportError) reportContextLoadError(error);
+      if (hasCmdErrorCode(error, 'noFocusedWindow')) {
+        setStatus((current) => (current?.source === 'contextLoad' ? null : current));
+      } else if (reportError) reportContextLoadError(error);
       return null;
     } finally {
       if (contextRequestRef.current === request) contextRequestRef.current = null;
@@ -443,13 +445,12 @@ export function WindowView({
 
   return (
     <div className="view">
-      <FeaturePageHeader title={t('app.nav.window')} description={t('window.pageDescription')} />
+      <FeaturePageHeader title={t('app.nav.window')} />
 
       <FeatureSwitch
-        title={t('common.enable', { label: t('settings.windowManagement') })}
+        title={t('settings.windowManagement')}
         checked={on}
         onChange={(value) => update({ windowManagementEnabled: value })}
-        stateLabel={on ? t('common.on') : t('common.off')}
         tone={on ? 'on' : 'neutral'}
       />
 
@@ -517,6 +518,11 @@ export function WindowView({
           role={status.isError ? 'alert' : 'status'}
         >
           <span>{status.message}</span>
+          {status.isError && (
+            <button type="button" className="btn btn--ghost" onClick={() => setStatus(null)}>
+              {t('common.dismiss')}
+            </button>
+          )}
           {status.undoPlacement && (
             <button
               type="button"
@@ -995,7 +1001,7 @@ function PlacementStage({
             {context && <small>{t('window.rememberedCount', { count: remembered })}</small>}
           </div>
         </div>
-        <WorkAreaPreview context={context} activeSlot={activeSlot} />
+        {context && <WorkAreaPreview context={context} activeSlot={activeSlot} />}
         <div className="placement-stage__actions">
           <button
             type="button"

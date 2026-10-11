@@ -878,14 +878,14 @@ and applies none of them.
   settings are trustworthy.
 - **Frontend** (`src/`): `main.tsx` mounts a single `App` whose sidebar opens an
   `WindowView` / `KeyboardView` / `SessionView` /
-  `GeneralView` directly; there is no Overview route. Each detail screen pairs
-  a one-sentence purpose with explicit state. The master control is a
+  `GeneralView` directly; there is no Overview route. Each detail screen uses
+  a title and labeled controls with explicit state. The master control is a
   `FeatureSwitch` row placed first in the content column (not in the page
   header), so it lines up with every other row control. Hierarchy is carried by
   size: the master toggle is the only regular-size `Toggle`; every subordinate
   option renders the mini size. *Prevent Sleep* is an authorized operation
   rather than a stored preference, so its master control is a verb button
-  (Start Preventing Sleep… / Stop Preventing Sleep) and the row also carries the
+  (Start / Stop, with an ellipsis for administrator approval) and the row also carries the
   live phase, countdown, and the Cancel / Retry actions. The persistent
   features wrap their page controls in `FeatureContent`: turning a feature off
   keeps the configuration visible but disables interaction. *Prevent Sleep*
@@ -919,8 +919,8 @@ and applies none of them.
   keystroke recording permits an ordinary key, including Escape. The Rust
   `validate_accelerator` command enforces the same distinction; changing the
   recorder's purpose cannot weaken validation on a global-shortcut save.
-  Quarantined keyboard records produce a persistent, localized amber shell
-  banner whose action opens and focuses the Keyboard explanation; that view groups the
+  Quarantined keyboard records mark Keyboard and Diagnostics in the sidebar.
+  A Diagnostics action opens and focuses the Keyboard explanation; that view groups the
   affected records and localizes each stable reason code while retaining the
   persisted identity needed to repair or remove the underlying row.
 - **Backup UI and live apply**: General exports an owner-readable/writable JSON

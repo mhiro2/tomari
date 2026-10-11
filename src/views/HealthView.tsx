@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { FeaturePageHeader, SettingsList, SettingsRow } from '../components/ui';
+import { FeaturePageHeader, HelpDisclosure, SettingsList, SettingsRow } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
 import { useT, type Translator } from '../lib/i18n';
@@ -37,7 +37,11 @@ type Navigation = {
 
 type Tap = DiagnosticsSnapshot['taps'][number];
 
-export function HealthView({ onNavigate, onOpenPermissions }: Navigation = {}) {
+export function HealthView({
+  onNavigate,
+  onOpenPermissions,
+  hasSettingsIssues = false,
+}: Navigation & { hasSettingsIssues?: boolean } = {}) {
   const t = useT();
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
@@ -91,13 +95,14 @@ export function HealthView({ onNavigate, onOpenPermissions }: Navigation = {}) {
   const systemItems = snapshot ? systemTrustItems(snapshot, t, navigation) : [];
   const items = [...inputItems, ...systemItems];
   const attentionCount = items.filter(({ tone }) => tone === 'attention').length;
-  const pendingCount = items.filter(({ tone }) => tone === 'pending').length;
+  const pendingItems = items.filter(({ tone }) => tone === 'pending');
+  const pendingCount = pendingItems.length;
   const summaryTone: HealthTone =
-    attentionCount > 0 ? 'attention' : pendingCount > 0 ? 'pending' : 'ready';
+    attentionCount > 0 || hasSettingsIssues ? 'attention' : pendingCount > 0 ? 'pending' : 'ready';
 
   return (
     <div className="view health-view" aria-busy={refreshing}>
-      <FeaturePageHeader title={t('health.title')} description={t('health.pageDescription')} />
+      <FeaturePageHeader title={t('health.title')} />
 
       {snapshot === null ? (
         <section className="health-loading" aria-live="polite">
@@ -130,11 +135,13 @@ export function HealthView({ onNavigate, onOpenPermissions }: Navigation = {}) {
                   ? t(attentionCount === 1 ? 'health.needsAttentionOne' : 'health.needsAttention', {
                       count: attentionCount,
                     })
-                  : pendingCount > 0
-                    ? t(pendingCount === 1 ? 'health.pendingSummaryOne' : 'health.pendingSummary', {
-                        count: pendingCount,
-                      })
-                    : t('health.allReady')}
+                  : hasSettingsIssues
+                    ? t('health.settingsNeedAttention')
+                    : pendingCount > 0
+                      ? t('health.pendingSummary', {
+                          items: pendingItems.map((item) => item.title).join(' / '),
+                        })
+                      : t('health.allReady')}
               </h2>
               <p>
                 {t('health.snapshotMeta', {
@@ -158,17 +165,38 @@ export function HealthView({ onNavigate, onOpenPermissions }: Navigation = {}) {
             </button>
           </section>
 
-          <SettingsList label={t('health.group.input')}>
-            {inputItems.map((item) => (
-              <HealthRow key={item.id} item={item} />
-            ))}
-          </SettingsList>
-
-          <SettingsList label={t('health.group.system')}>
-            {systemItems.map((item) => (
-              <HealthRow key={item.id} item={item} />
-            ))}
-          </SettingsList>
+          {attentionCount > 0 && (
+            <SettingsList label={t('health.tone.attention')}>
+              {items.map(
+                (item) => item.tone === 'attention' && <HealthRow key={item.id} item={item} />,
+              )}
+            </SettingsList>
+          )}
+          {pendingCount > 0 && (
+            <SettingsList label={t('health.waiting')}>
+              {pendingItems.map((item) => (
+                <HealthRow key={item.id} item={item} />
+              ))}
+            </SettingsList>
+          )}
+          <HelpDisclosure label={t('settings.advancedState')}>
+            <SettingsList label={t('health.group.input')}>
+              {inputItems.map(
+                (item) =>
+                  (item.tone === 'ready' || item.tone === 'inactive') && (
+                    <HealthRow key={item.id} item={item} />
+                  ),
+              )}
+            </SettingsList>
+            <SettingsList label={t('health.group.system')}>
+              {systemItems.map(
+                (item) =>
+                  (item.tone === 'ready' || item.tone === 'inactive') && (
+                    <HealthRow key={item.id} item={item} />
+                  ),
+              )}
+            </SettingsList>
+          </HelpDisclosure>
 
           <SettingsList label={t('health.group.support')}>
             <SettingsRow
@@ -347,7 +375,12 @@ function capsLockItem(
   const id = 'capsLock';
   const title = t('health.capsLock');
   if (!reconciled || ownership === 'pending') {
-    return { id, title, tone: 'pending', description: t('health.capsPending') };
+    return {
+      id,
+      title,
+      tone: 'attention',
+      description: t('health.capsFailed'),
+    };
   }
   if (ownership === 'unknown' || mappingActive !== (ownership === 'held')) {
     return {

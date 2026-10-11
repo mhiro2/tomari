@@ -1057,7 +1057,7 @@ kbd,
 
 .recorder {
   display: inline-flex;
-  width: 124px;
+  width: 140px;
   min-height: 32px;
   align-items: center;
   justify-content: center;
@@ -1818,7 +1818,7 @@ kbd,
 }
 
 .modifier-table th:nth-child(1) {
-  width: 124px;
+  width: 140px;
 }
 
 .modifier-table th:nth-child(3) {
@@ -1835,17 +1835,12 @@ kbd,
 }
 
 .modifier-table__key {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.modifier-table__key > span:last-child {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .modifier-table__hold {
@@ -2180,7 +2175,7 @@ kbd,
   }
 
   .modifier-table th:nth-child(1) {
-    width: 108px;
+    width: 128px;
   }
 
   .modifier-table th:nth-child(3) {
@@ -2419,7 +2414,8 @@ kbd,
 }
 .display-field select,
 .display-field input {
-  min-width: 240px;
+  width: 240px;
+  min-width: 0;
   max-width: 70%;
   background: var(--field);
   color: var(--text);
@@ -2501,4 +2497,70 @@ kbd,
 }
 .display-tab-panel > .display-map + .display-arrangement {
   margin-top: 20px;
+}
+
+/* Feature failures stay in the current page; navigation marks other issues. */
+.app__main > .apply-banner {
+  max-width: 760px;
+  margin: 0 auto 16px;
+  background: transparent;
+  border-color: var(--line-strong);
+}
+.apply-banner__body {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.apply-banner__body > output {
+  flex: 1;
+}
+.apply-banner .banner__actions {
+  margin-top: 0;
+  flex-wrap: wrap;
+}
+.apply-banner p {
+  margin: 0;
+}
+.nav-attention {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warning);
+}
+.feature-switch .settings-row {
+  min-height: 46px;
+}
+.session-view > .help-disclosure .settings-section {
+  margin-top: 16px;
+}
+/* Align comparable controls within a group, not every control in the app. */
+.settings-section {
+  --select-width: 160px;
+}
+.settings-row__trail > select.input {
+  width: var(--select-width);
+}
+.session-scope {
+  --select-width: 260px;
+}
+.session-stop-conditions {
+  --select-width: 160px;
+}
+
+@media (max-width: 620px) {
+  .settings-row {
+    flex-wrap: wrap;
+  }
+  .settings-row__body {
+    flex-basis: 120px;
+  }
+  .settings-row__trail {
+    max-width: 100%;
+    margin-left: auto;
+  }
+  .settings-row__trail .input {
+    max-width: 100%;
+    min-width: 0;
+  }
 }

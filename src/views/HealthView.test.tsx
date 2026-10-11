@@ -105,7 +105,7 @@ describe('HealthView', () => {
     renderView();
 
     expect(await screen.findByText('No health issues detected')).toBeInTheDocument();
-    expect(screen.getByText('Tomari 1.2.3 · aarch64 · checked just now')).toBeInTheDocument();
+    expect(screen.getByText('Tomari 1.2.3 · aarch64')).toBeInTheDocument();
     // Summary dot plus one per row: permissions, three taps, Caps Lock,
     // shortcuts, Prevent Sleep, database, updater.
     expect(document.querySelectorAll('.health-dot')).toHaveLength(10);
@@ -131,6 +131,28 @@ describe('HealthView', () => {
       'Refresh',
       'Export Support Bundle',
     ]);
+  });
+
+  it('does not report a clean state while settings warnings remain', async () => {
+    render(<HealthView hasSettingsIssues />);
+    expect(await screen.findByText('Some settings need attention')).toBeInTheDocument();
+    expect(screen.queryByText('No health issues detected')).not.toBeInTheDocument();
+    expect(document.querySelector('.health-summary--attention')).not.toBeNull();
+  });
+
+  it('reports a failed Caps Lock reconciliation as an error, not ongoing work', async () => {
+    mockInvoke.mockResolvedValue({
+      ...HEALTHY,
+      capsLock: { ownership: 'pending', mappingActive: false, reconciled: false },
+    });
+    renderView();
+    expect(
+      await screen.findByText(
+        'The Caps Lock mapping could not be applied. Refresh only checks its status.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Awaiting status')).not.toBeInTheDocument();
+    expect(within(row('Caps Lock remap')).getByText('Action needed')).toBeInTheDocument();
   });
 
   it('is fully localized in Japanese', async () => {
@@ -163,9 +185,11 @@ describe('HealthView', () => {
     );
     renderView();
 
-    expect(await screen.findByText('1 health check is in progress')).toBeInTheDocument();
+    expect(await screen.findByText('Awaiting status: Prevent Sleep')).toBeInTheDocument();
+    expect(screen.getByText('Awaiting status')).toBeInTheDocument();
+    expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
     const sleep = row('Prevent Sleep');
-    expect(within(sleep).getByText('In progress')).toBeInTheDocument();
+    expect(within(sleep).getByText('Pending')).toBeInTheDocument();
     expect(within(sleep).queryByRole('button')).not.toBeInTheDocument();
   });
 
@@ -341,7 +365,7 @@ describe('HealthView', () => {
     renderView();
 
     expect(await screen.findByText('3 items need action')).toBeInTheDocument();
-    expect(screen.getAllByText('Action needed')).toHaveLength(4);
+    expect(screen.getAllByText('Action needed')).toHaveLength(5);
     expect(screen.getAllByText('Off').length).toBeGreaterThan(0);
     expect(screen.getByText(/cannot verify that updates are genuine/)).toBeInTheDocument();
   });

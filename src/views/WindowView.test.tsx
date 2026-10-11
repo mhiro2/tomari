@@ -671,10 +671,22 @@ describe('WindowView', () => {
 
     expect(await screen.findByText('Editor')).toBeInTheDocument();
     expect(screen.getByText('Restore saved position')).toBeDisabled();
-    expect(screen.getByRole('switch', { name: 'Enable Window placement' })).not.toBeDisabled();
+    expect(screen.getByRole('switch', { name: 'Window actions' })).not.toBeDisabled();
 
     await openTab('Mouse');
     expect(screen.getByLabelText('Enable Drag to Snap')).toBeDisabled();
+  });
+
+  it('renders a missing target as an empty state without an error or empty preview', async () => {
+    mockCommands({
+      get_placement_context: Object.assign(new Error('No window'), { code: 'noFocusedWindow' }),
+    });
+    renderView(<WindowView />);
+    expect(await screen.findByText('No target window')).toBeInTheDocument();
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_placement_context'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(document.querySelector('.work-area-wrap')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restore saved position' })).toBeDisabled();
   });
 
   it('surfaces an initial context failure without crashing', async () => {

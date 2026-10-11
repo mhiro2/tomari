@@ -5,6 +5,7 @@ import { ApplyWarningPanel } from './components/ApplyWarningPanel';
 import { BrandIcon, SectionIcon, type SectionName } from './components/icons';
 import { Banner, PermissionStatus } from './components/ui';
 import * as api from './lib/api';
+import { warningSection } from './lib/applyWarnings';
 import { formatCmdError } from './lib/errors';
 import { I18nProvider, resolveLang, useT } from './lib/i18n';
 import { SettingsProvider, useSettings } from './lib/settings';
@@ -99,7 +100,7 @@ function SettingsRoot() {
 
 function OperationalShell() {
   const t = useT();
-  const { saveError, configurationWarnings, configurationBusy } = useSettings();
+  const { saveError, configurationWarnings, configurationBusy, applyWarnings } = useSettings();
   const [section, setSection] = useState<Section>(readLastSection);
   const [healthDestination, setHealthDestination] = useState<HealthDestination | null>(null);
   const [configurationFocusRequest, setConfigurationFocusRequest] = useState(0);
@@ -284,6 +285,10 @@ function OperationalShell() {
     (configurationWarnings?.invalidHotkeys.length ?? 0) +
     (configurationWarnings?.invalidModifierRules.length ?? 0);
 
+  const attentionSections = new Set<Section>(applyWarnings.map(warningSection));
+  if (configurationWarningCount > 0) attentionSections.add('keyboard');
+  if (attentionSections.size > 0) attentionSections.add('health');
+
   if (!setupLoaded) {
     return (
       <output className="app app--loading">
@@ -306,12 +311,14 @@ function OperationalShell() {
           sections={TOOL_SECTIONS}
           selected={section}
           onSelect={selectSection}
+          attention={attentionSections}
         />
         <SidebarGroup
           label={t('app.app')}
           sections={APP_SECTIONS}
           selected={section}
           onSelect={selectSection}
+          attention={attentionSections}
         />
 
         <div className="sidebar__footer">
@@ -337,32 +344,6 @@ function OperationalShell() {
           </p>
         )}
 
-        {configurationWarningCount > 0 && (
-          <aside className="configuration-warning-banner">
-            <output
-              className="configuration-warning-banner__copy"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              <strong>
-                {t('keyboard.configurationWarningTitle', {
-                  count: configurationWarningCount,
-                })}
-              </strong>
-              <small>{t('keyboard.configurationWarningBody')}</small>
-            </output>
-            <button type="button" className="btn btn--ghost" onClick={reviewConfigurationWarnings}>
-              {t('keyboard.configurationWarningAction')}
-            </button>
-          </aside>
-        )}
-
-        <ApplyWarningPanel
-          permissions={permissionsKnown ? permissions : null}
-          onOpenPermissions={openSetup}
-          onOpenDiagnostics={() => selectSection('health')}
-        />
-
         <main
           ref={mainRef}
           className="app__main"
@@ -370,7 +351,19 @@ function OperationalShell() {
           inert={configurationBusy}
           aria-busy={configurationBusy}
         >
+          <ApplyWarningPanel
+            section={section}
+            permissions={permissionsKnown ? permissions : null}
+            onOpenPermissions={openSetup}
+            onOpenDiagnostics={() => selectSection('health')}
+          />
+          {section === 'health' && configurationWarningCount > 0 && (
+            <button type="button" className="btn" onClick={reviewConfigurationWarnings}>
+              {t('keyboard.configurationWarningTitle', { count: configurationWarningCount })}
+            </button>
+          )}
           <SelectedView
+            hasSettingsIssues={attentionSections.size > 0}
             section={section}
             autoCheckUpdate={autoCheckUpdate}
             onAutoCheckHandled={onAutoCheckHandled}
@@ -600,10 +593,12 @@ function SidebarGroup({
   sections,
   selected,
   onSelect,
+  attention,
 }: {
   label: string;
   sections: readonly Section[];
   selected: Section;
+  attention: ReadonlySet<Section>;
   onSelect: (section: Section) => void;
 }) {
   const t = useT();
@@ -616,10 +611,22 @@ function SidebarGroup({
           type="button"
           className={`nav-item ${selected === id ? 'nav-item--active' : ''}`}
           aria-current={selected === id ? 'page' : undefined}
+          aria-label={t(`app.nav.${id}`)}
+          aria-describedby={attention.has(id) ? `nav-${id}-attention` : undefined}
           onClick={() => onSelect(id)}
         >
           <SectionIcon name={id} />
           <span>{t(`app.nav.${id}`)}</span>
+          {attention.has(id) && (
+            <>
+              <span className="nav-attention" aria-hidden="true">
+                !
+              </span>
+              <span className="sr-only" id={`nav-${id}-attention`}>
+                {t('health.tone.attention')}
+              </span>
+            </>
+          )}
         </button>
       ))}
     </section>
@@ -627,6 +634,7 @@ function SidebarGroup({
 }
 
 function SelectedView({
+  hasSettingsIssues,
   section,
   autoCheckUpdate,
   onAutoCheckHandled,
@@ -636,6 +644,7 @@ function SelectedView({
   onOpenKeyboard,
 }: {
   section: Section;
+  hasSettingsIssues: boolean;
   autoCheckUpdate: boolean;
   onAutoCheckHandled: () => void;
   healthDestination: HealthDestination | null;
@@ -661,7 +670,13 @@ function SelectedView({
   }
   if (section === 'session') return <SessionView />;
   if (section === 'health') {
-    return <HealthView onNavigate={onNavigateFromHealth} onOpenPermissions={onOpenPermissions} />;
+    return (
+      <HealthView
+        hasSettingsIssues={hasSettingsIssues}
+        onNavigate={onNavigateFromHealth}
+        onOpenPermissions={onOpenPermissions}
+      />
+    );
   }
   return <GeneralView autoCheckUpdate={autoCheckUpdate} onAutoCheckHandled={onAutoCheckHandled} />;
 }

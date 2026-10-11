@@ -9,7 +9,7 @@ import type {
   ConfigurationBackupExport,
   ConfigurationBackupPreview,
 } from '../lib/types';
-import { SettingsList, SettingsRow } from './ui';
+import { HelpDisclosure, SettingsList, SettingsRow } from './ui';
 
 const MAX_BACKUP_BYTES = 2 * 1024 * 1024;
 type Operation = 'idle' | 'exporting' | 'reading' | 'previewing' | 'applying' | 'revealing';
@@ -196,14 +196,9 @@ export function SettingsBackupPanel() {
 
   return (
     <>
-      <SettingsList
-        className="backup-panel"
-        label={t('backup.title')}
-        description={t('backup.privacy')}
-      >
+      <SettingsList className="backup-panel" label={t('backup.title')}>
         <SettingsRow
           title={t('backup.exportTitle')}
-          description={t('backup.exportDescription')}
           trail={
             <button
               type="button"
@@ -217,7 +212,6 @@ export function SettingsBackupPanel() {
         />
         <SettingsRow
           title={t('backup.importTitle')}
-          description={t('backup.importDescription')}
           trail={
             <button
               ref={importButtonRef}
@@ -247,9 +241,7 @@ export function SettingsBackupPanel() {
         />
         <SettingsRow
           title={t('backup.restoreTitle')}
-          description={t(
-            backup.canRestore === false ? 'backup.noRestore' : 'backup.restoreDescription',
-          )}
+          description={backup.canRestore === false ? t('backup.noRestore') : undefined}
           trail={
             <button
               ref={restoreButtonRef}
@@ -300,6 +292,11 @@ export function SettingsBackupPanel() {
             {formatCmdError(backup.error, t)}
           </p>
         )}
+        <SettingsRow>
+          <HelpDisclosure label={t('settings.advancedState')}>
+            <p>{t('backup.privacy')}</p>
+          </HelpDisclosure>
+        </SettingsRow>
       </SettingsList>
       {backup.preview !== null && (
         <BackupPreviewDialog

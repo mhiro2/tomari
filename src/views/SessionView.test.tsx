@@ -7,7 +7,7 @@ import { SessionView } from './SessionView';
 // Mock the Tauri command bridge so the real `api` wrappers run against it.
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 // The master control is a verb button whose label follows the state.
-const MAIN_ACTION = /Start Preventing Sleep|Stop Preventing Sleep/;
+const MAIN_ACTION = /Start|Stop/;
 
 const { invoke } = await import('@tauri-apps/api/core');
 const mockInvoke = vi.mocked(invoke);
@@ -116,18 +116,18 @@ describe('SessionView', () => {
     mockCommands({ set_keep_awake: idleOn });
     render(<SessionView />);
 
-    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep' });
     expect(mode).toHaveValue('idleOnly');
     expect(
-      screen.getByText(/Prevents idle sleep without administrator approval/),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Start Preventing Sleep' }));
+      screen.queryByText(/Prevents idle sleep without administrator approval/),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
 
-    const stop = await screen.findByRole('button', { name: 'Stop Preventing Sleep' });
+    const stop = await screen.findByRole('button', { name: 'Stop' });
     await waitFor(() => expect(stop).toBeEnabled());
     expect(mode).toBeDisabled();
-    expect(screen.getByRole('combobox', { name: 'After a set time' })).toBeEnabled();
-    expect(screen.getByRole('switch', { name: 'When unplugged from power' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Auto-stop' })).toBeEnabled();
+    expect(screen.getByRole('switch', { name: 'Only while connected to power' })).toBeEnabled();
     expect(screen.queryByText(/waiting for administrator approval/)).not.toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith('set_keep_awake', {
       enabled: true,
@@ -148,9 +148,9 @@ describe('SessionView', () => {
       return Promise.resolve(null);
     });
     render(<SessionView />);
-    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep' });
     fireEvent.change(mode, { target: { value: 'lidClosed' } });
-    const start = screen.getByRole('button', { name: 'Start Preventing Sleep…' });
+    const start = screen.getByRole('button', { name: 'Start…' });
     expect(start).toBeDisabled();
     expect(mode).toBeDisabled();
     fireEvent.click(start);
@@ -173,27 +173,25 @@ describe('SessionView', () => {
   it('restores the confirmed mode after a rejected option write', async () => {
     mockCommands({ configure_keep_awake: new Rejection(new Error('mode busy')) });
     render(<SessionView />);
-    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep' });
     fireEvent.change(mode, { target: { value: 'lidClosed' } });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('mode busy');
     await waitFor(() => expect(mode).toHaveValue('idleOnly'));
-    expect(screen.getByRole('button', { name: 'Start Preventing Sleep' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
   });
 
   it('allows switching modes after a failed start without retained ownership', async () => {
     mockCommands({ get_keep_awake: { ...OFF, phase: 'failed', notice: 'assertionFailed' } });
     render(<SessionView />);
-    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep' });
 
     expect(mode).toBeEnabled();
     expect(screen.getByRole('alert')).toHaveTextContent(
       'macOS could not apply the sleep-prevention change',
     );
     fireEvent.change(mode, { target: { value: 'lidClosed' } });
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Start Preventing Sleep…' })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start…' })).toBeEnabled());
   });
 
   it('discards a rejected mode draft when the confirming read also fails', async () => {
@@ -205,7 +203,7 @@ describe('SessionView', () => {
       return Promise.reject(new Error('write failed'));
     });
     render(<SessionView />);
-    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep while' });
+    const mode = await screen.findByRole('combobox', { name: 'Prevent sleep' });
     fireEvent.change(mode, { target: { value: 'lidClosed' } });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('write failed');
@@ -219,8 +217,8 @@ describe('SessionView', () => {
     });
     render(<SessionView />);
 
-    expect(await screen.findByRole('combobox', { name: 'Prevent sleep while' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Stop Preventing Sleep' })).toBeDisabled();
+    expect(await screen.findByRole('combobox', { name: 'Prevent sleep' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
   });
 
@@ -270,13 +268,13 @@ describe('SessionView', () => {
     // The background worker can settle before the response to the call that
     // spawned it gets back, so that response carries the older snapshot.
     keepAwakeChanged?.(ON);
-    await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
     resolveSet(ENABLING);
 
     // The older response is applied through the same revision gate and cannot
     // strand the panel in a transition that already finished.
     await waitFor(() => expect(toggle).not.toBeDisabled());
-    expect(toggle).toHaveTextContent('Stop Preventing Sleep');
+    expect(toggle).toHaveTextContent('Stop');
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
@@ -294,9 +292,9 @@ describe('SessionView', () => {
     const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
     fireEvent.click(toggle);
 
-    await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
     fireEvent.click(toggle);
-    await waitFor(() => expect(toggle).toHaveTextContent('Start Preventing Sleep'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Start'));
 
     expect(
       mockInvoke.mock.calls
@@ -326,7 +324,7 @@ describe('SessionView', () => {
 
       await act(() => vi.advanceTimersToNextTimerAsync());
 
-      await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+      await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
       expect(toggle).not.toBeDisabled();
       expect(reads).toBeGreaterThanOrEqual(2);
     } finally {
@@ -354,7 +352,7 @@ describe('SessionView', () => {
       await act(() => vi.advanceTimersToNextTimerAsync());
 
       const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
-      await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+      await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
       expect(toggle).not.toBeDisabled();
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
@@ -389,7 +387,7 @@ describe('SessionView', () => {
     const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
 
     keepAwakeChanged?.(ON);
-    await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
 
     // Stamped before ON but delivered after it: every emitting backend thread
     // snapshots under the state lock and emits outside it, so two of them can
@@ -397,7 +395,7 @@ describe('SessionView', () => {
     // assertions below see the applied state rather than a pending update.
     await act(async () => keepAwakeChanged?.(ENABLING));
 
-    expect(screen.getByText('Sleep is being prevented')).toBeInTheDocument();
+    expect(screen.getByText('Running')).toBeInTheDocument();
     expect(toggle).not.toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
@@ -418,7 +416,7 @@ describe('SessionView', () => {
     await waitFor(() =>
       expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_keep_awake')).toHaveLength(2),
     );
-    expect(toggle).toHaveTextContent('Start Preventing Sleep');
+    expect(toggle).toHaveTextContent('Start');
     expect(toggle).not.toBeDisabled();
   });
 
@@ -438,11 +436,11 @@ describe('SessionView', () => {
     // A failed initial read must not expose a clickable switch backed by a
     // guessed off state.
     const toggle = screen.getByRole('button', { name: MAIN_ACTION });
-    expect(toggle).toHaveTextContent('Start Preventing Sleep');
+    expect(toggle).toHaveTextContent('Start');
     expect(toggle).toBeDisabled();
-    const timer = screen.getByRole('combobox', { name: 'After a set time' });
-    const acOnly = screen.getByRole('switch', { name: 'When unplugged from power' });
-    const lowBattery = screen.getByRole('combobox', { name: 'When battery reaches 20%' });
+    const timer = screen.getByRole('combobox', { name: 'Auto-stop' });
+    const acOnly = screen.getByRole('switch', { name: 'Only while connected to power' });
+    const lowBattery = screen.getByRole('combobox', { name: 'At 20% battery or below' });
     expect(timer).toBeDisabled();
     expect(acOnly).toBeDisabled();
     expect(lowBattery).toBeDisabled();
@@ -460,11 +458,11 @@ describe('SessionView', () => {
   it('updates from the tomari:keep-awake-changed event', async () => {
     render(<SessionView />);
     const toggle = await screen.findByRole('button', { name: MAIN_ACTION });
-    expect(toggle).toHaveTextContent('Start Preventing Sleep');
+    expect(toggle).toHaveTextContent('Start');
 
     keepAwakeChanged?.(ON);
 
-    await waitFor(() => expect(toggle).toHaveTextContent('Stop Preventing Sleep'));
+    await waitFor(() => expect(toggle).toHaveTextContent('Stop'));
     expect(await screen.findByText('Active')).toBeInTheDocument();
   });
 
@@ -487,7 +485,7 @@ describe('SessionView', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     // The toggle finishes (not stuck busy) even though the re-sync failed.
     await waitFor(() => expect(toggle).not.toBeDisabled());
-    expect(toggle).toHaveTextContent('Start Preventing Sleep');
+    expect(toggle).toHaveTextContent('Start');
   });
 
   it('cancels an administrator prompt without issuing another normal toggle', async () => {
@@ -554,7 +552,7 @@ describe('SessionView', () => {
     // decision are offered, and Start stays locked until one is taken.
     const main = await screen.findByRole('button', { name: MAIN_ACTION });
     expect(main).toBeDisabled();
-    expect(screen.getByRole('combobox', { name: 'Prevent sleep while' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Prevent sleep' })).toBeDisabled();
     expect(screen.getByText(/Restoring it requires administrator approval/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Turn sleep back on' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Leave it as it is' }));
@@ -583,7 +581,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const timer = await screen.findByRole('combobox', { name: 'After a set time' });
+    const timer = await screen.findByRole('combobox', { name: 'Auto-stop' });
     fireEvent.change(timer, { target: { value: '30m' } });
 
     await waitFor(() => {
@@ -607,7 +605,7 @@ describe('SessionView', () => {
     });
 
     render(<SessionView />);
-    const timer = await screen.findByRole('combobox', { name: 'After a set time' });
+    const timer = await screen.findByRole('combobox', { name: 'Auto-stop' });
     await waitFor(() => expect(timer).toHaveValue('time'));
 
     // Engaging clears an end time that is already in the past, so the panel must

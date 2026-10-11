@@ -44,7 +44,7 @@ export function DisplayView() {
 
   return (
     <div className="feature-page display-page">
-      <FeaturePageHeader title={t('display.title')} description={t('display.description')} />
+      <FeaturePageHeader title={t('display.title')} />
       <div className="display-toolbar">
         <h2>{t('display.arrangement')}</h2>
         <button
@@ -336,12 +336,11 @@ function DisplayResolution({ display, disabled, run }: DisplayControlProps) {
     <section className="display-control">
       <div className="display-control__heading">
         <h2>{t('display.resolution')}</h2>
-        <p>{t('display.resolutionHint')}</p>
       </div>
       {!display.mirrored && (
         <>
           <label className="display-field">
-            <span>{t('display.resolution')}</span>
+            <span className="sr-only">{t('display.resolution')}</span>
             <select
               value={selectedGroup?.key ?? ''}
               disabled={disabled || display.currentMode === null}
@@ -416,11 +415,7 @@ function DisplayBrightness({ display, disabled, run }: DisplayControlProps) {
     <section className="display-control">
       <div className="display-control__heading">
         <h2>{t('display.brightness')}</h2>
-        <p>
-          {display.brightness === null
-            ? t('display.brightnessUnavailable')
-            : t('display.brightnessHint')}
-        </p>
+        {display.brightness === null && <p>{t('display.brightnessUnavailable')}</p>}
       </div>
       {display.brightness !== null && (
         <>
@@ -473,7 +468,6 @@ function DisplayArrangement({
     <section className="display-control display-arrangement">
       <div className="display-control__heading">
         <h2>{t('display.position')}</h2>
-        <p>{t('display.positionHint')}</p>
       </div>
       <div className="display-arrangement__fields">
         <label className="display-field">
@@ -549,7 +543,6 @@ function DisplayDimming({
     <section className="display-control display-dimming">
       <div className="display-control__heading">
         <h2>{t('display.dimming')}</h2>
-        <p>{t('display.dimmingHint')}</p>
       </div>
       <div className="display-brightness">
         <input

@@ -12,7 +12,7 @@ import {
 } from '../components/ui';
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel, modifierLabel, modifierWithSide, safeDisplayText } from '../lib/format';
+import { actionLabel, modifierLabel, safeDisplayText, physicalKeyLabel } from '../lib/format';
 import { useT, type MessageKey, type Translator } from '../lib/i18n';
 import { useMenuBarSupported } from '../lib/menuBarSupport';
 import { useSettings } from '../lib/settings';
@@ -348,10 +348,7 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
 
   return (
     <div className="view keyboard-view">
-      <FeaturePageHeader
-        title={t('app.nav.keyboard')}
-        description={t('keyboard.pageDescription')}
-      />
+      <FeaturePageHeader title={t('app.nav.keyboard')} />
 
       {configurationWarnings !== null &&
         configurationWarnings.invalidHotkeys.length +
@@ -374,10 +371,9 @@ export function KeyboardView({ initialTab = 'modifiers' }: { initialTab?: Keyboa
         )}
 
       <FeatureSwitch
-        title={t('common.enable', { label: t('settings.keyboardCustomization') })}
+        title={t('settings.keyboardCustomization')}
         checked={on}
         onChange={(v) => update({ keyboardEnabled: v })}
-        stateLabel={on ? t('common.on') : t('common.off')}
         tone={on ? 'on' : 'neutral'}
       />
 
@@ -849,13 +845,11 @@ function ModifierRow({
 }) {
   const t = useT();
   const selected = tapActionKey(rule.tap);
+  const keyName = physicalKeyLabel(rule.modifier, rule.side, t);
   return (
     <tr>
       <th scope="row">
-        <span className="modifier-table__key">
-          <span className="kbd-chip">{modifierWithSide(rule.modifier, rule.side, t)}</span>
-          <span>{modifierLabel(rule.modifier)}</span>
-        </span>
+        <span className="modifier-table__key">{keyName}</span>
         <button
           type="button"
           className="btn btn--ghost modifier-table__edit"
@@ -874,7 +868,7 @@ function ModifierRow({
           value={selected}
           onChange={(event) => onTapAction(tapAction(event.target.value as TapActionKey))}
           disabled={saving}
-          aria-label={t('keyboard.tapActionFor', { modifier: modifierLabel(rule.modifier) })}
+          aria-label={t('keyboard.tapActionFor', { modifier: keyName })}
         >
           {selected === 'custom' && (
             <option value="custom" disabled>
@@ -902,7 +896,7 @@ function ModifierRow({
           checked={rule.enabled}
           onChange={onToggle}
           disabled={saving}
-          label={t('common.enable', { label: modifierLabel(rule.modifier) })}
+          label={t('common.enable', { label: keyName })}
         />
       </td>
     </tr>

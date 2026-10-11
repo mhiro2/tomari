@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { I18nProvider } from '../lib/i18n';
 import { SettingsProvider } from '../lib/settings';
 import type { AppSettings, ConfigurationBackupPreview } from '../lib/types';
 import { SettingsBackupPanel } from './SettingsBackupPanel';
@@ -72,6 +73,23 @@ describe('SettingsBackupPanel', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
+  });
+
+  it('separates the Japanese backup target from its action', async () => {
+    render(
+      <SettingsProvider>
+        <I18nProvider lang="ja">
+          <SettingsBackupPanel />
+        </I18nProvider>
+      </SettingsProvider>,
+    );
+    const action = await screen.findByRole('button', { name: '書き出す' });
+    const row = action.closest('.settings-row');
+    expect(row).toHaveTextContent('現在の設定');
+    expect(screen.queryByText('設定を書き出す')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '選択…' }).closest('.settings-row'),
+    ).toHaveTextContent('ファイルから復元');
   });
 
   it('exports a saved file and opens its backup folder', async () => {

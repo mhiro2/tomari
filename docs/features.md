@@ -14,7 +14,8 @@ integrity and migration status, and updater signature configuration. Features th
 are deliberately switched off are shown as inactive rather than failed.
 Actionable failures explain the likely cause and link directly to the relevant
 Setup dialog or settings tab. Transient startup and shutdown states are shown
-as in progress and do not ask the user to intervene.
+as awaiting status and do not ask the user to intervene. Failed Caps Lock
+reconciliation is reported as a failure, not an operation still in progress.
 
 Diagnostics never performs a Menu Bar Accessibility inventory scan. It reads
 only cached divider and permission state, leaving item IDs and the visible menu
@@ -37,8 +38,9 @@ Command IME switch is shown as a direct key-to-input-source mapping. Global
 shortcut recording stays in the Shortcuts tab so it does not compete with the
 modifier table.
 
-Use **Add Modifier Rule** or a row's **Edit** button to configure its label,
-physical key, side, held role, and tap action. The held role is either the
+Use **Add Modifier Rule** or a row's **Edit** button to configure its physical
+key, held role, and tap action. The key selector includes left/right variants;
+the rule name is generated from the selected key. The held role is either the
 original modifier, another modifier, or Hyper; choosing one never combines
 Hyper with a separate remap. Caps Lock and Fn use Either because those keys
 have no left/right pair. Left and right Command remain reserved for the IME
@@ -87,9 +89,9 @@ Disabled rows take part too, preventing an item from silently displacing another
 when it is enabled later. The built-in Command IME pair is added only after the
 saved rules pass these checks.
 
-A persistent amber notice reports how many saved keyboard items need attention
-and links to localized details on the Keyboard page. The notice remains until
-the affected rows are repaired or deleted. Readable modifier rules offer
+Sidebar indicators mark Keyboard and Diagnostics when saved keyboard items need
+attention. Details appear on Keyboard, with a link from Diagnostics, until the
+affected rows are repaired or deleted. Readable modifier rules offer
 **Repair**, opening their values in the editor; invalid identities can be
 replaced without leaving a second copy of the original row. A rule that cannot
 be reconstructed instead offers a path to create a new rule. Every warning
@@ -287,23 +289,22 @@ Tomari runs as a menu bar app: clicking its menu bar icon opens a compact menu
 for permission recovery, undo/redo of window changes, Prevent Sleep, menu-bar
 icons, and Settings. Placement choices live with their app context in the
 Windows section or on shortcuts rather than in a generic tray palette. The
-settings window has no overview page: its sidebar contains the five direct
-destinations **Windows**, **Keyboard**, **Menu Bar**, **Prevent Sleep**, and
-**General**, grouped under Tools and App. Sidebar rows use the destination name
-instead of repeating descriptions or feature-state badges. Reopening Settings
-returns to the last selected destination (or Windows when no valid selection has
-been saved).
+settings window has no overview page: its sidebar links directly to **Windows**,
+**Displays**, **Keyboard**, **Prevent Sleep**, **General**, and **Diagnostics**.
+Reopening Settings returns to the last selected destination.
 
-Each feature page starts with one short purpose sentence and, where applicable,
-a master control as the first row of the page. For Windows, Keyboard, and Menu
-Bar it is a switch; turning the feature off leaves its settings visible so its
-scope is still understandable, but disables the controls until the feature is
-turned back on. Prevent Sleep is an operation rather than a preference, so its
-first row offers Start Preventing Sleep… / Stop Preventing Sleep buttons instead,
-and its auto-off conditions stay editable while off. Windows,
-Keyboard, and Menu Bar use the focused tabs described above; ordinary options
-use divided rows, while cards are reserved for the master control and for
-objects such as saved window positions.
+Pages start with a title and labeled controls, without introductory paragraphs.
+Windows and Keyboard have a master switch; disabling a feature leaves its
+settings visible but unavailable. Prevent Sleep shows its current phase and
+**Start** / **Stop** first, then its scope and stop conditions. An ellipsis on
+Start or Stop indicates administrator approval. System details and long-running
+processes are available under **Details**.
+
+Feature failures appear only on the affected page and in Diagnostics. Sidebar
+indicators mark affected destinations without interrupting unrelated pages.
+Diagnostics shows actionable issues first and collapses healthy/inactive details.
+Settings read/write failures remain global. An absent target window is shown as
+an empty state rather than an error toast; actual operation errors can be dismissed.
 
 On the very first launch the settings window opens automatically (the main
 features need permissions you have not granted yet); after that Tomari starts

@@ -34,19 +34,10 @@ export function Toggle({
   );
 }
 
-export function FeaturePageHeader({
-  title,
-  description,
-}: {
-  title: string;
-  description: ReactNode;
-}) {
+export function FeaturePageHeader({ title }: { title: string }) {
   return (
     <header className="feature-header">
-      <div className="feature-header__copy">
-        <h1>{title}</h1>
-        <p>{description}</p>
-      </div>
+      <h1>{title}</h1>
     </header>
   );
 }
@@ -68,6 +59,7 @@ export function FeatureSwitch({
   trail,
   control,
   tone = 'neutral',
+  announce = false,
 }: {
   title: string;
   description?: ReactNode;
@@ -79,12 +71,21 @@ export function FeatureSwitch({
   trail?: ReactNode;
   control?: ReactNode;
   tone?: 'neutral' | 'on' | 'pending' | 'danger';
+  announce?: boolean;
 }) {
   const descriptionId = useId();
   return (
     <div className={`settings-list feature-switch feature-switch--${tone}`}>
       <SettingsRow
-        title={title}
+        title={
+          announce ? (
+            <output aria-live="polite" aria-atomic="true">
+              {title}
+            </output>
+          ) : (
+            title
+          )
+        }
         description={description && <span id={descriptionId}>{description}</span>}
         trail={
           <>

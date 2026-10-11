@@ -604,7 +604,10 @@ export async function installDevPreview() {
           },
         };
       case 'get_apply_warnings':
-        return { warnings: [], unprobed: ['menuBar'] };
+        return {
+          warnings: params.has('applyWarning') ? ['capsLockRemap'] : [],
+          unprobed: ['menuBar'],
+        };
       case 'get_configuration_backup_status':
         return { canRestore: previousConfiguration !== null, lastApplied };
       case 'export_configuration_backup':
@@ -764,6 +767,7 @@ export async function installDevPreview() {
         return null;
       }
       case 'get_placement_context':
+        if (params.has('noWindow')) throw { code: 'noFocusedWindow', message: 'No target window' };
         return placement;
       case 'get_window_history_status':
         return { canUndo: true, canRedo: false };

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ModifierRule } from '../lib/types';
@@ -59,10 +59,9 @@ describe('ModifierRuleEditor', () => {
 
   it('creates a sided Hyper rule with an IME tap without a conflicting remap', async () => {
     const { onSaved } = renderEditor();
-    expect(screen.getByLabelText('Modifier rule label')).toHaveFocus();
-    change('Modifier rule label', 'Hyper and Japanese');
-    change('Physical key', 'control');
-    change('Key side', 'right');
+    expect(screen.getByLabelText('Physical key')).toHaveFocus();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    change('Physical key', 'control:right');
     change('While held', 'hyper');
     change('Tap action', 'switchIme:kana');
     fireEvent.click(screen.getByRole('button', { name: 'Save Rule' }));
@@ -70,7 +69,7 @@ describe('ModifierRuleEditor', () => {
     expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
       originalId: null,
       rule: expect.objectContaining({
-        label: 'Hyper and Japanese',
+        label: 'Right Control',
         modifier: 'control',
         side: 'right',
         hyper: true,
@@ -84,13 +83,13 @@ describe('ModifierRuleEditor', () => {
   it('preserves raw identity, label, and disabled state while editing another field', async () => {
     const raw = { ...RULE, id: ' caps-rule ', label: '  A\u0007 label  ' };
     renderEditor(raw);
-    expect(screen.getByLabelText('Modifier rule label')).toHaveValue(raw.label);
+    expect(screen.queryByLabelText('Modifier rule label')).not.toBeInTheDocument();
     change('While held', 'option');
     fireEvent.click(screen.getByRole('button', { name: 'Save Rule' }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
         originalId: raw.id,
-        rule: { ...raw, remapTo: 'option' },
+        rule: { ...raw, label: 'Caps Lock', remapTo: 'option' },
       }),
     );
   });
@@ -118,26 +117,24 @@ describe('ModifierRuleEditor', () => {
   });
 
   it('explains reserved Command sides and permits the existing Either rule semantics', () => {
-    renderEditor(RULE);
-    change('Physical key', 'command');
-    change('Key side', 'left');
+    renderEditor({ ...RULE, modifier: 'command', side: 'left' });
     expect(screen.getByRole('alert')).toHaveTextContent('reserved for the input switch');
     expect(screen.getByRole('button', { name: 'Save Rule' })).toBeDisabled();
-    change('Key side', 'either');
+    change('Physical key', 'command:either');
     expect(screen.getByRole('button', { name: 'Save Rule' })).not.toBeDisabled();
   });
 
   it('requires repairing an impossible Caps Lock side instead of silently changing it', () => {
     renderEditor({ ...RULE, side: 'left' });
-    expect(screen.getByLabelText('Key side')).toHaveValue('left');
+    expect(screen.queryByLabelText('Key side')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Physical key')).toHaveValue('capsLock:left');
     expect(screen.getByRole('alert')).toHaveTextContent('have no left or right side');
     expect(screen.getByRole('button', { name: 'Save Rule' })).toBeDisabled();
-    change('Key side', 'either');
+    change('Physical key', 'capsLock:either');
     expect(screen.getByRole('button', { name: 'Save Rule' })).not.toBeDisabled();
-    change('Physical key', 'function');
-    expect(
-      within(screen.getByLabelText('Key side')).getByRole('option', { name: 'Left' }),
-    ).toBeDisabled();
+    change('Physical key', 'function:either');
+    expect(screen.getByLabelText('Physical key')).toHaveValue('function:either');
+    expect(screen.queryByRole('option', { name: 'Left Fn' })).not.toBeInTheDocument();
   });
 
   it('records a plain Escape for a tap action and restores global shortcuts', async () => {
@@ -178,10 +175,10 @@ describe('ModifierRuleEditor', () => {
   it('keeps the draft and announces a rejected save so it can be corrected', async () => {
     mockInvoke.mockRejectedValue({ code: 'other', message: 'That modifier slot is already used.' });
     renderEditor(RULE);
-    change('Modifier rule label', 'My rule');
+    change('Physical key', 'option:right');
     fireEvent.click(screen.getByRole('button', { name: 'Save Rule' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('already used');
-    expect(screen.getByLabelText('Modifier rule label')).toHaveValue('My rule');
+    expect(screen.getByLabelText('Physical key')).toHaveValue('option:right');
     expect(screen.getByRole('button', { name: 'Save Rule' })).not.toBeDisabled();
   });
 
@@ -198,7 +195,7 @@ describe('ModifierRuleEditor', () => {
     fireEvent.click(save);
     fireEvent.click(save);
     expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText('Modifier rule label')).toBeDisabled();
+    expect(screen.getByLabelText('Physical key')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
     fireEvent(
       screen.getByRole('dialog'),
@@ -211,7 +208,7 @@ describe('ModifierRuleEditor', () => {
 
   it('cancels without writing or deleting the draft', () => {
     const { onClose } = renderEditor(RULE);
-    change('Modifier rule label', 'Discard this');
+    change('Physical key', 'option:right');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(mockInvoke).not.toHaveBeenCalled();

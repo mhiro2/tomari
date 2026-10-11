@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 
 import * as api from '../lib/api';
 import { formatCmdError } from '../lib/errors';
-import { actionLabel, modifierLabel, safeDisplayText } from '../lib/format';
+import { actionLabel, modifierLabel, physicalKeyLabel, safeDisplayText } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { WINDOW_PRESETS } from '../lib/types';
 import type {
@@ -26,6 +26,11 @@ function hasSides(modifier: ModifierKey): boolean {
   return modifier !== 'capsLock' && modifier !== 'function';
 }
 
+const PHYSICAL_KEYS = MODIFIERS.flatMap((modifier) => {
+  const sides: KeySide[] = hasSides(modifier) ? ['left', 'right', 'either'] : ['either'];
+  return sides.map((side) => ({ modifier, side, value: `${modifier}:${side}` }));
+});
+
 export function ModifierRuleEditor({
   rule,
   repairIdentity = false,
@@ -44,7 +49,7 @@ export function ModifierRuleEditor({
   const t = useT();
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const labelRef = useRef<HTMLInputElement>(null);
+  const keyRef = useRef<HTMLSelectElement>(null);
   // Keep raw editable values. Display sanitization must never rewrite a saved
   // rule merely because its editor was opened.
   const [draft, setDraft] = useState<ModifierRule>(
@@ -70,7 +75,7 @@ export function ModifierRuleEditor({
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    labelRef.current?.focus();
+    keyRef.current?.focus();
     return () => {
       if (dialog.open) dialog.close();
     };
@@ -81,7 +86,6 @@ export function ModifierRuleEditor({
   const contradictoryHold = draft.hyper && draft.remapTo !== null && draft.remapTo !== undefined;
   const canSave =
     !busy &&
-    draft.label.trim() !== '' &&
     !reservedCommand &&
     !invalidSide &&
     !contradictoryHold &&
@@ -100,7 +104,11 @@ export function ModifierRuleEditor({
     setBusy(true);
     setError(null);
     try {
-      const candidate = { ...draft, id: replacementId ?? draft.id };
+      const candidate = {
+        ...draft,
+        id: replacementId ?? draft.id,
+        label: physicalKeyLabel(draft.modifier, draft.side, t),
+      };
       const outcome = await api.saveModifierRule(candidate, rule?.id);
       onSaved(outcome, rule?.id);
     } catch (cause) {
@@ -144,13 +152,12 @@ export function ModifierRuleEditor({
       <form onSubmit={(event) => void save(event)}>
         <header className="modifier-editor__header">
           <h2 id={titleId}>{t(rule ? 'keyboard.editRule' : 'keyboard.addRule')}</h2>
-          <p className="hint">{t('keyboard.ruleEditorHint')}</p>
         </header>
         <ModifierRuleFields
           draft={draft}
           patch={patch}
           busy={busy}
-          labelRef={labelRef}
+          keyRef={keyRef}
           menuBarSupported={menuBarSupported}
         />
         {error && (
@@ -201,13 +208,13 @@ function ModifierRuleFields({
   draft,
   patch,
   busy,
-  labelRef,
+  keyRef,
   menuBarSupported,
 }: {
   draft: ModifierRule;
   patch: (next: Partial<ModifierRule>) => void;
   busy: boolean;
-  labelRef: RefObject<HTMLInputElement | null>;
+  keyRef: RefObject<HTMLSelectElement | null>;
   menuBarSupported: boolean;
 }) {
   const t = useT();
@@ -249,49 +256,30 @@ function ModifierRuleFields({
     <fieldset className="add-form modifier-editor__fields" disabled={busy}>
       <legend className="sr-only">{t('keyboard.ruleSettings')}</legend>
       <label className="add-form__field add-form__field--wide">
-        <span>{t('common.label')}</span>
-        <input
-          ref={labelRef}
-          className="input"
-          value={draft.label}
-          onChange={(event) => patch({ label: event.target.value })}
-          aria-label={t('keyboard.ruleLabel')}
-          required
-        />
-      </label>
-      <label className="add-form__field">
         <span>{t('keyboard.physicalKey')}</span>
         <select
+          ref={keyRef}
           className="input"
-          value={draft.modifier}
+          value={`${draft.modifier}:${draft.side}`}
           onChange={(event) => {
-            const modifier = event.target.value as ModifierKey;
-            patch({ modifier, side: hasSides(modifier) ? draft.side : 'either' });
+            const key = PHYSICAL_KEYS.find((candidate) => candidate.value === event.target.value);
+            if (key) patch({ modifier: key.modifier, side: key.side });
           }}
         >
-          {MODIFIERS.map((modifier) => (
-            <option key={modifier} value={modifier}>
-              {modifierLabel(modifier)}
+          {invalidSide && (
+            <option value={`${draft.modifier}:${draft.side}`} disabled>
+              {modifierLabel(draft.modifier)} — {t('keyboard.invalidPhysicalKey')}
+            </option>
+          )}
+          {PHYSICAL_KEYS.map(({ modifier, side, value }) => (
+            <option
+              key={value}
+              value={value}
+              disabled={modifier === 'command' && side !== 'either'}
+            >
+              {physicalKeyLabel(modifier, side, t)}
             </option>
           ))}
-        </select>
-      </label>
-      <label className="add-form__field">
-        <span>{t('keyboard.keySide')}</span>
-        <select
-          className="input"
-          value={draft.side}
-          onChange={(event) => patch({ side: event.target.value as KeySide })}
-        >
-          <option value="either">
-            {t(hasSides(draft.modifier) ? 'side.either' : 'keyboard.noKeySide')}
-          </option>
-          <option value="left" disabled={!hasSides(draft.modifier)}>
-            {t('side.left')}
-          </option>
-          <option value="right" disabled={!hasSides(draft.modifier)}>
-            {t('side.right')}
-          </option>
         </select>
       </label>
       {(draft.modifier === 'command' || invalidSide) && (
