@@ -324,6 +324,7 @@ impl ShutdownOps for SystemShutdown<'_> {
 
     fn cancel_workers(&self) {
         crate::keepawake::prepare_shutdown(self.app);
+        crate::display_management::prepare_shutdown(self.app);
         crate::menubar::prepare_shutdown();
     }
 

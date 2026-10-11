@@ -35,7 +35,7 @@ pub fn request(pane: PermissionPane) -> CmdResult<bool> {
                 PermissionPane::Accessibility => tomari_window::request_permission(),
                 PermissionPane::InputMonitoring => crate::eventtap::request_input_monitoring(),
             },
-            open_pane,
+            open_system_settings,
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -58,7 +58,7 @@ fn request_with(
 }
 
 #[cfg(target_os = "macos")]
-fn open_pane(url: &str) -> CmdResult<()> {
+pub(crate) fn open_system_settings(url: &str) -> CmdResult<()> {
     let outcome = crate::childproc::output_with_deadline(
         std::process::Command::new("/usr/bin/open").arg(url),
         std::time::Duration::from_secs(3),

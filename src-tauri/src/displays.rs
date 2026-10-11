@@ -15,13 +15,14 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 use objc2_foundation::{NSNotification, NSNotificationCenter};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 
 /// Prime the display-geometry cache and observe display changes for the app's
 /// lifetime. Must be called on the main thread (it reads AppKit immediately).
 pub fn install(app: &AppHandle) {
+    crate::display_management::refresh_names();
     if let Some(state) = app.try_state::<AppState>() {
         state.refresh_screen_geometry();
     }
@@ -29,9 +30,15 @@ pub fn install(app: &AppHandle) {
     let center = NSNotificationCenter::defaultCenter();
     let handle = app.clone();
     let block = RcBlock::new(move |_: NonNull<NSNotification>| {
+        let had_dimming = crate::display_management::has_dimming();
+        crate::display_management::refresh_names();
+        if had_dimming != crate::display_management::has_dimming() {
+            crate::tray::refresh(&handle);
+        }
         if let Some(state) = handle.try_state::<AppState>() {
             state.refresh_screen_geometry();
         }
+        let _ = handle.emit("tomari:displays-changed", ());
     });
     // The token owns the observation; it is intentionally leaked because the
     // observation must last until the process exits (mirrors `wake.rs`).

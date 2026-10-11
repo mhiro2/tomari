@@ -8,6 +8,7 @@ mod childproc;
 mod commands;
 mod configuration_warnings;
 mod diagnostics;
+mod display_management;
 #[cfg(target_os = "macos")]
 mod displays;
 #[cfg(target_os = "macos")]
@@ -145,9 +146,28 @@ fn main() {
         .manage(instance)
         .manage(paths)
         .manage(app_state)
+        .manage(display_management::DisplayState::default())
+        .manage(display_management::navigation::DisplayNavigation::default())
         .manage(commands::PendingUpdate::default())
         .manage(backup::BackupSession::default())
         .invoke_handler(tauri::generate_handler![
+            display_management::get_displays,
+            display_management::identify_displays,
+            display_management::navigation::get_display_navigation,
+            display_management::navigation::acknowledge_display_navigation,
+            display_management::navigation::open_system_display_settings,
+            display_management::profiles::get_display_profiles,
+            display_management::profiles::save_display_profile,
+            display_management::profiles::rename_display_profile,
+            display_management::profiles::delete_display_profile,
+            display_management::profiles::clear_display_profiles,
+            display_management::profiles::preview_display_profile,
+            display_management::set_display_dimming,
+            display_management::reset_display_dimming,
+            display_management::preview_display_configuration,
+            display_management::confirm_display_configuration,
+            display_management::revert_display_configuration,
+            display_management::set_display_brightness,
             backup::export_configuration_backup,
             backup::reveal_configuration_backups,
             backup::get_configuration_backup_status,
@@ -315,6 +335,7 @@ fn main() {
             // first drag always has geometry to snap against.
             #[cfg(target_os = "macos")]
             displays::install(&handle);
+            display_management::install(&handle);
 
             // Start the drag-to-snap and drag-to-move taps when enabled.
             #[cfg(target_os = "macos")]

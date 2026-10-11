@@ -23,6 +23,8 @@ struct Text {
     undo: &'static str,
     redo: &'static str,
     keep_awake: &'static str,
+    reset_dimming: &'static str,
+    display_settings: &'static str,
     expand_menu_bar: &'static str,
     open_settings: &'static str,
     check_updates: &'static str,
@@ -35,6 +37,8 @@ const TEXT_EN: Text = Text {
     undo: "Undo Window Change",
     redo: "Redo Window Change",
     keep_awake: "Prevent Sleep",
+    reset_dimming: "Reset Display Dimming",
+    display_settings: "Display Settings…",
     expand_menu_bar: "Show Menu Bar Icons",
     open_settings: "Settings…",
     check_updates: "Check for Updates",
@@ -47,6 +51,8 @@ const TEXT_JA: Text = Text {
     undo: "ウィンドウ操作を元に戻す",
     redo: "ウィンドウ操作をやり直す",
     keep_awake: "スリープ防止",
+    reset_dimming: "画面の追加減光を解除",
+    display_settings: "ディスプレイ設定…",
     expand_menu_bar: "メニューバーのアイコンを表示",
     open_settings: "設定…",
     check_updates: "アップデートを確認",
@@ -158,6 +164,13 @@ fn build_menu(
     let quit = MenuItemBuilder::with_id("quit", text.quit).build(app)?;
 
     let mut menu = menu.item(&undo).item(&redo).separator().item(&keep_awake);
+    menu =
+        menu.item(&MenuItemBuilder::with_id("display-settings", text.display_settings).build(app)?);
+    if crate::display_management::has_dimming() {
+        menu = menu.item(
+            &MenuItemBuilder::with_id("reset-display-dimming", text.reset_dimming).build(app)?,
+        );
+    }
     if let Some(item) = expand_menu_bar {
         menu = menu.item(&item?);
     }
@@ -235,6 +248,12 @@ fn on_menu(app: &AppHandle, id: &str) {
             let _ = actions::show_panel(app);
             let _ = app.emit("tomari:check-update", ());
         }
+        "reset-display-dimming" => {
+            if let Err(error) = crate::display_management::reset_display_dimming(app.clone()) {
+                tracing::warn!(message = %error.message, "could not reset display dimming");
+            }
+        }
+        "display-settings" => crate::display_management::navigation::open(app),
         "keep-awake" => {
             // `toggle` rebuilds the menu (so the checkmark reflects the new
             // state) and emits the change event for the panel.

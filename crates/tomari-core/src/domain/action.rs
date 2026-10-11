@@ -22,6 +22,10 @@ pub enum ImeMode {
 pub enum AppAction {
     /// Show or hide the menu-bar panel window.
     TogglePanel,
+    /// Open the display-management page directly.
+    OpenDisplaySettings,
+    /// Remove every session-only software shade.
+    ResetDisplayDimming,
     /// Move/resize the focused window to a preset position. Repeating the same
     /// request on an unmoved window cycles 1/2 → 1/3 → 2/3.
     SnapWindow(WindowPreset),
@@ -61,6 +65,8 @@ impl AppAction {
     pub fn label(&self) -> String {
         match self {
             Self::TogglePanel => "Toggle Panel".into(),
+            Self::OpenDisplaySettings => "Open Display Settings".into(),
+            Self::ResetDisplayDimming => "Reset All Display Dimming".into(),
             Self::SnapWindow(preset) | Self::SnapWindowExact(preset) => {
                 format!("Snap: {}", preset.label())
             }
@@ -101,6 +107,8 @@ mod tests {
         fn expected_tag(action: &AppAction) -> &'static str {
             match action {
                 AppAction::TogglePanel => "togglePanel",
+                AppAction::OpenDisplaySettings => "openDisplaySettings",
+                AppAction::ResetDisplayDimming => "resetDisplayDimming",
                 AppAction::SnapWindow(_) => "snapWindow",
                 AppAction::SnapWindowExact(_) => "snapWindowExact",
                 AppAction::MoveWindowToDisplay(_) => "moveWindowToDisplay",
@@ -118,6 +126,8 @@ mod tests {
 
         let samples = [
             AppAction::TogglePanel,
+            AppAction::OpenDisplaySettings,
+            AppAction::ResetDisplayDimming,
             AppAction::SnapWindow(WindowPreset::LeftHalf),
             AppAction::SnapWindowExact(WindowPreset::LeftHalf),
             AppAction::MoveWindowToDisplay(DisplayDirection::Next),

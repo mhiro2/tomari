@@ -127,6 +127,14 @@ fn hide_on_main(generation: u64) {
 /// floating above ordinary windows and present on every Space (so it shows over
 /// full-screen apps too).
 fn make_panel(mtm: MainThreadMarker) -> Retained<NSPanel> {
+    let panel = passive_panel(mtm, NSStatusWindowLevel);
+    configure_layer(&panel);
+    panel
+}
+
+/// Shared panel construction for snap previews, dimming, and screen numbers.
+/// Each caller owns its panels and their cleanup independently.
+pub fn passive_panel(mtm: MainThreadMarker, level: isize) -> Retained<NSPanel> {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
@@ -135,21 +143,22 @@ fn make_panel(mtm: MainThreadMarker) -> Retained<NSPanel> {
         false,
     );
     panel.setFloatingPanel(true);
+    panel.setHidesOnDeactivate(false);
     panel.setBecomesKeyOnlyIfNeeded(true);
     panel.setOpaque(false);
     panel.setHasShadow(false);
     // Click-through: the panel must never intercept the drag in progress, nor
     // pollute the Accessibility hit-test for the window underneath.
     panel.setIgnoresMouseEvents(true);
-    panel.setLevel(NSStatusWindowLevel);
+    panel.setLevel(level);
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary,
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
     );
     let clear = NSColor::clearColor();
     panel.setBackgroundColor(Some(&clear));
-    configure_layer(&panel);
     panel
 }
 

@@ -16,6 +16,19 @@ pub fn dispatch(action: &AppAction, app: &AppHandle, state: &AppState) -> Result
     }
     let result = match action {
         AppAction::TogglePanel => toggle_panel(app),
+        AppAction::OpenDisplaySettings => {
+            crate::display_management::navigation::open(app);
+            Ok(())
+        }
+        AppAction::ResetDisplayDimming => {
+            let handle = app.clone();
+            app.run_on_main_thread(move || {
+                if let Err(error) = crate::display_management::reset_display_dimming(handle) {
+                    tracing::warn!(?error, "display dimming reset failed");
+                }
+            })
+            .map_err(|error| CmdError::other(error.to_string()))
+        }
         // Window ops funnel through `window_ops`, which honors the
         // window-management master switch and records undo history.
         AppAction::SnapWindow(preset) => {
