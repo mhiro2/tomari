@@ -32,6 +32,14 @@ Standard Prevent Sleep needs none of these permissions. The administrator
 password for its optional lid-closed mode is deliberately not on the checklist:
 it is requested for each operation rather than granted once (see below).
 
+Display management also works without Accessibility, Input Monitoring, Screen
+Recording, or an administrator password. It reads display configuration and
+changes supported resolution, refresh rate, arrangement, and brightness settings
+through macOS display APIs. Extra dimming uses a local click-through shade;
+it does not capture screen contents. Hardware brightness availability depends
+on the display and macOS, independently of these permission grants. See
+[Display management](displays.md) for capabilities and preview recovery.
+
 ## Accessibility
 
 Required for **moving windows**, **switching the IME**, **sending keys**, and

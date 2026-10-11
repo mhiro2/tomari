@@ -712,7 +712,7 @@ and applies none of them.
   deadlock; each entry checks the immutable recovery gate before touching DB or
   history.
 - **Configuration backups** serialize general settings, hotkeys, modifier
-  rules, and all saved window placements into a versioned JSON document. The
+  rules, all saved window placements, and saved display profiles into a versioned JSON document. The
   external format requires a complete known shape; it does not inherit the
   database decoder's tolerance for missing or unknown preference fields.
   Unsupported versions and invalid content fail before writes. Reading a
@@ -721,7 +721,7 @@ and applies none of them.
   an apparently complete backup. Keyboard collection validation still lives
   at the shell boundary, using `tomari-keyboard` to avoid a core-to-keyboard
   dependency cycle.
-  Import is a whole replacement of the four configuration tables. An immediate
+  Import is a whole replacement of the five configuration tables. An immediate
   transaction compares the expected current snapshot, stores that exact
   snapshot as the internal restore point, and replaces the rows together. Any
   failure rolls back the complete transaction. Other internal metadata remains
@@ -1318,3 +1318,104 @@ permissions never trigger an automatic restart loop.
 5. In save commands, remember to sync persistence with live state (engines,
    shortcut registration, taps). Restart a tap only when the change truly
    requires it.
+
+
+## Display management
+
+`src-tauri/src/display_management/` owns display configuration independently of
+window placement and input permissions. `model.rs` defines the IPC snapshot and
+backend boundary. `configuration.rs` builds complete mode/origin transactions
+from a fresh inventory; it rejects missing, mirrored, and ambiguous displays and
+checks coordinate arithmetic. `controller.rs` serializes preview, confirmation,
+rollback, and brightness through a single controller mutex. The managed
+`DisplayState` starts a lifecycle-tracked watchdog; mutations fail closed if that
+worker did not start or configuration recovery/shutdown forbids changes. The
+watchdog waits on a condition variable when idle and wakes only for a changed
+preview deadline or shutdown; it does not poll in the background.
+
+`native.rs` uses Quartz online-display enumeration and UUID identities. It borrows modes during enumeration and explicitly retains transaction modes
+before their arrays are dropped, validates targets immediately
+before a transaction, and uses app-only scope for previews and permanent scope
+for confirmation. It snapshots the actual post-transaction geometry because
+Quartz may reposition adjacent displays. Rollback only proceeds when the current
+complete topology still matches the owned preview. A failed restore retains its
+snapshot for explicit retry and cannot be confirmed. The watchdog restores pending
+previews before shutdown finishes; app-only scope additionally covers process
+termination. The application never globally resets another app's display state.
+
+Display names are cached from `NSScreen` on the main thread and refreshed by the
+existing screen-parameters observer. Inventory and configuration run on Tauri's
+blocking pool. Optional DisplayServices brightness symbols are dynamically loaded
+once; a successful read is required before offering the hardware control. No
+screen capture, display-driver overrides, or administrator helper is involved.
+`dimming.rs` keeps click-through AppKit panels in a main-thread-only map, with a
+separate numeric snapshot for background reads. Reconfiguration repositions or
+removes owned panels. All-screen reset is independent of preview state, and
+shutdown queues panel removal before the process exits. Dimming never mutates
+shared display gamma tables or persists across launches.
+
+`src/lib/displays.ts` owns the frontend contracts and resolution/rate grouping.
+`useDisplayState` subscribes before reading the inventory, rejects stale responses
+using request generations, coalesces overlapping inventory reads, serializes UI
+mutations, and only polls while a live preview is pending. Notifications received
+during a mutation trigger one fresh read afterward, so a connection change cannot
+be hidden by the mutation's older snapshot. Resolution, brightness,
+arrangement, and saved profiles use the shared segmented navigation so controls remain reachable
+in the minimum-size settings window. It refreshes on display events and window focus. English and
+Japanese share the same typed translation keys. Browser preview data and fake
+backend tests do not mutate the host display configuration.
+
+`profiles.rs` captures only confirmed complete configurations. Stored profiles
+live in the core domain and SQLite `display_profiles` table; mode dimensions and
+refresh rates survive changes to ephemeral Quartz mode IDs. Application resolves
+every mode again and requires the exact connected UUID set before using the
+normal preview controller. Profile edits use the existing configuration-mutation
+lock, so backup replacement and saved-profile edits serialize. Invalid stored
+rows prevent export rather than yielding an incomplete backup, and the UI offers
+an explicit confirmed profile reset. Backup format 2 includes profiles and bounds
+them to 32; schema migration 4 removes the incompatible version-1 undo snapshot.
+Importing profiles never triggers display changes. Raw IPC configuration requests
+cannot inject a profile; recall uses the saved identifier.
+
+The tray's Display Settings entry uses `navigation.rs` to retain a revisioned
+request until the operational settings shell handles it. The frontend subscribes
+before pulling, ignores obsolete responses, and acknowledges only the handled
+revision. A request survives startup/recovery screens, and an old acknowledgement
+cannot erase a newer tray click. Navigation does not depend on the display
+controller mutex or a native inventory read.
+`OpenDisplaySettings` uses this same navigation request from the shared action
+dispatcher. `ResetDisplayDimming` schedules the existing all-screen reset on the
+main thread, so keyboard callbacks never access AppKit panels directly. Both
+actions can be assigned to hotkeys or modifier taps without adding default keys.
+
+`identify.rs` displays the frontend's current display order as numbered panels.
+It resolves all identities before showing any panel and rejects ambiguous or
+mirrored selections. A one-shot `NSTimer` on the main run loop's common modes
+removes the panels after three seconds, including during menu tracking. Repeated
+identification invalidates the previous timer; screen changes and shutdown clear
+the panels as well. The existing app-level `overlay.rs` shares a nonactivating,
+click-through panel constructor between window-snap previews, software dimming,
+and identification, without sharing their ownership or lifetime.
+
+Inventory exposes the current Quartz connection ID only as a frontend list key.
+Persistent profiles and mutation requests use display UUIDs. Every native write
+resolves that UUID again and rejects multiple matches, so identical displays with
+an ambiguous identity cannot silently target the first connected screen.
+
+After a preview transaction, the controller accepts Quartz-adjusted origins only
+if every display identity and requested mode still matches. A concurrently changed
+display set or mode invalidates confirmation instead of becoming an owned preview.
+Unavailable mode metadata retains the restore point until ownership can be checked
+again; it is not treated as proof that another actor changed the desktop.
+If the first post-write read fails, the same identity/mode check applies to the
+first complete read, including the watchdog's read at expiry. This preserves
+rollback when Quartz adjusted origins before the temporary read failure. After
+that observation, ownership requires exact modes and origins again.
+
+DDC/CI is not part of this backend. A separate transport would need bounded bus
+work outside the preview-controller lock, uniquely matched I/O services, explicit
+ownership of native handles, and monitor-level response verification. Existing
+implementations such as [ddc-macos](https://github.com/haimgel/ddc-macos-rs) and
+[AppleSiliconDDC](https://github.com/waydabber/AppleSiliconDDC) illustrate the
+platform-specific transport and device-matching work; a dependency alone does
+not establish those integration properties.

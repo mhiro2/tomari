@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Small macOS utilities under a single menu bar icon.</b><br/>
-  Keyboard customization, window management and keep awake — one quiet place, built to grow.
+  Keyboard customization, window and display management, and keep awake — one quiet place, built to grow.
 </p>
 
 ## Features
@@ -33,6 +33,23 @@
 - Drag a window to a screen edge or corner to snap on release (optional).
 - Familiar left/right/maximize shortcuts remain available for quick tiling;
   the menu bar stays focused on status and recovery instead of placement grids.
+
+### Displays
+
+- Open display controls from the menu bar or a configurable keyboard shortcut.
+- Assign a shortcut or modifier tap to reset all software dimming immediately.
+- Inspect connected displays and choose resolution, HiDPI scaling, and refresh
+  rate from the modes macOS provides.
+- Position screens relative to one another and choose the main display.
+- Save complete display configurations and recall them with a preview. Saved
+  configurations are included in settings backups.
+- Preview configuration changes for 20 seconds, with backend-managed rollback
+  and explicit confirmation before saving.
+- Adjust native hardware brightness on supported displays. Availability is
+  detected per display. Extra software dimming also works without native
+  brightness support and can be reset from the menu bar.
+
+See the [display guide](docs/displays.md) for supported features and limitations.
 
 ### Menu bar availability
 

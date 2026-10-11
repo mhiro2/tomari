@@ -268,3 +268,104 @@ mise exec -- python3 -m unittest discover -s tools -p 'test_*.py'
 These tests cover sampling arithmetic, finite timing, process replacement and
 exit, malformed data, failures, and argument bounds. They do not execute the
 desktop matrix or establish a performance baseline.
+
+
+## Display management
+
+Perform configuration-changing checks only in a graphical session where a
+brief resolution change is acceptable. The normal automated suite uses fake
+hardware. The opt-in inventory test in [the display guide](displays.md) is
+read-only.
+
+- Open Displays with no input permissions granted. Verify names, main-display
+  marker, proportional arrangement, logical/pixel sizes, and current rate.
+- Preview another supported resolution/rate. Confirm it, then restore the
+  original explicitly. Separately let a preview expire with Settings closed.
+- Quit while a preview is pending; verify the previous/session configuration
+  returns. In a disposable session, also verify process termination recovery.
+- With two screens, preview each relative placement and a main-display change.
+  Revert and verify every screen's original mode and origin, not just the target.
+- Disconnect a screen or change the configuration in System Settings during a
+  preview. An old confirmation must not save or overwrite that external change.
+- Verify native brightness reads and writes on a supported display, and the
+  unavailable explanation on an unsupported one. Restore the test brightness.
+- Verify mirrored displays are explained and configuration controls do not
+  independently change a member of the mirror set.
+- Verify Escape reverts the current preview and keyboard focus moves to its
+  confirmation heading. Check the smallest settings window in English/Japanese.
+
+- Apply software dimming to one screen, then change resolution and switch Spaces.
+  The shade must track only that display, leave mouse/keyboard input untouched,
+  and remain visible over full-screen apps. Reset from the tray and Settings.
+  Verify unplugging, switching to mirroring, and quitting remove the shade.
+- With a preview pending, verify **Reset all dimming** still works. Reject
+  non-finite, negative, and greater-than-80% amounts at the command boundary.
+- Assign **Open Display Settings** and **Reset All Display Dimming** to hotkeys
+  or modifier taps. Verify opening works while another settings section is active,
+  and reset removes shades without confirming or reverting a pending mode preview.
+- Leave Displays closed with no preview pending. The display watchdog must have
+  no recurring timer wakeups, and no inventory polling should be active.
+
+### Saved display configurations
+
+- Save a confirmed multi-display layout, change resolution and arrangement, then
+  recall it. Verify every saved mode and origin and exercise both Keep and timeout.
+- Reconnect the same screens and recall again; mode numbers may differ, but
+  resolution, rendering dimensions, and refresh rate must match.
+- Disconnect one screen or attach an extra screen. Recall must be unavailable.
+- Rename a profile while its displays are disconnected and while all 32 slots
+  are occupied. Its identity and saved modes/origins must remain unchanged.
+  Cancel an edit and simulate a storage failure; failure must retain the draft.
+- Export, delete a profile, then import. The profile must return without any live
+  display changes; one-step import undo must restore the prior saved-profile set.
+- Switch to another application with extra dimming enabled. The shade must stay
+  visible and click-through until explicitly reset or Tomari exits.
+
+These physical configuration and panel tests have not been run on the host.
+
+The Japanese browser preview was visually checked at the minimum 860 × 620
+window size with a long unbroken display name and a 76-character profile name.
+Display cards and saved-mode summaries wrap within the content area, the saved
+profile selector stays bounded, and the preview/delete/system-settings actions
+remain reachable by vertical scrolling. This uses simulated display data.
+
+- Choose **Open macOS Display settings…** while inventory loading is failing;
+  verify the system Displays pane opens and no display setting changes. The
+  command uses the installed Displays extension identifier. Native pane launch
+  has not been exercised on the host; the failure-state UI route is tested.
+
+- Identify two displays with identical model names. The numbers on physical
+  screens must match the cards, arrangement diagram, placement reference selector,
+  and saved-profile summaries. Identification panels must ignore input,
+  remain above extra dimming, and disappear after three seconds. Repeat the
+  action before expiry, open a native menu, unplug a screen, and quit during
+  identification; no stale panel should remain. Not run on the host.
+
+### Read-only inventory timing
+
+On 2026-10-11, 20 consecutive inventory reads with the host's built-in display
+measured approximately 2.04 seconds at the slowest (initial) read and 0.39 ms at
+the median. This is a local observation, not a bound for external display setups.
+The UI coalesces concurrent reads and the backend performs them off the main
+thread. Reproduce without changing display settings using:
+
+```sh
+mise exec -- cargo test -p tomari-app \
+  display_management::native::tests::read_only_inventory_latency \
+  -- --ignored --nocapture
+```
+
+For longer resource checks, the read-only soak test samples the inventory once
+per second and reports successful reads, read errors, maximum read latency, and
+peak resident-memory growth after warm-up. Its default duration is one minute;
+the environment variable accepts 10–21,600 seconds. For a three-hour run:
+
+```sh
+TOMARI_DISPLAY_SOAK_SECONDS=10800 mise exec -- cargo test -p tomari-app \
+  display_management::native::tests::read_only_inventory_soak \
+  -- --ignored --nocapture
+```
+
+Run this in a graphical macOS session. The test never changes display settings.
+It requires at least one successful sample and limits peak resident-memory
+growth to 64 MiB; this detects substantial retained allocations, not every leak.

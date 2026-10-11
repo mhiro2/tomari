@@ -357,13 +357,13 @@ Even with the icon hidden, you can always reopen the window:
 ## Settings backups
 
 Under **General → Settings backup**, **Export Settings** creates a versioned
-JSON backup of general preferences, global shortcuts, modifier rules, and every
-app's saved Position A/B. It writes a local file in Tomari's application-data
+JSON backup of general preferences, global shortcuts, modifier rules, every
+app's saved Position A/B, and saved display configurations. It writes a local file in Tomari's application-data
 `backups` folder; **Open Backup Folder** opens that location in Finder. Files
 are created with owner-only read/write permissions.
 
 A backup contains your labels, shortcut bindings, keystroke actions, application
-names and bundle identifiers, and saved positions. It is intended to restore
+names and bundle identifiers, saved positions, and display UUIDs and mode descriptions. It is intended to restore
 your configuration and is not an anonymized support report. Keep it private
 when sharing diagnostic information. It does not contain raw input, window
 titles, macOS permission grants, HID ownership records, Prevent Sleep's active
@@ -371,11 +371,15 @@ session or safety policies, or window-movement history. Importing never grants
 permissions or starts a Prevent Sleep session.
 
 Use **Choose Backup…** to preview a JSON file's contents, then confirm with
-**Replace All Settings**. Import **replaces all four configuration groups**; it
+**Replace All Settings**. Import **replaces all five configuration groups**; it
 does not merge rows with the existing configuration. Canceling the preview changes
 nothing. Unsupported format versions, incomplete or unknown fields, invalid
 values, and conflicting keyboard records are rejected before anything is
-written. Version 1 allows at most 2 MiB and 1,000 records in each collection.
+written. Version 2 allows at most 2 MiB, 1,000 records per keyboard or window
+collection, and 32 display profiles. Version 1 files are not accepted. The schema
+upgrade clears the old, incompatible one-step import undo document; exported
+files and ordinary settings remain intact. Importing profiles does not apply
+them to the active displays.
 A file that is readable JSON is not necessarily a valid Tomari backup.
 If the current configuration changes after the preview, preview again before
 replacing it so the confirmation refers to the state actually being replaced.
@@ -420,3 +424,22 @@ automated validation does not establish that every macOS side effect succeeds.
 The Tomari window and tray menu are available in **Japanese and English**. By
 default Tomari follows your system language; you can also pick a language
 explicitly in the General section.
+
+
+## Displays
+
+The Displays page shows a proportional overview of connected screens, logical
+and rendering resolutions, HiDPI availability, refresh rates, and native hardware
+brightness where supported, plus session-only software dimming with a menu-bar
+reset. Resolution/rate changes, relative arrangement, and
+main-display selection use a 20-second preview with confirmation and automatic
+rollback, even when the settings page is closed. A full desktop snapshot keeps
+mode and position restoration together.
+Named profiles save the complete resolution/rate/layout configuration for the
+same connected screens, with fresh mode matching when recalled. Profiles are
+included in settings backups; importing them does not change the live displays.
+
+Display management is independent of Accessibility and Input Monitoring.
+Mirrored configurations remain in macOS System Settings. Unsupported DDC/CI,
+virtual-display, EDID, HDR-boost, and rotation controls are not offered.
+See [Display management](displays.md) for the full behavior and recovery model.
