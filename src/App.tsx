@@ -9,6 +9,8 @@ import { formatCmdError } from './lib/errors';
 import { I18nProvider, resolveLang, useT } from './lib/i18n';
 import { SettingsProvider, useSettings } from './lib/settings';
 import type { PermissionsChanged } from './lib/types';
+import { useDisplayNavigation } from './lib/useDisplayNavigation';
+import { DisplayView } from './views/DisplayView';
 import { GeneralView } from './views/GeneralView';
 import { HealthView, type HealthDestination } from './views/HealthView';
 import { KeyboardView } from './views/KeyboardView';
@@ -19,7 +21,13 @@ import { WindowView } from './views/WindowView';
 
 type Section = SectionName;
 
-const TOOL_SECTIONS = ['window', 'keyboard', 'menubar', 'session'] as const satisfies Section[];
+const TOOL_SECTIONS = [
+  'window',
+  'display',
+  'keyboard',
+  'menubar',
+  'session',
+] as const satisfies Section[];
 const APP_SECTIONS = ['general', 'health'] as const satisfies Section[];
 const SECTIONS = [...TOOL_SECTIONS, ...APP_SECTIONS] as const;
 const LAST_SECTION_KEY = 'tomari.settings.lastSection';
@@ -124,6 +132,7 @@ function OperationalShell() {
   // same revision while reading the bits at different moments, and letting
   // the later arrival win would let state run backwards.
   const permissionRevisionRef = useRef(-1);
+  const displayNavigationRequested = useRef(false);
   const permissionsRef = useRef<SetupPermissions>({ accessibility: false, inputMonitoring: false });
   const mainRef = useRef<HTMLElement>(null);
 
@@ -208,7 +217,11 @@ function OperationalShell() {
         // missing *now*; if a newer snapshot says they are all back, that
         // context is over and must not resurface on a later, unrelated revoke.
         setUpdateRegrant(status.updateRegrant && missing);
-        setSetupOpen(missing && (status.firstRun || status.updateRegrant));
+        setSetupOpen(
+          missing &&
+            (status.firstRun || status.updateRegrant) &&
+            !displayNavigationRequested.current,
+        );
       } catch {
         // The status stays unknown — shown as such, never as ready — and the
         // status control offers a retry. Settings remain usable meanwhile.
@@ -244,6 +257,15 @@ function OperationalShell() {
     setHealthDestination(destination);
     setSection(destination.section);
   }, []);
+  const openDisplays = useCallback(() => {
+    // A direct tray request should reach this permission-independent feature
+    // even if the first-run permission status is still arriving.
+    displayNavigationRequested.current = true;
+    setSetupOpen(false);
+    setHealthDestination(null);
+    setSection('display');
+  }, []);
+  useDisplayNavigation(openDisplays);
   const openSetup = useCallback(() => setSetupOpen(true), []);
   const closeSetup = useCallback(() => {
     setSetupOpen(false);
@@ -628,6 +650,7 @@ function SelectedView({
   onOpenPermissions: () => void;
   onOpenKeyboard: () => void;
 }) {
+  if (section === 'display') return <DisplayView />;
   if (section === 'keyboard') {
     return (
       <KeyboardView

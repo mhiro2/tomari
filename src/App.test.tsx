@@ -425,6 +425,45 @@ describe('App setup and permission status', () => {
     expect(within(sidebar()).queryByRole('button', { name: 'Home' })).not.toBeInTheDocument();
   });
 
+  it('opens Displays for a queued tray request instead of the remembered section', async () => {
+    window.localStorage.setItem(LAST_SECTION_KEY, 'general');
+    mockCommands({
+      get_display_navigation: 4,
+      get_displays: { displays: [], pending: null, notice: null, revision: 0 },
+    });
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Displays', level: 1 })).toBeInTheDocument();
+    expect(nav('Displays')).toHaveAttribute('aria-current', 'page');
+    expect(mockInvoke).toHaveBeenCalledWith('acknowledge_display_navigation', { revision: 4 });
+  });
+
+  it('lets a direct Displays request bypass the unrelated first-run permission dialog', async () => {
+    let resolveSetup: ((status: SetupStatus) => void) | undefined;
+    mockCommands({
+      get_display_navigation: 5,
+      get_displays: { displays: [], pending: null, notice: null, revision: 0 },
+      setup_status: new Promise<SetupStatus>((resolve) => {
+        resolveSetup = resolve;
+      }),
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('acknowledge_display_navigation', { revision: 5 }),
+    );
+    await act(async () =>
+      resolveSetup?.({
+        ...ALL_GRANTED,
+        firstRun: true,
+        accessibility: false,
+        inputMonitoring: false,
+      }),
+    );
+    expect(await screen.findByRole('heading', { name: 'Displays', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(nav('Permissions: Needs attention'));
+    expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
+  });
+
   it('opens setup immediately on the first run when a permission is missing', async () => {
     mockCommands({
       setup_status: { ...ALL_GRANTED, firstRun: true, accessibility: false },
@@ -435,6 +474,59 @@ describe('App setup and permission status', () => {
     expect(await screen.findByRole('dialog', { name: 'Get Tomari ready' })).toBeInTheDocument();
     expect(screen.getByText('Accessibility')).toBeInTheDocument();
     expect(nav('Permissions: Needs attention')).toBeInTheDocument();
+  });
+
+  it('allows display brightness after deferring both permissions on first launch', async () => {
+    const inventory = {
+      displays: [
+        {
+          connectionId: 1,
+          id: 'built-in',
+          name: 'Built-in display',
+          builtIn: true,
+          main: true,
+          mirrored: false,
+          x: 0,
+          y: 0,
+          width: 1920,
+          height: 1080,
+          currentMode: null,
+          modes: [],
+          brightness: 0.5,
+          softwareDimming: 0,
+        },
+      ],
+      pending: null,
+      notice: null,
+      revision: 0,
+    };
+    mockCommands({
+      setup_status: {
+        ...ALL_GRANTED,
+        firstRun: true,
+        accessibility: false,
+        inputMonitoring: false,
+      },
+      get_displays: inventory,
+      set_display_brightness: inventory,
+    });
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Get Tomari ready' });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up later' }));
+    fireEvent.click(nav('Displays'));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Brightness' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Brightness' }), {
+      target: { value: '65' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply brightness' }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('set_display_brightness', {
+        displayId: 'built-in',
+        value: 0.65,
+      }),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith('request_accessibility');
+    expect(mockInvoke).not.toHaveBeenCalledWith('request_input_monitoring');
   });
 
   it('keeps the operational loading state centered while setup status is pending', async () => {
@@ -659,7 +751,7 @@ describe('App sidebar and page persistence', () => {
       within(tools)
         .getAllByRole('button')
         .map((button) => button.textContent),
-    ).toEqual(['Windows', 'Keyboard', 'Menu Bar', 'Prevent Sleep']);
+    ).toEqual(['Windows', 'Displays', 'Keyboard', 'Menu Bar', 'Prevent Sleep']);
     expect(
       within(app)
         .getAllByRole('button')

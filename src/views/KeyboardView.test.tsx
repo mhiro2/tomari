@@ -525,6 +525,30 @@ describe('KeyboardView', () => {
     );
   });
 
+  it.each([
+    ['displays', 'openDisplaySettings'],
+    ['resetDimming', 'resetDisplayDimming'],
+  ])('saves the %s display action as a modifier tap', async (choice, type) => {
+    renderView(<KeyboardView />);
+    fireEvent.change(await screen.findByLabelText('Tap action for Caps Lock'), {
+      target: { value: choice },
+    });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('save_modifier_rule', {
+        originalId: RULE.id,
+        rule: expect.objectContaining({ id: RULE.id, tap: { type } }),
+      }),
+    );
+  });
+
+  it('offers display navigation and dimming recovery in the global shortcut builder', async () => {
+    renderView(<KeyboardView />);
+    await openShortcuts();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Shortcut' }));
+    expect(screen.getByRole('option', { name: 'Open Display Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Reset All Display Dimming' })).toBeInTheDocument();
+  });
+
   it('disables a hotkey row while its save is in flight and re-enables it once persisted', async () => {
     let resolveToggleSave: (() => void) | undefined;
     mockInvoke.mockImplementation((cmd: string, args?: unknown) => {

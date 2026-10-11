@@ -6,6 +6,119 @@ import { createContext, useContext, type ReactNode } from 'react';
 import type { Language } from './types';
 
 const en = {
+  'display.profiles': 'Profiles',
+  'display.external': 'External display',
+  'display.unnamedProfile': 'Unnamed configuration',
+  'display.systemSettings': 'Open macOS Display settings…',
+  'display.identify': 'Identify',
+  'display.ambiguousIdentity':
+    'macOS reports the same identity for multiple screens. Controls for those screens and changes to the whole display configuration are unavailable.',
+  'display.incompleteConfiguration':
+    'macOS could not report the current resolution for every display. Refresh before changing or confirming the display configuration.',
+  'display.identifyHint': 'Show these numbers on the connected screens for three seconds.',
+  'display.profilesHint':
+    'Save resolution, refresh rate, main display, and arrangement together. Profiles apply only to the same connected displays and always use a 20-second preview. Brightness and extra dimming are not saved.',
+  'display.profileName': 'Profile name',
+  'display.profilePlaceholder': 'For example, Focus or Presentation',
+  'display.saveProfile': 'Save current configuration',
+  'display.savedProfiles': 'Saved configurations',
+  'display.profileContents': 'Saved display settings',
+  'display.disconnectedScreen': 'Disconnected display',
+  'display.profileReady':
+    'Ready for {count} connected displays. Saved modes are checked when applied.',
+  'display.applyProfile': 'Preview configuration',
+  'display.deleteProfile': 'Delete profile',
+  'display.renameProfile': 'Rename profile',
+  'display.newProfileName': 'New profile name',
+  'display.saveProfileName': 'Save name',
+  'display.deleteProfileHint': 'Delete “{name}”? Your current display settings stay as they are.',
+  'display.noProfiles': 'No saved configurations yet.',
+  'display.profileLimit': 'You can save up to 32 configurations. Delete one before saving another.',
+  'display.clearProfiles': 'Reset saved profiles',
+  'display.clearProfilesHint':
+    'Delete all saved display profiles? Current display settings are unaffected.',
+  'display.error.invalidProfile':
+    'Use a name of 1–80 characters and a valid extended display configuration.',
+  'display.error.profileUnavailable':
+    'Connect exactly the displays used by this saved configuration.',
+  'display.error.profileStorage':
+    'Saved display profiles could not be read or written. Retry, or reset saved profiles if their data is damaged.',
+  'display.error.refreshRequired':
+    'The change was sent, but the current display state could not be read. Refresh to check it.',
+  'display.controls': 'Display controls',
+  'display.singleDisplay': 'Connect another display to arrange your desktop.',
+  'display.dimming': 'Extra dimming',
+  'display.dimmingHint':
+    'Dim the image with a software shade, even when hardware brightness is unavailable. This does not reduce the backlight’s power use.',
+  'display.dimmingSession':
+    'Session only. Resets when Tomari quits; capped at 80% so the screen stays visible.',
+  'display.applyDimming': 'Apply dimming',
+  'display.resetDimming': 'Reset all dimming',
+  'display.error.invalidDimming': 'Choose software dimming between 0 and 80%.',
+
+  'display.refreshRate': 'Refresh rate',
+  'display.automaticRate': 'Automatic / variable',
+  'display.showLowResolution': 'Show non-HiDPI resolutions',
+
+  'display.position': 'Arrangement',
+  'display.positionHint': 'Place this display beside another. macOS keeps the desktop connected.',
+  'display.relativeTo': 'Next to',
+  'display.placement': 'Position',
+  'display.left': 'Left',
+  'display.right': 'Right',
+  'display.above': 'Above',
+  'display.below': 'Below',
+  'display.tryPosition': 'Try arrangement',
+  'display.makeMain': 'Use as main display',
+  'display.mainHint': 'The main display anchors the desktop arrangement.',
+  'display.error.invalidArrangement':
+    'Choose a different connected display as the arrangement reference.',
+
+  'app.nav.display': 'Displays',
+  'display.title': 'Displays',
+  'display.description':
+    'Choose a comfortable resolution and brightness for each connected display.',
+  'display.arrangement': 'Your displays',
+  'display.builtIn': 'Built-in display',
+  'display.main': 'Main display',
+  'display.mirrored': 'Mirroring',
+  'display.select': 'Select {name}',
+  'display.resolution': 'Resolution',
+  'display.resolutionHint':
+    'HiDPI keeps text sharp. Available modes come from macOS and your display.',
+  'display.current': 'Current: {mode}',
+  'display.pixels': 'Rendered at {width} × {height} pixels',
+  'display.preview': 'Try resolution',
+  'display.previewTitle': 'Keep this display setting?',
+  'display.previewHint':
+    'Reverting in {seconds} seconds. The timer continues if you leave this page.',
+  'display.keep': 'Keep changes',
+  'display.revert': 'Revert now',
+  'display.brightness': 'Brightness',
+  'display.brightnessHint': 'Adjust the display’s hardware brightness.',
+  'display.brightnessUnavailable':
+    'Hardware brightness is unavailable through macOS for this display. Use the display’s own controls.',
+  'display.applyBrightness': 'Apply brightness',
+  'display.empty': 'No displays are available. Reconnect a display and refresh.',
+  'display.loading': 'Reading displays…',
+  'display.loadFailed': 'Could not read your displays. Try refreshing.',
+  'display.notice.reverted': 'The previous display setting was restored.',
+  'display.notice.restoreFailed':
+    'The previous setting could not be restored. Try reverting again or use macOS Display settings.',
+  'display.notice.displayChanged':
+    'The display disconnected or its settings changed elsewhere. The preview was cancelled.',
+  'display.error.unavailable': 'Display management is unavailable on this system.',
+  'display.error.disconnected': 'This display disconnected. Refresh to see connected displays.',
+  'display.error.modeUnavailable':
+    'This resolution is no longer available. Refresh and choose another.',
+  'display.error.mirrored':
+    'Change mirrored displays together in macOS Display settings. Resolution, arrangement, and saved-configuration changes are unavailable while mirroring is active.',
+  'display.error.busy': 'Finish the current display preview before making another change.',
+  'display.error.previewExpired': 'This preview has ended. Refresh to see the current setting.',
+  'display.error.invalidBrightness': 'Choose a brightness between 0 and 100%.',
+  'display.error.brightnessUnavailable': 'Hardware brightness is unavailable for this display.',
+  'display.error.system': 'macOS could not apply the display change. Refresh and try again.',
+
   // Sidebar section names. Prevent Sleep is named for what it does, matching
   // the tray entry and the switch inside the section.
   'app.nav.keyboard': 'Keyboard',
@@ -64,6 +177,8 @@ const en = {
   'direction.prev': 'Previous Display',
 
   'action.togglePanel': 'Toggle Tomari',
+  'action.openDisplaySettings': 'Open Display Settings',
+  'action.resetDisplayDimming': 'Reset All Display Dimming',
   'action.snap': 'Snap: {target}',
   'action.moveToDisplay': 'Move to {display}',
   'action.recallPlacement': 'Restore Saved Position',
@@ -204,10 +319,10 @@ const en = {
 
   'backup.title': 'Settings backup',
   'backup.privacy':
-    'Settings backups contain your shortcut bindings, labels, and app identifiers. They are different from the anonymous support bundle in Diagnostics.',
+    'Settings backups contain your shortcut bindings, labels, app identifiers, and display identities. They are different from the anonymous support bundle in Diagnostics.',
   'backup.exportTitle': 'Back up your configuration',
   'backup.exportDescription':
-    'Save general settings, shortcuts, modifier rules, and remembered window positions as a JSON file.',
+    'Save general settings, shortcuts, modifier rules, remembered window positions, and display profiles as a JSON file.',
   'backup.export': 'Export Settings',
   'backup.exporting': 'Exporting…',
   'backup.exported': 'Settings backup saved.',
@@ -241,6 +356,7 @@ const en = {
   'backup.hotkeys': 'Shortcuts',
   'backup.modifierRules': 'Modifier rules',
   'backup.windowPlacements': 'Window positions',
+  'backup.displayProfiles': 'Display profiles',
   'backup.settingsChanges': 'General settings that will change',
   'backup.settingsUnchanged':
     'General settings have the same values. The saved items above will still be replaced.',
@@ -248,7 +364,7 @@ const en = {
   'backup.dragToSnap': 'Drag to snap',
   'backup.dragToMove': 'Drag to move and resize',
   'backup.runtimeExcluded':
-    'Permissions, Caps Lock ownership, and the current Prevent Sleep session are not imported or restored.',
+    'Permissions, Caps Lock ownership, and the current Prevent Sleep session are not imported or restored. Saved display profiles are replaced without changing the active displays.',
   'backup.hiddenIcon':
     'This configuration hides the menu bar icon. Launch Tomari again from Spotlight to reopen Settings.',
   'backup.reviewAgain': 'Review Again',
@@ -283,7 +399,7 @@ const en = {
 
   'setup.title': 'Get Tomari ready',
   'setup.intro':
-    'Allow two macOS permissions so Tomari can move windows and recognize key gestures. You can review either permission later.',
+    'Allow two macOS permissions so Tomari can move windows and recognize key gestures. Display management works without these permissions; choose Set up later to use it now.',
   'setup.accessibility': 'Accessibility',
   'setup.accessibilityWhy':
     'Lets Tomari move and resize windows, send keys, and read or rearrange your menu bar items.',
@@ -696,6 +812,119 @@ const en = {
 export type MessageKey = keyof typeof en;
 
 const ja: Record<MessageKey, string> = {
+  'display.profiles': '保存した構成',
+  'display.external': '外部ディスプレイ',
+  'display.unnamedProfile': '名前のない構成',
+  'display.systemSettings': 'macOS のディスプレイ設定を開く…',
+  'display.identify': '画面を識別',
+  'display.ambiguousIdentity':
+    '複数の画面に同じ識別子が報告されています。対象画面の操作と、画面構成全体の変更は利用できません。',
+  'display.incompleteConfiguration':
+    '一部の画面の現在の解像度を macOS から取得できませんでした。画面構成を変更・確定する前に「更新」を押してください。',
+  'display.identifyHint': '接続中の画面に、一覧と同じ番号を 3 秒間表示します。',
+  'display.profilesHint':
+    '解像度・リフレッシュレート・メイン画面・配置をまとめて保存します。同じディスプレイの接続時に呼び出せ、20 秒の確認後に確定します。明るさと追加減光は保存しません。',
+  'display.profileName': '構成の名前',
+  'display.profilePlaceholder': '例：集中作業、プレゼンテーション',
+  'display.saveProfile': '現在の構成を保存',
+  'display.savedProfiles': '保存した構成',
+  'display.profileContents': '保存された画面設定',
+  'display.disconnectedScreen': '未接続のディスプレイ',
+  'display.profileReady':
+    '接続中の {count} 台に対応しています。適用時に解像度の対応状況を確認します。',
+  'display.applyProfile': '構成を試す',
+  'display.deleteProfile': '保存した構成を削除',
+  'display.renameProfile': '名前を変更',
+  'display.newProfileName': '新しい構成の名前',
+  'display.saveProfileName': '名前を保存',
+  'display.deleteProfileHint': '「{name}」を削除しますか？ 現在の画面設定は変わりません。',
+  'display.noProfiles': '保存した構成はまだありません。',
+  'display.profileLimit':
+    '保存できる構成は 32 件までです。新しく保存するには既存の構成を削除してください。',
+  'display.clearProfiles': '保存した構成をリセット',
+  'display.clearProfilesHint':
+    '保存したディスプレイ構成をすべて削除しますか？ 現在の画面設定は変わりません。',
+  'display.error.invalidProfile':
+    '名前を 1〜80 文字で入力し、ミラーリングを解除した画面構成で保存してください。',
+  'display.error.profileUnavailable': '保存時と同じディスプレイをすべて接続してください。',
+  'display.error.profileStorage':
+    '保存した構成を読み書きできません。再試行するか、データが破損している場合は保存した構成をリセットしてください。',
+  'display.error.refreshRequired':
+    '変更を送信しましたが、現在の画面状態を読み取れませんでした。更新して確認してください。',
+  'display.controls': 'ディスプレイの設定',
+  'display.singleDisplay': 'ほかのディスプレイを接続すると、配置を変更できます。',
+  'display.dimming': '追加の減光',
+  'display.dimmingHint':
+    '本体の明るさを調整できない画面も、ソフトウェアで暗くできます。バックライトの消費電力は変わりません。',
+  'display.dimmingSession':
+    'Tomari 終了時に解除されます。画面が見えなくならないよう、最大 80% まで減光できます。',
+  'display.applyDimming': '減光を適用',
+  'display.resetDimming': 'すべての減光を解除',
+  'display.error.invalidDimming': '減光は 0〜80% の範囲で選んでください。',
+
+  'display.refreshRate': 'リフレッシュレート',
+  'display.automaticRate': '自動・可変',
+  'display.showLowResolution': 'HiDPI 以外の解像度も表示',
+
+  'display.position': '配置',
+  'display.positionHint':
+    'ほかの画面との位置関係を選べます。画面同士がつながるように macOS が調整します。',
+  'display.relativeTo': '基準のディスプレイ',
+  'display.placement': '位置',
+  'display.left': '左',
+  'display.right': '右',
+  'display.above': '上',
+  'display.below': '下',
+  'display.tryPosition': '配置を試す',
+  'display.makeMain': 'メインディスプレイにする',
+  'display.mainHint': 'メインディスプレイを基準に画面が配置されます。',
+  'display.error.invalidArrangement': '配置の基準には、接続中の別のディスプレイを選んでください。',
+
+  'app.nav.display': 'ディスプレイ',
+  'display.title': 'ディスプレイ',
+  'display.description': '接続中の画面ごとに、使いやすい解像度と明るさを選べます。',
+  'display.arrangement': '接続中のディスプレイ',
+  'display.builtIn': '内蔵ディスプレイ',
+  'display.main': 'メインディスプレイ',
+  'display.mirrored': 'ミラーリング中',
+  'display.select': '{name}を選択',
+  'display.resolution': '解像度',
+  'display.resolutionHint':
+    'HiDPI では文字が鮮明に表示されます。macOS とディスプレイが提供するモードを選べます。',
+  'display.current': '現在: {mode}',
+  'display.pixels': '描画解像度: {width} × {height} ピクセル',
+  'display.preview': '解像度を試す',
+  'display.previewTitle': 'この設定を維持しますか？',
+  'display.previewHint': 'あと {seconds} 秒で元に戻ります。この画面を閉じても自動で戻ります。',
+  'display.keep': '変更を維持',
+  'display.revert': '元に戻す',
+  'display.brightness': '明るさ',
+  'display.brightnessHint': 'ディスプレイ本体の明るさを調整します。',
+  'display.brightnessUnavailable':
+    'この画面は macOS 経由の明るさ調整に対応していません。ディスプレイ本体の操作で調整してください。',
+  'display.applyBrightness': '明るさを適用',
+  'display.empty': '利用可能なディスプレイがありません。接続を確認して再読み込みしてください。',
+  'display.loading': 'ディスプレイを読み込み中…',
+  'display.loadFailed': 'ディスプレイを読み込めませんでした。再読み込みしてください。',
+  'display.notice.reverted': '変更前の画面設定に戻しました。',
+  'display.notice.restoreFailed':
+    '変更前の設定に戻せませんでした。再度「元に戻す」を試すか、macOS のディスプレイ設定を開いてください。',
+  'display.notice.displayChanged':
+    '画面の接続または設定が外部で変更されたため、プレビューを終了しました。',
+  'display.error.unavailable': 'このシステムではディスプレイ管理を利用できません。',
+  'display.error.disconnected': 'このディスプレイは切断されました。再読み込みしてください。',
+  'display.error.modeUnavailable':
+    'この解像度は利用できなくなりました。再読み込みして別の解像度を選んでください。',
+  'display.error.mirrored':
+    'ミラーリング中は macOS のディスプレイ設定を利用してください。解像度・配置・保存した構成の適用は、ミラーリングを解除すると使えます。',
+  'display.error.busy': '現在のプレビューを終了してから変更してください。',
+  'display.error.previewExpired':
+    'プレビューは終了しました。再読み込みして現在の設定を確認してください。',
+  'display.error.invalidBrightness': '明るさは 0〜100% の範囲で選んでください。',
+  'display.error.brightnessUnavailable': 'このディスプレイの明るさは調整できません。',
+  'display.error.system':
+    'macOS が画面設定を変更できませんでした。再読み込みしてもう一度試してください。',
+
   'app.nav.keyboard': 'キーボード',
   'app.nav.window': 'ウィンドウ',
   'app.nav.menubar': 'メニューバー',
@@ -752,6 +981,8 @@ const ja: Record<MessageKey, string> = {
   'direction.prev': '前のディスプレイ',
 
   'action.togglePanel': 'Tomari の表示切替',
+  'action.openDisplaySettings': 'ディスプレイ設定を開く',
+  'action.resetDisplayDimming': 'すべての減光を解除',
   'action.snap': 'スナップ: {target}',
   'action.moveToDisplay': '{display} へ移動',
   'action.recallPlacement': '保存位置へ戻す',
@@ -894,10 +1125,10 @@ const ja: Record<MessageKey, string> = {
 
   'backup.title': '設定のバックアップ',
   'backup.privacy':
-    '設定バックアップにはショートカットの割り当て、名前、アプリの識別子が含まれます。「診断」の匿名化されたサポート情報とは異なります。',
+    '設定バックアップにはショートカットの割り当て、名前、アプリとディスプレイの識別子が含まれます。「診断」の匿名化されたサポート情報とは異なります。',
   'backup.exportTitle': '設定を書き出す',
   'backup.exportDescription':
-    '一般設定、ショートカット、修飾キールール、記憶したウィンドウ位置を JSON ファイルに保存します。',
+    '一般設定、ショートカット、修飾キールール、記憶したウィンドウ位置、保存したディスプレイ構成を JSON ファイルに保存します。',
   'backup.export': '設定を書き出す',
   'backup.exporting': '書き出し中…',
   'backup.exported': '設定バックアップを保存しました。',
@@ -931,13 +1162,14 @@ const ja: Record<MessageKey, string> = {
   'backup.hotkeys': 'ショートカット',
   'backup.modifierRules': '修飾キールール',
   'backup.windowPlacements': 'ウィンドウ位置',
+  'backup.displayProfiles': 'ディスプレイ構成',
   'backup.settingsChanges': '変更される一般設定',
   'backup.settingsUnchanged': '一般設定の値は同じです。上の保存済み項目は置き換わります。',
   'backup.setting': '設定項目',
   'backup.dragToSnap': 'ドラッグで整列',
   'backup.dragToMove': 'ドラッグで移動・リサイズ',
   'backup.runtimeExcluded':
-    '権限、Caps Lock 設定の所有記録、実行中のスリープ防止は取り込み・復元しません。',
+    '権限、Caps Lock 設定の所有記録、実行中のスリープ防止は取り込み・復元しません。保存したディスプレイ構成は置き換えますが、現在の画面設定は変わりません。',
   'backup.hiddenIcon':
     'この設定ではメニューバーのアイコンが非表示になります。Spotlight から Tomari をもう一度起動すると設定を開けます。',
   'backup.reviewAgain': 'もう一度確認',
@@ -972,7 +1204,7 @@ const ja: Record<MessageKey, string> = {
 
   'setup.title': 'Tomari を使う準備',
   'setup.intro':
-    'Tomari がウィンドウを動かし、キー操作を認識するために macOS の権限を 2 つ許可します。権限はあとから見直せます。',
+    'ウィンドウの操作とキー操作の認識には、macOS の権限を 2 つ使います。ディスプレイ管理には不要です。「あとで設定する」を選ぶと、権限を許可せずに利用できます。',
   'setup.accessibility': 'アクセシビリティ',
   'setup.accessibilityWhy':
     'ウィンドウの移動・リサイズ、キー送信、メニューバー項目の読み取り・並べ替えに使います。',

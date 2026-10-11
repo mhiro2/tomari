@@ -1,3 +1,4 @@
+import type { DisplayConfigurationRequest, DisplayProfile, DisplaySnapshot } from './lib/displays';
 import type {
   AppSettings,
   ConfigurationBackupOutcome,
@@ -19,11 +20,13 @@ type PreviewBackup = {
   hotkeys: Hotkey[];
   modifierRules: ModifierRule[];
   windowPlacements: WindowPlacement[];
+  displayProfiles: DisplayProfile[];
 };
 const counts = (value: PreviewBackup) => ({
   hotkeys: value.hotkeys.length,
   modifierRules: value.modifierRules.length,
   windowPlacements: value.windowPlacements.length,
+  displayProfiles: value.displayProfiles.length,
 });
 
 // Browser-only sample data for visual review. It is installed only when Vite
@@ -294,11 +297,12 @@ export async function installDevPreview() {
 
   const snapshot = (): PreviewBackup =>
     structuredClone({
-      formatVersion: 1,
+      formatVersion: 2,
       settings,
       hotkeys,
       modifierRules,
       windowPlacements: placement.placements,
+      displayProfiles,
     });
   let previousConfiguration: PreviewBackup | null = null;
   let pendingBackup: {
@@ -322,8 +326,251 @@ export async function installDevPreview() {
     };
   }
 
+  const retina = {
+    id: 1,
+    width: 2560,
+    height: 1440,
+    pixelWidth: 5120,
+    pixelHeight: 2880,
+    hiDpi: true,
+    refreshRate: 60,
+  };
+  const larger = {
+    ...retina,
+    id: 2,
+    width: 1920,
+    height: 1080,
+    pixelWidth: 3840,
+    pixelHeight: 2160,
+  };
+  const laptop = {
+    id: 3,
+    width: 1512,
+    height: 982,
+    pixelWidth: 3024,
+    pixelHeight: 1964,
+    hiDpi: true,
+    refreshRate: 0,
+  };
+  const displaySnapshot: DisplaySnapshot = {
+    revision: 0,
+    pending: null,
+    notice: null,
+    displays: [
+      {
+        id: 'studio',
+        connectionId: 1,
+        name: 'Studio Display',
+        builtIn: false,
+        main: true,
+        mirrored: false,
+        x: 0,
+        y: 0,
+        width: 2560,
+        height: 1440,
+        currentMode: retina,
+        modes: [
+          larger,
+          retina,
+          { ...retina, id: 4, hiDpi: false, pixelWidth: 2560, pixelHeight: 1440 },
+        ],
+        brightness: 0.72,
+        softwareDimming: 0,
+      },
+      {
+        id: 'macbook',
+        connectionId: 2,
+        name: 'Built-in display',
+        builtIn: true,
+        main: false,
+        mirrored: false,
+        x: -1512,
+        y: 458,
+        width: 1512,
+        height: 982,
+        currentMode: laptop,
+        modes: [laptop],
+        brightness: 0.5,
+        softwareDimming: 0,
+      },
+    ],
+  };
+  let displayProfiles: DisplayProfile[] = [];
+  let displayDeadline = 0;
+  let previousDisplays = structuredClone(displaySnapshot.displays);
+  function readPreviewDisplays() {
+    if (displaySnapshot.pending) {
+      displaySnapshot.pending.remainingMs = Math.max(0, displayDeadline - Date.now());
+      if (displaySnapshot.pending.remainingMs === 0) {
+        displaySnapshot.displays = previousDisplays;
+        displaySnapshot.pending = null;
+        displaySnapshot.notice = 'reverted';
+      }
+    }
+    return structuredClone(displaySnapshot);
+  }
+
   const previewCommand: Parameters<typeof mockIPC>[0] = (cmd, payload) => {
     switch (cmd) {
+      case 'get_displays':
+        return readPreviewDisplays();
+      case 'get_display_navigation':
+        return null;
+      case 'identify_displays':
+      case 'open_system_display_settings':
+        return;
+      case 'acknowledge_display_navigation':
+        return;
+      case 'get_display_profiles':
+        return structuredClone(displayProfiles);
+      case 'save_display_profile': {
+        const { name } = payload as { name: string };
+        const id = crypto.randomUUID();
+        displayProfiles.push({
+          id,
+          name: name.trim(),
+          displays: displaySnapshot.displays.map((display) => {
+            const mode = display.currentMode;
+            if (!mode) throw new Error('Current mode unavailable');
+            return {
+              displayId: display.id,
+              x: display.x,
+              y: display.y,
+              mode: {
+                width: mode.width,
+                height: mode.height,
+                pixelWidth: mode.pixelWidth,
+                pixelHeight: mode.pixelHeight,
+                refreshRate: mode.refreshRate,
+              },
+            };
+          }),
+        });
+        return id;
+      }
+      case 'rename_display_profile': {
+        const { id, name } = payload as { id: string; name: string };
+        const profile = displayProfiles.find((item) => item.id === id);
+        if (!profile) throw new Error('Profile unavailable');
+        profile.name = name.trim();
+        return;
+      }
+      case 'delete_display_profile': {
+        const { id } = payload as { id: string };
+        displayProfiles = displayProfiles.filter((profile) => profile.id !== id);
+        return;
+      }
+      case 'clear_display_profiles':
+        displayProfiles = [];
+        return;
+      case 'preview_display_profile': {
+        const { id } = payload as { id: string };
+        const profile = displayProfiles.find((item) => item.id === id);
+        if (!profile || profile.displays.length !== displaySnapshot.displays.length)
+          throw new Error('Profile unavailable');
+        previousDisplays = structuredClone(displaySnapshot.displays);
+        const byId = new Map(displaySnapshot.displays.map((display) => [display.id, display]));
+        for (const saved of profile.displays) {
+          const display = byId.get(saved.displayId);
+          const mode = display?.modes.find(
+            (candidate) =>
+              candidate.width === saved.mode.width &&
+              candidate.height === saved.mode.height &&
+              candidate.pixelWidth === saved.mode.pixelWidth &&
+              candidate.pixelHeight === saved.mode.pixelHeight &&
+              Math.abs(candidate.refreshRate - saved.mode.refreshRate) < 0.01,
+          );
+          if (!display || !mode) throw new Error('Profile mode unavailable');
+          display.currentMode = mode;
+          display.width = mode.width;
+          display.height = mode.height;
+          display.x = saved.x;
+          display.y = saved.y;
+          display.main = saved.x === 0 && saved.y === 0;
+        }
+        displaySnapshot.revision += 1;
+        displaySnapshot.notice = null;
+        displayDeadline = Date.now() + 20000;
+        displaySnapshot.pending = {
+          token: displaySnapshot.revision,
+          displayId: profile.displays[0]?.displayId ?? '',
+          remainingMs: 20000,
+        };
+        return readPreviewDisplays();
+      }
+      case 'preview_display_configuration': {
+        const { request } = payload as { request: DisplayConfigurationRequest };
+        const display = displaySnapshot.displays.find((item) => item.id === request.displayId);
+        if (!display) throw new Error('Display unavailable');
+        previousDisplays = structuredClone(displaySnapshot.displays);
+        if (request.kind === 'mode') {
+          const mode = display.modes.find((item) => item.id === request.modeId);
+          if (!mode) throw new Error('Display mode unavailable');
+          display.currentMode = mode;
+          display.width = mode.width;
+          display.height = mode.height;
+        } else if (request.kind === 'main') {
+          const x = display.x;
+          const y = display.y;
+          for (const item of displaySnapshot.displays) {
+            item.x -= x;
+            item.y -= y;
+            item.main = item.id === display.id;
+          }
+        } else {
+          const anchor = displaySnapshot.displays.find((item) => item.id === request.relativeTo);
+          if (!anchor) throw new Error('Display unavailable');
+          if (request.placement === 'left' || request.placement === 'right') {
+            display.x =
+              request.placement === 'left' ? anchor.x - display.width : anchor.x + anchor.width;
+            display.y = anchor.y + Math.trunc((anchor.height - display.height) / 2);
+          } else {
+            display.x = anchor.x + Math.trunc((anchor.width - display.width) / 2);
+            display.y =
+              request.placement === 'above' ? anchor.y - display.height : anchor.y + anchor.height;
+          }
+          if (display.main) {
+            const x = display.x;
+            const y = display.y;
+            for (const item of displaySnapshot.displays) {
+              item.x -= x;
+              item.y -= y;
+            }
+          }
+        }
+        displaySnapshot.revision += 1;
+        displaySnapshot.notice = null;
+        displayDeadline = Date.now() + 20000;
+        displaySnapshot.pending = {
+          token: displaySnapshot.revision,
+          displayId: display.id,
+          remainingMs: 20000,
+        };
+        return readPreviewDisplays();
+      }
+      case 'confirm_display_configuration':
+        displaySnapshot.pending = null;
+        displaySnapshot.revision += 1;
+        return readPreviewDisplays();
+      case 'revert_display_configuration':
+        displayDeadline = 0;
+        return readPreviewDisplays();
+      case 'set_display_dimming': {
+        const { displayId, amount } = payload as { displayId: string; amount: number };
+        const display = displaySnapshot.displays.find((item) => item.id === displayId);
+        if (display) display.softwareDimming = amount;
+        return;
+      }
+      case 'reset_display_dimming':
+        for (const display of displaySnapshot.displays) display.softwareDimming = 0;
+        return;
+      case 'set_display_brightness': {
+        const { displayId, value } = payload as { displayId: string; value: number };
+        const display = displaySnapshot.displays.find((item) => item.id === displayId);
+        if (display) display.brightness = value;
+        displaySnapshot.revision += 1;
+        return readPreviewDisplays();
+      }
       case 'restart_app':
         throw { code: 'other', message: 'Restart is available in the macOS app.' };
       case 'get_settings': {
@@ -373,11 +620,12 @@ export async function installDevPreview() {
         // structural and semantic validation of user-selected files.
         const incoming = JSON.parse(contents) as PreviewBackup;
         if (
-          incoming.formatVersion !== 1 ||
+          incoming.formatVersion !== 2 ||
           !incoming.settings ||
           !Array.isArray(incoming.hotkeys) ||
           !Array.isArray(incoming.modifierRules) ||
-          !Array.isArray(incoming.windowPlacements)
+          !Array.isArray(incoming.windowPlacements) ||
+          !Array.isArray(incoming.displayProfiles)
         ) {
           throw { code: 'backupInvalid', message: 'Invalid preview backup' };
         }
@@ -402,6 +650,7 @@ export async function installDevPreview() {
         hotkeys.splice(0, hotkeys.length, ...incoming.hotkeys);
         modifierRules.splice(0, modifierRules.length, ...incoming.modifierRules);
         placement.placements = incoming.windowPlacements;
+        displayProfiles = incoming.displayProfiles;
         pendingBackup = null;
         lastApplied = { token, settings: { ...settings }, applyWarnings: [] };
         return lastApplied;

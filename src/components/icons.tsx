@@ -1,7 +1,14 @@
 import type { ReactNode } from 'react';
 
 /** The sections the sidebar can select. */
-export type SectionName = 'keyboard' | 'window' | 'menubar' | 'session' | 'general' | 'health';
+export type SectionName =
+  | 'display'
+  | 'keyboard'
+  | 'window'
+  | 'menubar'
+  | 'session'
+  | 'general'
+  | 'health';
 
 // One drawing standard for every section icon, so the sidebar reads as a single
 // column rather than four unrelated marks: a 16×16 box, a 1.5 stroke, no fill,
@@ -9,6 +16,12 @@ export type SectionName = 'keyboard' | 'window' | 'menubar' | 'session' | 'gener
 // setting `color` alone. Each shape stays inside roughly 12×10 so the four have
 // the same optical weight.
 const SHAPES: Record<SectionName, ReactNode> = {
+  display: (
+    <>
+      <rect x="1.5" y="2" width="13" height="9" rx="1.5" />
+      <path d="M8 11v3M5 14h6" />
+    </>
+  ),
   // A keyboard seen head-on: the case, a row of keys, a space bar.
   keyboard: (
     <>

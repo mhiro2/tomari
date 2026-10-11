@@ -88,6 +88,8 @@ export type Language = 'system' | 'en' | 'ja';
 // contract test there pins each variant's `type` tag so this list stays in sync.
 export type AppAction =
   | { type: 'togglePanel' }
+  | { type: 'openDisplaySettings' }
+  | { type: 'resetDisplayDimming' }
   | { type: 'snapWindow'; value: WindowPreset }
   // Like snapWindow but never cycles — emitted by the tomari:// URL scheme.
   | { type: 'snapWindowExact'; value: WindowPreset }
@@ -263,6 +265,7 @@ export interface ConfigurationCounts {
   hotkeys: number;
   modifierRules: number;
   windowPlacements: number;
+  displayProfiles: number;
 }
 
 export interface ConfigurationBackupPreview {

@@ -24,8 +24,8 @@ const SETTINGS: AppSettings = {
 const PREVIEW: ConfigurationBackupPreview = {
   token: 17,
   kind: 'import',
-  current: { hotkeys: 3, modifierRules: 1, windowPlacements: 0 },
-  incoming: { hotkeys: 2, modifierRules: 4, windowPlacements: 5 },
+  current: { hotkeys: 3, modifierRules: 1, windowPlacements: 0, displayProfiles: 0 },
+  incoming: { hotkeys: 2, modifierRules: 4, windowPlacements: 5, displayProfiles: 2 },
   currentSettings: SETTINGS,
   settings: { ...SETTINGS, launchAtLogin: true, showInMenuBar: false },
 };

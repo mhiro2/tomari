@@ -224,6 +224,8 @@ function ModifierRuleFields({
   const actions: AppAction[] = [
     { type: 'noOp' },
     { type: 'togglePanel' },
+    { type: 'openDisplaySettings' },
+    { type: 'resetDisplayDimming' },
     { type: 'recallWindowPlacement' },
     { type: 'undoWindow' },
     { type: 'redoWindow' },

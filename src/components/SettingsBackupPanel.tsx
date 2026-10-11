@@ -344,6 +344,7 @@ const BACKUP_COUNTS = [
   ['hotkeys', 'backup.hotkeys'],
   ['modifierRules', 'backup.modifierRules'],
   ['windowPlacements', 'backup.windowPlacements'],
+  ['displayProfiles', 'backup.displayProfiles'],
 ] as const;
 
 function BackupPreviewDialog({

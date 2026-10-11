@@ -66,7 +66,14 @@ function heldModifierLabel(rule: ModifierRule, t: Translator): string {
 
 export type KeyboardTab = 'modifiers' | 'shortcuts';
 
-type TapActionKey = 'none' | 'panel' | 'restoreWindow' | 'preventSleep' | 'menuBar';
+type TapActionKey =
+  | 'none'
+  | 'panel'
+  | 'displays'
+  | 'resetDimming'
+  | 'restoreWindow'
+  | 'preventSleep'
+  | 'menuBar';
 
 function tapActionKey(action: AppAction): TapActionKey | 'custom' {
   switch (action.type) {
@@ -74,6 +81,10 @@ function tapActionKey(action: AppAction): TapActionKey | 'custom' {
       return 'none';
     case 'togglePanel':
       return 'panel';
+    case 'openDisplaySettings':
+      return 'displays';
+    case 'resetDisplayDimming':
+      return 'resetDimming';
     case 'recallWindowPlacement':
       return 'restoreWindow';
     case 'toggleKeepAwake':
@@ -91,6 +102,10 @@ function tapAction(key: TapActionKey): AppAction {
       return { type: 'noOp' };
     case 'panel':
       return { type: 'togglePanel' };
+    case 'displays':
+      return { type: 'openDisplaySettings' };
+    case 'resetDimming':
+      return { type: 'resetDisplayDimming' };
     case 'restoreWindow':
       return { type: 'recallWindowPlacement' };
     case 'preventSleep':
@@ -123,6 +138,16 @@ function keyboardShortcutOptions(
 ): HotkeyActionOption[] {
   const options: HotkeyActionOption[] = [
     { key: 'togglePanel', label: t('action.togglePanel'), action: { type: 'togglePanel' } },
+    {
+      key: 'openDisplaySettings',
+      label: t('action.openDisplaySettings'),
+      action: { type: 'openDisplaySettings' },
+    },
+    {
+      key: 'resetDisplayDimming',
+      label: t('action.resetDisplayDimming'),
+      action: { type: 'resetDisplayDimming' },
+    },
     {
       key: 'toggleKeepAwake',
       label: t('action.toggleKeepAwake'),
@@ -858,6 +883,8 @@ function ModifierRow({
           )}
           <option value="none">{t('action.noOp')}</option>
           <option value="panel">{t('action.togglePanel')}</option>
+          <option value="displays">{t('action.openDisplaySettings')}</option>
+          <option value="resetDimming">{t('action.resetDisplayDimming')}</option>
           <option value="restoreWindow">{t('action.recallPlacement')}</option>
           <option value="preventSleep">{t('action.toggleKeepAwake')}</option>
           {/* A rule already set to it keeps its option, so the row can still
