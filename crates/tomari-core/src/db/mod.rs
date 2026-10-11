@@ -15,6 +15,7 @@ use crate::domain::keyboard::{Hotkey, ModifierRule};
 use crate::error::{Error, Result};
 
 mod backup;
+mod display_profiles;
 mod keyboard;
 mod meta;
 mod placements;
@@ -75,6 +76,7 @@ pub struct PersistedStatePreflight {
     pub modifier_rule_rows: PersistedRowCounts,
     pub meta_rows: PersistedRowCounts,
     pub window_placement_rows: PersistedRowCounts,
+    pub display_profile_rows: PersistedRowCounts,
 }
 
 /// How an explicit recovery reset treats readable keyboard automation rows.
@@ -98,6 +100,7 @@ impl PersistedStatePreflight {
             self.modifier_rule_rows,
             self.meta_rows,
             self.window_placement_rows,
+            self.display_profile_rows,
         ]
         .into_iter()
         .all(|rows| rows.stored == 0)
@@ -121,6 +124,7 @@ fn preflight_persisted_state(conn: &Connection) -> Result<PersistedStatePrefligh
     let modifier_rules = keyboard::read_modifier_rules(conn)?;
     let meta_rows = meta::preflight_meta(conn)?;
     let window_placements = placements::preflight_window_placements(conn)?;
+    let display_profiles = display_profiles::read_display_profiles(conn)?;
 
     hotkeys.debug_assert_consistent();
     modifier_rules.debug_assert_consistent();
@@ -135,6 +139,7 @@ fn preflight_persisted_state(conn: &Connection) -> Result<PersistedStatePrefligh
         modifier_rule_rows: modifier_rules.counts,
         meta_rows,
         window_placement_rows: window_placements.counts,
+        display_profile_rows: display_profiles.counts,
     })
 }
 
@@ -249,6 +254,7 @@ impl Database {
                    UNION ALL SELECT 1 FROM modifier_rules
                    UNION ALL SELECT 1 FROM meta
                    UNION ALL SELECT 1 FROM window_placements
+                   UNION ALL SELECT 1 FROM display_profiles
                  )",
                 [],
                 |row| row.get(0),
@@ -311,6 +317,7 @@ impl Database {
             // afterward discover that the same launch would remain unsafe.
             let _ = meta::preflight_meta(&tx)?;
             let _ = placements::preflight_window_placements(&tx)?;
+            let _ = display_profiles::read_display_profiles(&tx)?;
 
             let preserve_automation = match mode {
                 StartupConfigurationReset::ReplaceAutomation => false,
@@ -494,7 +501,17 @@ fn collect_valid_rows<T>(
 /// batch (and never edit an existing entry — released builds have already
 /// applied those); the schema version a binary writes is simply the list's
 /// length, so it needs no separate bump.
-const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2, MIGRATION_V3];
+const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4];
+
+/// `3 → 4`: complete display profiles, applied only on explicit user request.
+/// The old undo document cannot represent the new complete backup format.
+const MIGRATION_V4: &str = r#"
+CREATE TABLE display_profiles (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+DELETE FROM meta WHERE key = 'previous_configuration_backup';
+"#;
 
 /// `0 → 1`: the initial schema. `hyper` defaults to `0` so callers can omit it
 /// and get the "not a hyper key" behaviour. `IF NOT EXISTS` tolerates a
@@ -555,6 +572,32 @@ mod tests {
 
     /// The version a fully migrated database reads.
     const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
+
+    #[test]
+    fn display_profile_migration_removes_only_the_incompatible_undo_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(VERSION_FIXTURES[2]).unwrap();
+        conn.execute(
+            "INSERT INTO meta VALUES ('previous_configuration_backup', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta VALUES ('permission_snapshot', 'preserved')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let db = Database::open(&path).unwrap();
+        assert!(db.read_previous_configuration().unwrap().is_none());
+        assert_eq!(
+            db.get_meta("permission_snapshot").unwrap().as_deref(),
+            Some("preserved")
+        );
+        assert!(db.list_display_profiles().unwrap().is_empty());
+    }
 
     /// Frozen snapshots of every schema version a build has shipped with:
     /// `VERSION_FIXTURES[n - 1]` recreates a version-`n` database verbatim.
@@ -664,6 +707,52 @@ CREATE TABLE window_placements (
 );
 
 PRAGMA user_version = 3;
+"#,
+        // v4: v3 plus saved display configurations.
+        r#"
+CREATE TABLE hotkeys (
+    id          TEXT    PRIMARY KEY,
+    label       TEXT    NOT NULL,
+    accelerator TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    enabled     INTEGER NOT NULL
+);
+
+CREATE TABLE modifier_rules (
+    id        TEXT    PRIMARY KEY,
+    label     TEXT    NOT NULL,
+    modifier  TEXT    NOT NULL,
+    side      TEXT    NOT NULL,
+    remap_to  TEXT,
+    tap       TEXT    NOT NULL,
+    enabled   INTEGER NOT NULL,
+    hyper     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT    NOT NULL
+);
+
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE window_placements (
+    bundle_id TEXT NOT NULL,
+    app_name  TEXT NOT NULL,
+    slot      TEXT NOT NULL CHECK (slot IN ('primary', 'secondary')),
+    frame     TEXT NOT NULL,
+    PRIMARY KEY (bundle_id, slot)
+);
+
+CREATE TABLE display_profiles (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+
+PRAGMA user_version = 4;
 "#,
     ];
 

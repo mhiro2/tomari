@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::{Database, PersistedSettings, keyboard, placements, settings};
+use super::{Database, PersistedSettings, display_profiles, keyboard, placements, settings};
 use crate::{CONFIGURATION_BACKUP_FORMAT_VERSION, ConfigurationBackup, Error, Result};
 
 const PREVIOUS_CONFIGURATION_KEY: &str = "previous_configuration_backup";
@@ -57,6 +57,7 @@ impl Database {
             tx.execute("DELETE FROM hotkeys", [])?;
             tx.execute("DELETE FROM modifier_rules", [])?;
             tx.execute("DELETE FROM window_placements", [])?;
+            tx.execute("DELETE FROM display_profiles", [])?;
             settings::write_settings(&tx, &replacement.settings)?;
             for hotkey in &replacement.hotkeys {
                 keyboard::write_hotkey(&tx, hotkey)?;
@@ -66,6 +67,9 @@ impl Database {
             }
             for placement in &replacement.window_placements {
                 placements::write_window_placement(&tx, placement)?;
+            }
+            for profile in &replacement.display_profiles {
+                display_profiles::write_display_profile(&tx, profile)?;
             }
 
             if remember_previous {
@@ -109,11 +113,13 @@ fn read_configuration(conn: &Connection) -> Result<ConfigurationBackup> {
     let hotkeys = keyboard::read_hotkeys(conn)?;
     let modifier_rules = keyboard::read_modifier_rules(conn)?;
     let window_placements = placements::preflight_window_placements(conn)?;
+    let display_profiles = display_profiles::read_display_profiles(conn)?;
     if settings_counts.stored != 1
         || settings_counts.skipped != 0
         || hotkeys.counts.skipped != 0
         || modifier_rules.counts.skipped != 0
         || window_placements.counts.skipped != 0
+        || display_profiles.counts.skipped != 0
     {
         return Err(Error::invalid(
             "configuration backup",
@@ -126,6 +132,7 @@ fn read_configuration(conn: &Connection) -> Result<ConfigurationBackup> {
         hotkeys: hotkeys.values,
         modifier_rules: modifier_rules.values,
         window_placements: window_placements.values,
+        display_profiles: display_profiles.values,
     };
     backup.validate()?;
     Ok(backup)
@@ -156,6 +163,8 @@ mod tests {
         })
         .unwrap();
         db.set_meta("permission_snapshot", "machine-local").unwrap();
+        db.save_display_profile(&crate::domain::display::sample())
+            .unwrap();
         db
     }
 
@@ -165,7 +174,41 @@ mod tests {
         backup.hotkeys[0].label = "Imported shortcut".into();
         backup.modifier_rules.clear();
         backup.window_placements[0].frame.width = 1.0;
+        backup.display_profiles[0].name = "Imported display layout".into();
         backup
+    }
+
+    #[test]
+    fn a_saved_profile_edit_invalidates_an_earlier_import_preview() {
+        let db = database();
+        let before = db.configuration_backup().unwrap();
+        let mut profile = before.display_profiles[0].clone();
+        profile.name = "Changed after preview".into();
+        db.save_display_profile(&profile).unwrap();
+        assert!(matches!(
+            db.replace_configuration(&before, &changed(before.clone()), true),
+            Err(Error::ConfigurationChanged)
+        ));
+        assert_eq!(db.list_display_profiles().unwrap(), vec![profile]);
+        assert!(db.read_previous_configuration().unwrap().is_none());
+    }
+
+    #[test]
+    fn damaged_profiles_prevent_partial_exports_and_remain_explicitly_removable() {
+        let db = database();
+        db.with_conn(|conn| {
+            conn.execute("UPDATE display_profiles SET data = '{}'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.configuration_backup().is_err());
+        db.clear_display_profiles().unwrap();
+        assert!(
+            db.configuration_backup()
+                .unwrap()
+                .display_profiles
+                .is_empty()
+        );
     }
 
     #[test]

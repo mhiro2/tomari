@@ -6,9 +6,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{AppSettings, Error, Hotkey, ModifierRule, Result, WindowPlacement};
+use crate::{
+    AppSettings, DisplayProfile, Error, Hotkey, MAX_DISPLAY_PROFILES, ModifierRule, Result,
+    WindowPlacement,
+};
 
-pub const CONFIGURATION_BACKUP_FORMAT_VERSION: u32 = 1;
+pub const CONFIGURATION_BACKUP_FORMAT_VERSION: u32 = 2;
 pub const MAX_CONFIGURATION_BACKUP_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CONFIGURATION_BACKUP_RECORDS: usize = 1000;
 
@@ -23,6 +26,7 @@ pub struct ConfigurationBackup {
     pub hotkeys: Vec<Hotkey>,
     pub modifier_rules: Vec<ModifierRule>,
     pub window_placements: Vec<WindowPlacement>,
+    pub display_profiles: Vec<DisplayProfile>,
 }
 
 impl ConfigurationBackup {
@@ -76,6 +80,16 @@ impl ConfigurationBackup {
             ));
         }
         self.settings.validate()?;
+        if self.display_profiles.len() > MAX_DISPLAY_PROFILES {
+            return Err(Error::invalid("displayProfiles", "too many saved profiles"));
+        }
+        unique_ids(
+            self.display_profiles.iter().map(|row| row.id.as_str()),
+            "displayProfiles.id",
+        )?;
+        for profile in &self.display_profiles {
+            profile.validate()?;
+        }
         for (field, count) in [
             ("hotkeys", self.hotkeys.len()),
             ("modifierRules", self.modifier_rules.len()),
@@ -176,6 +190,7 @@ mod tests {
             settings: AppSettings::default(),
             hotkeys: crate::defaults::default_hotkeys(),
             modifier_rules: crate::defaults::default_modifier_rules(),
+            display_profiles: vec![crate::domain::display::sample()],
             window_placements: vec![WindowPlacement {
                 application: WindowApplication {
                     bundle_id: "com.example.Editor".into(),
@@ -204,6 +219,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "displayProfiles",
                 "formatVersion",
                 "hotkeys",
                 "modifierRules",
@@ -225,6 +241,9 @@ mod tests {
             "/windowPlacements/0",
             "/windowPlacements/0/application",
             "/windowPlacements/0/frame",
+            "/displayProfiles/0",
+            "/displayProfiles/0/displays/0",
+            "/displayProfiles/0/displays/0/mode",
         ] {
             let mut value = serde_json::to_value(sample()).unwrap();
             value
@@ -265,8 +284,8 @@ mod tests {
     fn duplicate_json_keys_and_unknown_enums_are_rejected() {
         let json = sample().to_json().unwrap();
         let repeated = json.replacen(
-            "\"formatVersion\": 1",
-            "\"formatVersion\": 1, \"formatVersion\": 1",
+            "\"formatVersion\": 2",
+            "\"formatVersion\": 2, \"formatVersion\": 2",
             1,
         );
         assert!(ConfigurationBackup::from_json(&repeated).is_err());
@@ -297,7 +316,21 @@ mod tests {
     #[test]
     fn version_sizes_duplicate_keys_and_invalid_frames_are_rejected() {
         let mut backup = sample();
-        backup.format_version = 2;
+        backup
+            .display_profiles
+            .push(backup.display_profiles[0].clone());
+        assert!(backup.validate().is_err());
+        let mut backup = sample();
+        backup.display_profiles = (0..=MAX_DISPLAY_PROFILES)
+            .map(|index| {
+                let mut profile = crate::domain::display::sample();
+                profile.id = index.to_string();
+                profile
+            })
+            .collect();
+        assert!(backup.validate().is_err());
+        let mut backup = sample();
+        backup.format_version = 1;
         assert!(backup.validate().is_err());
         assert!(
             ConfigurationBackup::from_json(&" ".repeat(MAX_CONFIGURATION_BACKUP_BYTES + 1))

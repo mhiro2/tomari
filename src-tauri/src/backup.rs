@@ -50,6 +50,7 @@ pub struct BackupCounts {
     hotkeys: usize,
     modifier_rules: usize,
     window_placements: usize,
+    display_profiles: usize,
 }
 
 impl From<&ConfigurationBackup> for BackupCounts {
@@ -58,6 +59,7 @@ impl From<&ConfigurationBackup> for BackupCounts {
             hotkeys: value.hotkeys.len(),
             modifier_rules: value.modifier_rules.len(),
             window_placements: value.window_placements.len(),
+            display_profiles: value.display_profiles.len(),
         }
     }
 }

@@ -2,11 +2,13 @@
 //! frontend as camelCase JSON.
 
 pub mod action;
+pub mod display;
 pub mod keyboard;
 pub mod settings;
 pub mod window;
 
 pub use action::{AppAction, ImeMode};
+pub use display::{DisplayProfile, MAX_DISPLAY_PROFILES, SavedDisplay, SavedDisplayMode};
 pub use keyboard::{Hotkey, KeySide, ModifierKey, ModifierRule};
 pub use settings::{AppSettings, Language};
 pub use window::{
