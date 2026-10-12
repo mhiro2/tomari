@@ -114,7 +114,7 @@ fn main() {
     };
     let app_state = build_state(&paths);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // Deep links remain on their dedicated OS delivery channel. They are
         // never forwarded through the activation socket or recovered from argv.
         .plugin(tauri_plugin_deep_link::init())
@@ -219,9 +219,6 @@ fn main() {
             commands::set_menu_bar_collapsed,
         ])
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             // The listener is already live, before Tauri setup. Attach at the
             // first setup opportunity so a coalesced early launch surfaces the
             // panel. Both queueing and execution recheck the terminal lifecycle.
@@ -543,23 +540,34 @@ fn main() {
         // Accessory with no Dock icon or terminal. Route a build failure
         // through the same native-alert-and-exit path as every other
         // unrecoverable startup error instead.
-        .unwrap_or_else(|e| fatal_startup_error(&format!("Tomari could not start: {e}")))
-        .run(|app, event| match event {
-            tauri::RunEvent::ExitRequested { code, api, .. } => {
-                lifecycle::handle_exit_requested(app, code, &api);
+        .unwrap_or_else(|e| fatal_startup_error(&format!("Tomari could not start: {e}")));
+
+    // Configure Tao before applicationDidFinishLaunching activates the app.
+    // Tauri's setup callback runs after that activation; changing Regular to
+    // Accessory there needlessly switches Dock/menu ownership during launch.
+    #[cfg(target_os = "macos")]
+    let app = {
+        let mut app = app;
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        app
+    };
+
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            lifecycle::handle_exit_requested(app, code, &api);
+        }
+        tauri::RunEvent::Reopen { .. } => {
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            if state.lifecycle.is_running()
+                && let Err(error) = actions::show_panel(app)
+            {
+                tracing::warn!(%error, "could not show panel after reopen");
             }
-            tauri::RunEvent::Reopen { .. } => {
-                let Some(state) = app.try_state::<AppState>() else {
-                    return;
-                };
-                if state.lifecycle.is_running()
-                    && let Err(error) = actions::show_panel(app)
-                {
-                    tracing::warn!(%error, "could not show panel after reopen");
-                }
-            }
-            _ => {}
-        });
+        }
+        _ => {}
+    });
 }
 
 /// Resolve a `tomari://` URL to an action and run it. Fire-and-forget: the

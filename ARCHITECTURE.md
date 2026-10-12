@@ -770,7 +770,12 @@ and applies none of them.
   events surface the panel through the same lifecycle gate. Deep links remain on
   the dedicated OS/plugin channel and are never forwarded through instance IPC
   or parsed from argv.
-- The activation policy is **Accessory** (no Dock icon). A single resizable
+- The activation policy is **Accessory** (no Dock icon), configured after
+  `Builder::build` and before `App::run`. Tauri's `setup` runs after Tao's
+  launch-time activation, so setting it there would first activate a Regular
+  app and then change Dock/menu ownership. `Info.plist` also declares
+  `LSUIElement` so Launch Services starts the packaged app as an agent.
+  A single resizable
   window (`main`, 940×720 by default, minimum 860×620, decorated, opaque, not
   always on top) is declared in `tauri.conf.json`; a fixed-width sidebar lists
   the five direct destinations beside one scrolling content column. The sidebar

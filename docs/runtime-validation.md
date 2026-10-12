@@ -81,6 +81,25 @@ runner compiling the bundle does not substitute for a desktop-session check.
 
 ## Desktop regression matrix
 
+For startup focus regressions, set macOS menu-bar auto-hide to Never and test
+both a normal desktop and a full-screen app, including a secondary display.
+Cold-launch the bundle with an existing configuration and then test first-run,
+recovery, restart, and reopening an already running instance. Check that the
+menu bar (including the clock) stays visible and no Dock icon flashes; explicit
+panel requests must still show a usable, focused window. Repeat launches to
+catch intermittent failures. Record desktop observations separately from unit
+tests.
+
+On 2026-10-12, the release-mode app bundle with the activation-policy ordering
+fix built successfully with updater artifacts disabled for local validation.
+Its ad-hoc signature verified, and the bundled `LSUIElement` value was `true`.
+The app launched and displayed its settings window; the user confirmed that
+the menu bar was visible and reported no apparent problem. Automated capture
+of the system menu bar timed out, so that observation is user-confirmed.
+Repeated cold launches, full-screen, and secondary-display cases remain
+unverified; this smoke check does not establish that the intermittent issue
+is eliminated.
+
 Run these cases manually on the test machine. The measurement tool below never
 launches or terminates Tomari, injects input, changes permissions or settings,
 or performs an update. Destructive or interrupting scenarios belong to this
