@@ -59,6 +59,10 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function checkCalls() {
+  return mockInvoke.mock.calls.filter(([cmd]) => cmd === 'check_for_update');
+}
+
 describe('GeneralView', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -100,7 +104,6 @@ describe('GeneralView', () => {
     fireEvent.click(screen.getByText('Checking…'));
     fireEvent.click(screen.getByText('Checking…'));
 
-    const checkCalls = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === 'check_for_update');
     expect(checkCalls()).toHaveLength(1);
 
     resolveCheck?.(null);
