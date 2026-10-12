@@ -29,6 +29,20 @@ function suspendCalls(): boolean[] {
     .map(([, args]) => (args as { suspended: boolean }).suspended);
 }
 
+// Make the first suspend IPC hang until the test resolves it, so the test
+// can act while the acquire is still in flight.
+function deferFirstSuspend(): { resolve: () => void } {
+  const deferred = { resolve: () => {} };
+  let suspends = 0;
+  mockInvoke.mockImplementation((cmd: string) => {
+    if (cmd === 'set_hotkeys_suspended' && (suspends += 1) === 1) {
+      return new Promise<void>((resolve) => (deferred.resolve = resolve));
+    }
+    return Promise.resolve(null);
+  });
+  return deferred;
+}
+
 describe('ShortcutRecorder', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -84,20 +98,6 @@ describe('ShortcutRecorder', () => {
     unmount();
     await waitFor(() => expect(suspendCalls()).toEqual([true, false]));
   });
-
-  // Make the first suspend IPC hang until the test resolves it, so the test
-  // can act while the acquire is still in flight.
-  function deferFirstSuspend(): { resolve: () => void } {
-    const deferred = { resolve: () => {} };
-    let suspends = 0;
-    mockInvoke.mockImplementation((cmd: string) => {
-      if (cmd === 'set_hotkeys_suspended' && (suspends += 1) === 1) {
-        return new Promise<void>((resolve) => (deferred.resolve = resolve));
-      }
-      return Promise.resolve(null);
-    });
-    return deferred;
-  }
 
   it('hands the lease back when unmounted while the suspend IPC is pending', async () => {
     const suspend = deferFirstSuspend();

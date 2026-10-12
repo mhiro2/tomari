@@ -398,19 +398,18 @@ export function SessionView() {
                     : t('common.retry')}
               </button>
             )}
-            {failed &&
-              status?.leftoverUndecided && (
-                // The other half of the decision: the override stays, the marker
-                // goes, and keep-awake returns to a clean off.
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  disabled={commandBusy}
-                  onClick={() => void run(api.dismissKeepAwakeRecovery)}
-                >
-                  {t('settings.leftoverKeep')}
-                </button>
-              )}
+            {failed && status?.leftoverUndecided && (
+              // The other half of the decision: the override stays, the marker
+              // goes, and keep-awake returns to a clean off.
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={commandBusy}
+                onClick={() => void run(api.dismissKeepAwakeRecovery)}
+              >
+                {t('settings.leftoverKeep')}
+              </button>
+            )}
           </>
         }
       />
