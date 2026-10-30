@@ -63,9 +63,9 @@ jobs:
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Install nextest
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.31
         with:
           tool: nextest
       - name: Check formatting
@@ -89,9 +89,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable # toolchain version comes from rust-toolchain.toml
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-deny
       - name: Run cargo-deny
@@ -111,7 +111,7 @@ jobs:
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Setup pnpm with runtime
         uses: pnpm/setup@v3.1.1
         with:
