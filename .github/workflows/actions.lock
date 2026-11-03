@@ -6,15 +6,15 @@ workflows:
     '.github/workflows/ci.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@stable'
-        - 'pnpm/setup@v3.1.1'
+        - 'pnpm/setup@v3.1.2'
         - 'swatinem/rust-cache@v2.9.3'
-        - 'taiki-e/install-action@v2.87.31'
+        - 'taiki-e/install-action@v2.87.32'
     '.github/workflows/release.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@stable'
-        - 'pnpm/setup@v3.1.1'
+        - 'pnpm/setup@v3.1.2'
         - 'swatinem/rust-cache@v2.9.3'
-        - 'taiki-e/install-action@v2.87.31'
+        - 'taiki-e/install-action@v2.87.32'
         - 'tauri-apps/tauri-action@v1.0.0'
 dependencies:
     'actions/checkout@v7.0.1':
@@ -27,9 +27,9 @@ dependencies:
         commit: 'sha1-b725eda525362e7cf34af9a7243cac1e3f01a7ec'
         owner_id: 1940490
         repo_id: 260749683
-    'pnpm/setup@v3.1.1':
-        ref: 'v3.1.1'
-        commit: 'sha1-a0881977cd8ea73b1ed212236c99ca10dcc80cf4'
+    'pnpm/setup@v3.1.2':
+        ref: 'v3.1.2'
+        commit: 'sha1-fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e'
         owner_id: 21320719
         repo_id: 1235693694
     'swatinem/rust-cache@v2.9.3':
@@ -37,9 +37,9 @@ dependencies:
         commit: 'sha1-d1527c8f67ef9af357290475d4af4b0fab8f12e0'
         owner_id: 580492
         repo_id: 298565987
-    'taiki-e/install-action@v2.87.31':
-        ref: 'v2.87.31'
-        commit: 'sha1-1e29709c0ec63babbe8f266397a465f29a825f91'
+    'taiki-e/install-action@v2.87.32':
+        ref: 'v2.87.32'
+        commit: 'sha1-5488ac5a951645ce95062214902ac4b6bc1a1037'
         owner_id: 43724913
         repo_id: 442947557
     'tauri-apps/tauri-action@v1.0.0':

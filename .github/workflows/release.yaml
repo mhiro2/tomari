@@ -38,7 +38,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@v3.1.1
+        uses: pnpm/setup@v3.1.2
         with:
           cache: true
           require-lockfile: true
@@ -69,7 +69,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.87.32
         with:
           tool: nextest
       - name: Check formatting
@@ -98,7 +98,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.87.32
         with:
           tool: cargo-deny
       - name: Run cargo-deny
@@ -123,7 +123,7 @@ jobs:
       # No dependency cache in the publishing job: a poisoned cache entry
       # would otherwise flow straight into the signed release artifacts.
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@v3.1.1
+        uses: pnpm/setup@v3.1.2
         with:
           require-lockfile: true
       # The updater compares against the version baked into the bundle, so a
