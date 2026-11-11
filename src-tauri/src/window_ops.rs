@@ -454,9 +454,18 @@ pub fn undo_placement_edit(state: &AppState) -> Result<HistoryActionResult, CmdE
             "remembered-position undo data is incomplete",
         ));
     };
-    let current = state
+    let current = match state
         .db
-        .get_window_placement(&identity.application.bundle_id, identity.slot)?;
+        .get_window_placement(&identity.application.bundle_id, identity.slot)
+    {
+        Ok(current) => current,
+        Err(error) => {
+            // A transient read failure proves nothing about the edit; keep it
+            // so the same undo can be retried.
+            state.restore_placement_edit(edit);
+            return Err(error.into());
+        }
+    };
     if current != edit.after {
         state.restore_placement_edit(edit);
         return Err(CmdError::other(
@@ -1178,6 +1187,39 @@ mod tests {
                 .unwrap()
                 .frame,
             old
+        );
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_remembered_position_undo_for_a_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("placements.sqlite3");
+        let db = Database::open(&path).unwrap();
+        let state = state_with_db(MockWindowManager::new(area()), AppSettings::default(), db);
+        let target = focused_target(&state);
+        assert!(
+            capture_placement(&state, &target, PlacementSlot::Primary)
+                .unwrap()
+                .changed
+        );
+
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("ALTER TABLE window_placements RENAME TO window_placements_hidden")
+            .unwrap();
+        assert!(undo_placement_edit(&state).is_err());
+
+        raw.execute_batch("ALTER TABLE window_placements_hidden RENAME TO window_placements")
+            .unwrap();
+        assert_eq!(
+            undo_placement_edit(&state).unwrap(),
+            HistoryActionResult::Applied
+        );
+        assert!(
+            state
+                .db
+                .get_window_placement("com.example.Mock", PlacementSlot::Primary)
+                .unwrap()
+                .is_none()
         );
     }
 
