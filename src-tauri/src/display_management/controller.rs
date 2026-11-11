@@ -26,6 +26,22 @@ impl Pending {
             })
     }
 
+    /// Whether a configuration read right after a restore write can be the
+    /// outcome of that write alone: the same displays in the same order, with
+    /// either every restore-point mode (Quartz moved only origins) or every
+    /// previewed mode (the write did not take). A mix of the two, a different
+    /// display set or any other mode cannot be told apart from a concurrent
+    /// change made outside Tomari, so it is never claimed.
+    fn within_restore(&self, actual: &[DisplaySetting]) -> bool {
+        let same_modes = |expected: &[DisplaySetting]| {
+            actual.len() == expected.len()
+                && actual.iter().zip(expected).all(|(actual, expected)| {
+                    actual.display_id == expected.display_id && actual.mode_id == expected.mode_id
+                })
+        };
+        same_modes(&self.before) || same_modes(&self.after)
+    }
+
     fn owns(&self, actual: &[DisplaySetting]) -> bool {
         if self.observed {
             actual == self.after
@@ -278,8 +294,15 @@ impl<B: DisplayBackend> DisplayController<B> {
                 self.notice = Some(DisplayNotice::Reverted);
                 return;
             }
-            // Quartz accepted the transaction but adjusted the final layout.
-            // Retain the observed result and original restore point for retry.
+            if !pending.within_restore(&actual) {
+                // Someone else changed a mode or the display set while the
+                // restore landed. Retrying would overwrite their change.
+                self.notice = Some(DisplayNotice::DisplayChanged);
+                return;
+            }
+            // Quartz accepted the transaction but adjusted the final layout, or
+            // did not apply it. Retain the observed result and original restore
+            // point for retry.
             pending.after = actual;
             pending.observed = true;
         }
@@ -907,6 +930,107 @@ mod tests {
         c.backend.ignore_writes = false;
         c.revert(token, || now).unwrap();
         assert!(c.pending.is_none());
+    }
+
+    #[test]
+    fn an_external_mode_change_during_restore_is_not_overwritten_by_a_retry() {
+        let mut c = controller();
+        let now = Instant::now();
+        let token = c
+            .preview(request(2), || now)
+            .unwrap()
+            .pending
+            .unwrap()
+            .token;
+        let mut external = c.backend.displays.clone();
+        external[0].current_mode = Some(mode(3));
+        c.backend.after_write = Some(external);
+        let snapshot = c.revert(token, || now).unwrap();
+        assert_eq!(snapshot.notice, Some(DisplayNotice::DisplayChanged));
+        assert!(snapshot.pending.is_none());
+        let writes = c.backend.writes.len();
+        c.restore();
+        assert_eq!(c.backend.writes.len(), writes);
+        assert_eq!(c.backend.displays[0].current_mode.as_ref().unwrap().id, 3);
+    }
+
+    #[test]
+    fn a_display_set_change_during_restore_is_not_overwritten_by_a_retry() {
+        let mut c = controller();
+        let now = Instant::now();
+        let token = c
+            .preview(request(2), || now)
+            .unwrap()
+            .pending
+            .unwrap()
+            .token;
+        let mut external = c.backend.displays.clone();
+        let mut second = external[0].clone();
+        second.connection_id = 2;
+        second.id = "screen-b".into();
+        second.main = false;
+        second.x = 1920;
+        external.push(second);
+        c.backend.after_write = Some(external);
+        let snapshot = c.revert(token, || now).unwrap();
+        assert_eq!(snapshot.notice, Some(DisplayNotice::DisplayChanged));
+        assert!(snapshot.pending.is_none());
+    }
+
+    #[test]
+    fn a_restore_result_is_claimed_only_as_one_whole_configuration() {
+        let pair = |a: i32, b: i32, x: i32| {
+            vec![
+                DisplaySetting {
+                    display_id: "screen-a".into(),
+                    mode_id: a,
+                    x: 0,
+                    y: 0,
+                },
+                DisplaySetting {
+                    display_id: "screen-b".into(),
+                    mode_id: b,
+                    x,
+                    y: 0,
+                },
+            ]
+        };
+        let pending = Pending {
+            token: 1,
+            display_id: "screen-a".into(),
+            before: pair(1, 1, 1920),
+            after: pair(2, 2, 1920),
+            observed: true,
+            deadline: Instant::now(),
+        };
+        // Origins Quartz moved, or a write that did not take, are ours.
+        assert!(pending.within_restore(&pair(1, 1, 1900)));
+        assert!(pending.within_restore(&pair(2, 2, 1920)));
+        // One display back in its restore-point mode and the other still
+        // previewed is indistinguishable from an outside change to one of them.
+        assert!(!pending.within_restore(&pair(1, 2, 1920)));
+        assert!(!pending.within_restore(&pair(2, 1, 1920)));
+        assert!(!pending.within_restore(&pair(3, 1, 1920)));
+        assert!(!pending.within_restore(&settings(1)));
+    }
+
+    #[test]
+    fn an_origin_adjusted_restore_keeps_the_restore_point_for_retry() {
+        let mut c = controller();
+        let now = Instant::now();
+        let token = c
+            .preview(request(2), || now)
+            .unwrap()
+            .pending
+            .unwrap()
+            .token;
+        let mut adjusted = c.backend.displays.clone();
+        adjusted[0].current_mode = Some(mode(1));
+        adjusted[0].x = 10;
+        c.backend.after_write = Some(adjusted);
+        let snapshot = c.revert(token, || now).unwrap();
+        assert_eq!(snapshot.notice, Some(DisplayNotice::RestoreFailed));
+        assert_eq!(c.pending.as_ref().unwrap().before, settings(1));
     }
 
     #[test]
