@@ -85,7 +85,8 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// the canceller signals it only under this lock, so a cancel can never reach a
 /// PID that has since been reaped and handed to an unrelated process — the
 /// window a PID-only record leaves open between `wait()` returning and the
-/// record being cleared.
+/// record being cleared. An interactive wait on it has no deadline of its own;
+/// a cancel or shutdown observed mid-wait bounds it (see [`wait_auth_child`]).
 #[cfg(target_os = "macos")]
 static AUTH_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
@@ -94,6 +95,9 @@ static AUTH_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 /// once its `osascript` is published in [`AUTH_CHILD`]: a cancel that fired in
 /// between found the slot empty and would otherwise be lost, leaving the
 /// superseded dialog up and the reverse worker stuck behind `LID_OP_LOCK`.
+/// [`wait_auth_child`] also watches it while waiting: a change since that
+/// recorded value means the child was (or is about to be) sent SIGTERM, so the
+/// wait is cut to [`AUTH_STOP_GRACE`] instead of trusting the child to obey.
 #[cfg(target_os = "macos")]
 static CANCEL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1800,6 +1804,13 @@ fn run_disablesleep(
     deadline: Option<std::time::Duration>,
     cancel_epoch: Option<u64>,
 ) -> bool {
+    // The cancel baseline the wait compares against: the epoch the worker saw
+    // when it decided to proceed, or (exit-time cleanup, which has already
+    // finished cancelling) the epoch now, before the dialog exists. Taking it
+    // any later could adopt a cancel that already signalled this child as the
+    // baseline and leave the wait unbounded.
+    let baseline_epoch =
+        cancel_epoch.unwrap_or_else(|| CANCEL_EPOCH.load(std::sync::atomic::Ordering::Acquire));
     let value = if on { "1" } else { "0" };
     let script = format!(
         "do shell script \"/usr/bin/pmset -a disablesleep {value}\" with administrator privileges"
@@ -1838,7 +1849,7 @@ fn run_disablesleep(
     } else {
         deadline
     };
-    let result = wait_auth_child(deadline);
+    let result = wait_auth_child(deadline, baseline_epoch);
     match result {
         ChildExit::Exited(status) if status.success() => true,
         ChildExit::Exited(status) => {
@@ -1849,7 +1860,7 @@ fn run_disablesleep(
             tracing::warn!(
                 on,
                 ?deadline,
-                "administrator authorization was not answered in time; abandoning pmset disablesleep"
+                "administrator authorization was not answered in time (or was cancelled and did not exit); abandoning pmset disablesleep"
             );
             false
         }
@@ -1943,6 +1954,30 @@ fn wait_child(child: &mut std::process::Child, deadline: Option<std::time::Durat
     }
 }
 
+/// How long the authorization child may keep running after a cancel or
+/// shutdown was observed by the wait. [`kill_authorization`] has already sent it
+/// SIGTERM, which `osascript` normally honours at once; this is the allowance
+/// for one that does not, after which it is SIGKILLed so an unanswered dialog
+/// cannot hold the worker (and thus shutdown's worker join) forever.
+#[cfg(target_os = "macos")]
+const AUTH_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The instant [`wait_auth_child`] should give up at: the earlier of the
+/// caller's own `until` and `stop_observed_at + grace`, where the latter only
+/// applies once a cancel/shutdown has been observed. `None` means no limit.
+#[cfg(any(target_os = "macos", test))]
+fn effective_auth_deadline(
+    until: Option<std::time::Instant>,
+    stop_observed_at: Option<std::time::Instant>,
+    grace: std::time::Duration,
+) -> Option<std::time::Instant> {
+    let stop_until = stop_observed_at.map(|at| at + grace);
+    match (until, stop_until) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Wait for the authorization child in [`AUTH_CHILD`], for at most `deadline`
 /// when one is given, and take it out of the slot once it is gone. Every
 /// `try_wait` — the only thing that can reap it — happens under the slot's
@@ -1950,10 +1985,28 @@ fn wait_child(child: &mut std::process::Child, deadline: Option<std::time::Durat
 /// PID it signals is always this still-running child's. Polls rather than
 /// blocking in `wait()` so the lock is held only for the check, never across
 /// the dialog.
+///
+/// Each poll also checks whether [`CANCEL_EPOCH`] has moved past
+/// `baseline_epoch`, which the caller read before the child could be signalled.
+/// Every cancel, shutdown included ([`prepare_shutdown`] cancels through
+/// [`kill_authorization`]), bumps it, so a change means SIGTERM was already
+/// sent: the wait is then bounded to [`AUTH_STOP_GRACE`] from that moment (or
+/// the caller's deadline, if earlier) and the child SIGKILLed. Shutdown itself
+/// is deliberately not a trigger: exit-time cleanup presents its own dialog
+/// under [`EXIT_AUTH_DEADLINE`] once it has finished cancelling. A cancelled
+/// wait is reported as [`ChildExit::TimedOut`], same as an expired deadline:
+/// either way the child was forcibly ended without an answer.
 #[cfg(target_os = "macos")]
-fn wait_auth_child(deadline: Option<std::time::Duration>) -> ChildExit {
-    let until = deadline.map(|d| std::time::Instant::now() + d);
+fn wait_auth_child(deadline: Option<std::time::Duration>, baseline_epoch: u64) -> ChildExit {
+    let caller_until = deadline.map(|d| std::time::Instant::now() + d);
+    let mut stop_observed_at: Option<std::time::Instant> = None;
     loop {
+        if stop_observed_at.is_none()
+            && CANCEL_EPOCH.load(std::sync::atomic::Ordering::Acquire) != baseline_epoch
+        {
+            stop_observed_at = Some(std::time::Instant::now());
+        }
+        let until = effective_auth_deadline(caller_until, stop_observed_at, AUTH_STOP_GRACE);
         {
             let mut slot = AUTH_CHILD.lock_safe();
             let Some(child) = slot.as_mut() else {
@@ -3040,6 +3093,94 @@ mod tests {
         fn marker_exists(&self) -> bool {
             self.marker.get()
         }
+    }
+
+    #[test]
+    fn effective_auth_deadline_takes_the_earlier_limit() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let grace = Duration::from_secs(2);
+        assert_eq!(effective_auth_deadline(None, None, grace), None);
+        assert_eq!(
+            effective_auth_deadline(Some(t0 + Duration::from_secs(9)), None, grace),
+            Some(t0 + Duration::from_secs(9))
+        );
+        // A stop with no caller deadline bounds the wait.
+        assert_eq!(
+            effective_auth_deadline(None, Some(t0), grace),
+            Some(t0 + grace)
+        );
+        // The earlier of the two wins, in both directions.
+        assert_eq!(
+            effective_auth_deadline(Some(t0 + Duration::from_secs(60)), Some(t0), grace),
+            Some(t0 + grace)
+        );
+        assert_eq!(
+            effective_auth_deadline(Some(t0 + Duration::from_millis(500)), Some(t0), grace),
+            Some(t0 + Duration::from_millis(500))
+        );
+    }
+
+    /// Publish a child that ignores SIGTERM as the authorization child, run an
+    /// open-ended wait against the epoch read before publishing, and cancel
+    /// either before the wait starts or while it is running. The wait must end
+    /// within the stop grace with the child killed and reaped.
+    #[cfg(target_os = "macos")]
+    fn assert_cancel_bounds_open_ended_wait(cancel_before_wait: bool) {
+        use std::time::{Duration, Instant};
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            // `exec` so the SIGTERM-ignoring process is the child itself (the
+            // ignore disposition survives exec) and no grandchild outlives it.
+            .arg("trap '' TERM; exec sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Let the shell install its trap before anything signals it.
+        std::thread::sleep(Duration::from_millis(300));
+        let baseline = CANCEL_EPOCH.load(std::sync::atomic::Ordering::Acquire);
+        *AUTH_CHILD.lock_safe() = Some(child);
+
+        let started = Instant::now();
+        if cancel_before_wait {
+            kill_authorization();
+        }
+        let waiter = std::thread::spawn(move || wait_auth_child(None, baseline));
+        if !cancel_before_wait {
+            std::thread::sleep(Duration::from_millis(300));
+            kill_authorization();
+        }
+        let exit = waiter.join().unwrap();
+        let elapsed = started.elapsed();
+
+        // Always clean up, then assert.
+        let leftover = AUTH_CHILD.lock_safe().take();
+        let leaked = leftover.is_some();
+        if let Some(mut c) = leftover {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        assert!(!leaked, "the wait returned without reclaiming the child");
+        assert!(matches!(exit, ChildExit::TimedOut), "{exit:?}");
+        assert!(
+            elapsed >= AUTH_STOP_GRACE && elapsed < AUTH_STOP_GRACE + Duration::from_secs(4),
+            "{elapsed:?}"
+        );
+        // Reaped: the PID no longer exists.
+        // SAFETY: signal 0 only probes for existence.
+        let rc = unsafe { libc::kill(pid, 0) };
+        assert_ne!(rc, 0, "child {pid} is still around");
+    }
+
+    /// One test for both orderings: they share the process-wide
+    /// [`AUTH_CHILD`] and [`CANCEL_EPOCH`], so they must not run concurrently.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_cancel_before_or_during_an_open_ended_wait_kills_a_child_that_ignores_sigterm() {
+        assert_cancel_bounds_open_ended_wait(false);
+        assert_cancel_bounds_open_ended_wait(true);
     }
 
     #[test]
