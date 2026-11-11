@@ -164,6 +164,9 @@ export function WindowView({
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [savingHotkeyIds, setSavingHotkeyIds] = useState<ReadonlySet<string>>(new Set());
+  // Rows with a save or delete in flight. The ref is the gate (it is current
+  // within the same tick); the state mirrors it so rows can disable themselves.
+  const mutatingHotkeyIdsRef = useRef<Set<string>>(new Set());
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextRequestRef = useRef<Promise<PlacementContext> | null>(null);
   // Bumped by every post-mutation pull. A context request that started before
@@ -405,32 +408,42 @@ export function WindowView({
     }
   }
 
-  async function saveHotkeyPatch(id: string, patch: Partial<Hotkey>) {
-    if (savingHotkeyIds.has(id)) return;
+  function lockHotkey(id: string): boolean {
+    if (mutatingHotkeyIdsRef.current.has(id)) return false;
+    mutatingHotkeyIdsRef.current.add(id);
     setSavingHotkeyIds((ids) => new Set(ids).add(id));
-    const current = hotkeysRef.current.find((hotkey) => hotkey.id === id);
-    if (!current) {
-      clearSaving(setSavingHotkeyIds, id);
-      return;
-    }
-    const next = { ...current, ...patch };
+    return true;
+  }
+
+  function unlockHotkey(id: string) {
+    mutatingHotkeyIdsRef.current.delete(id);
+    clearSaving(setSavingHotkeyIds, id);
+  }
+
+  async function saveHotkeyPatch(id: string, patch: Partial<Hotkey>) {
+    if (!lockHotkey(id)) return;
     try {
-      const saved = await api.saveHotkey(next);
+      const current = hotkeysRef.current.find((hotkey) => hotkey.id === id);
+      if (!current) return;
+      const saved = await api.saveHotkey({ ...current, ...patch });
       setHotkeys((items) => items.map((item) => (item.id === id ? saved : item)));
       setStatus(null);
     } catch (error) {
       showStatus(formatCmdError(error, t), true);
     } finally {
-      clearSaving(setSavingHotkeyIds, id);
+      unlockHotkey(id);
     }
   }
 
   async function removeHotkey(id: string) {
+    if (!lockHotkey(id)) return;
     try {
       await api.deleteHotkey(id);
       setHotkeys((items) => items.filter((item) => item.id !== id));
     } catch (error) {
       showStatus(formatCmdError(error, t), true);
+    } finally {
+      unlockHotkey(id);
     }
   }
 

@@ -592,6 +592,105 @@ describe('WindowView', () => {
     expect(savedHotkeys[1]).toMatchObject({ id: 'left', accelerator: 'Shift+Cmd+Equal' });
   });
 
+  it('locks a shortcut row while its deletion is pending', async () => {
+    const left = WINDOW_HOTKEYS[0];
+    if (!left) throw new Error('Left shortcut fixture is missing');
+    const pending: { finish: () => void } = { finish: () => {} };
+    mockCommands();
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd === 'list_hotkeys') return Promise.resolve([left]);
+      if (cmd === 'delete_hotkey') {
+        return new Promise<void>((resolve) => {
+          pending.finish = resolve;
+        });
+      }
+      return base?.(cmd, args) ?? Promise.resolve(null);
+    });
+    const count = (name: string) => mockInvoke.mock.calls.filter(([cmd]) => cmd === name).length;
+    renderView(<WindowView />);
+    await openTab('Shortcuts');
+
+    const toggle = await screen.findByRole('switch', { name: 'Enable Left — Snap: Left Half' });
+    fireEvent.click(screen.getByRole('button', { name: /^Delete Left/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Delete Left.*\?/ }));
+    await waitFor(() => expect(count('delete_hotkey')).toBe(1));
+
+    expect(toggle).toBeDisabled();
+    fireEvent.click(toggle);
+    for (const button of screen.getAllByRole('button', {
+      name: /Delete Left/,
+    })) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(count('save_hotkey')).toBe(0);
+    expect(count('delete_hotkey')).toBe(1);
+
+    await act(async () => pending.finish());
+    await waitFor(() => expect(screen.queryByRole('switch', { name: /Enable Left/ })).toBeNull());
+    expect(count('save_hotkey')).toBe(0);
+  });
+
+  it.each([
+    { order: 'delete then toggle', deleteFirst: true, saves: 0, deletes: 1 },
+    { order: 'toggle then delete', deleteFirst: false, saves: 1, deletes: 0 },
+  ])(
+    'rejects a conflicting action fired in the same tick: $order',
+    async ({ deleteFirst, saves, deletes }) => {
+      const left = WINDOW_HOTKEYS[0];
+      if (!left) throw new Error('Left shortcut fixture is missing');
+      mockCommands();
+      const base = mockInvoke.getMockImplementation();
+      mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+        if (cmd === 'list_hotkeys') return Promise.resolve([left]);
+        return base?.(cmd, args) ?? Promise.resolve(null);
+      });
+      const count = (name: string) => mockInvoke.mock.calls.filter(([cmd]) => cmd === name).length;
+      renderView(<WindowView />);
+      await openTab('Shortcuts');
+
+      const toggle = await screen.findByRole('switch', { name: 'Enable Left — Snap: Left Half' });
+      fireEvent.click(screen.getByRole('button', { name: /^Delete Left/ }));
+      const confirm = screen.getByRole('button', { name: /^Delete Left.*\?/ });
+
+      // Both events land before React re-renders, so only the ref gate can
+      // see the first action when the second one arrives.
+      await act(async () => {
+        const clicks = [() => fireEvent.click(confirm), () => fireEvent.click(toggle)];
+        for (const click of deleteFirst ? clicks : clicks.toReversed()) click();
+      });
+
+      await waitFor(() => expect(count('save_hotkey')).toBe(saves));
+      await waitFor(() => expect(count('delete_hotkey')).toBe(deletes));
+    },
+  );
+
+  it('unlocks the row after a failed deletion so it can be used again', async () => {
+    const left = WINDOW_HOTKEYS[0];
+    if (!left) throw new Error('Left shortcut fixture is missing');
+    mockCommands();
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((cmd: string, args?: Parameters<typeof mockInvoke>[1]) => {
+      if (cmd === 'list_hotkeys') return Promise.resolve([left]);
+      if (cmd === 'delete_hotkey') return Promise.reject(new Error('boom'));
+      return base?.(cmd, args) ?? Promise.resolve(null);
+    });
+    const count = (name: string) => mockInvoke.mock.calls.filter(([cmd]) => cmd === name).length;
+    renderView(<WindowView />);
+    await openTab('Shortcuts');
+
+    const label = 'Enable Left — Snap: Left Half';
+    await screen.findByRole('switch', { name: label });
+    fireEvent.click(screen.getByRole('button', { name: /^Delete Left/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Delete Left.*\?/ }));
+    await waitFor(() => expect(count('delete_hotkey')).toBe(1));
+    await waitFor(() => expect(screen.getByRole('switch', { name: label })).not.toBeDisabled());
+
+    fireEvent.click(screen.getByRole('switch', { name: label }));
+    await waitFor(() => expect(count('save_hotkey')).toBe(1));
+  });
+
   it('disables window shortcut editing while Keyboard customization is off', async () => {
     const onOpenKeyboard = vi.fn();
     mockCommands({
