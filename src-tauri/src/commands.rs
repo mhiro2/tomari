@@ -84,23 +84,74 @@ pub fn next_permission_revision() -> u64 {
     PERMISSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
-/// An update found by [`check_for_update`], held until [`install_update`]
-/// consumes it so the install does not have to hit the endpoint again.
+/// The updater's single in-process state: the update found by
+/// [`check_for_update`], held until [`install_update`] consumes it so the
+/// install does not have to hit the endpoint again.
 ///
-/// The slot is tagged with a generation that every successful check bumps.
-/// `install_update` downloads with the lock released — a check can land in the
-/// meantime — so it remembers the generation it took and only restores the
-/// update it consumed if the slot has not moved on. Without that tag a failed
-/// install would put its stale update back over a fresher check result.
-#[derive(Default)]
-pub struct PendingUpdate(pub std::sync::Mutex<PendingUpdateSlot>);
+/// `install_update` downloads with the lock released, so the slot itself
+/// records that an install is running. While it is, a second install and any
+/// check are refused: two installs would race to replace the app bundle, and
+/// a check would re-arm the slot for exactly that second install. The UI
+/// guards the same thing, but its state can be bypassed (the tray entry,
+/// another window), so the exclusion lives here.
+pub struct PendingUpdate(std::sync::Mutex<UpdateSlot<tauri_plugin_updater::Update>>);
 
-#[derive(Default)]
-pub struct PendingUpdateSlot {
-    update: Option<tauri_plugin_updater::Update>,
-    /// Incremented on every check that stores a result; an install compares it
-    /// to decide whether restoring its update on failure is still correct.
-    generation: u64,
+impl Default for PendingUpdate {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(UpdateSlot::Empty))
+    }
+}
+
+const UPDATE_INSTALL_IN_PROGRESS: &str = "an update is already being installed";
+
+/// Generic over the update type only so the transitions are unit-testable
+/// without a real updater response.
+#[derive(Debug, PartialEq)]
+enum UpdateSlot<U> {
+    /// No check has found an update (or the last one found none).
+    Empty,
+    /// A check found this update; an install may consume it.
+    Ready(U),
+    /// An install took the update and has not failed. Stays set once the
+    /// install succeeds — the app is relaunching, so nothing may start over.
+    Installing,
+}
+
+impl<U> UpdateSlot<U> {
+    /// Refuse to start a check that could not store its result anyway.
+    fn ensure_not_installing(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Installing => Err(UPDATE_INSTALL_IN_PROGRESS),
+            Self::Empty | Self::Ready(_) => Ok(()),
+        }
+    }
+
+    /// Record a finished check. Refused if an install began while the check
+    /// was in flight, so the running install keeps sole ownership of the slot.
+    fn store(&mut self, update: Option<U>) -> Result<(), &'static str> {
+        self.ensure_not_installing()?;
+        *self = update.map_or(Self::Empty, Self::Ready);
+        Ok(())
+    }
+
+    /// Claim the pending update for an install, excluding every other install
+    /// and check until [`Self::install_failed`] hands it back.
+    fn begin_install(&mut self) -> Result<U, &'static str> {
+        match std::mem::replace(self, Self::Installing) {
+            Self::Ready(update) => Ok(update),
+            Self::Installing => Err(UPDATE_INSTALL_IN_PROGRESS),
+            Self::Empty => {
+                *self = Self::Empty;
+                Err("no pending update — check for updates first")
+            }
+        }
+    }
+
+    /// Put the update back after a failed install so a retry doesn't need a
+    /// fresh check. Nothing else can have written the slot in the meantime.
+    fn install_failed(&mut self, update: U) {
+        *self = Self::Ready(update);
+    }
 }
 
 /// Commands reject with a [`CmdError`] (a `{ code, message }` pair) so the
@@ -713,13 +764,15 @@ pub(crate) fn apply_launch_at_login(app: &AppHandle, enabled: bool) -> bool {
 }
 
 /// Ask the update endpoint whether a newer version exists. The found update is
-/// parked in [`PendingUpdate`] so `install_update` can reuse it.
+/// parked in [`PendingUpdate`] so `install_update` can reuse it. Rejected while
+/// an install is running.
 #[tauri::command]
 pub async fn check_for_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
 ) -> CmdResult<Option<UpdateInfo>> {
     use tauri_plugin_updater::UpdaterExt;
+    pending.0.lock_safe().ensure_not_installing()?;
     let update = app
         .updater()
         .map_err(|e| CmdError::other(e.to_string()))?
@@ -730,36 +783,22 @@ pub async fn check_for_update(
         version: u.version.clone(),
         notes: u.body.clone(),
     });
-    let mut slot = pending.0.lock_safe();
-    slot.update = update;
-    slot.generation = slot.generation.wrapping_add(1);
+    pending.0.lock_safe().store(update)?;
     Ok(info)
 }
 
 /// Download and apply the update found by the last `check_for_update`, then
-/// relaunch the app.
+/// relaunch the app. Rejected while another install is running.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> CmdResult<()> {
-    let (update, generation) = {
-        let mut slot = pending.0.lock_safe();
-        let update = slot
-            .update
-            .take()
-            .ok_or("no pending update — check for updates first")?;
-        (update, slot.generation)
-    };
+    let update = pending.0.lock_safe().begin_install()?;
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-        let message = e.to_string();
-        // Put the update back so a retry doesn't need a fresh check — but only
-        // if no check has stored a newer one while the download ran. Restoring
-        // over a fresher result would make the next install apply the older
-        // update the UI is no longer offering.
-        let mut slot = pending.0.lock_safe();
-        if slot.generation == generation && slot.update.is_none() {
-            slot.update = Some(update);
-        }
-        return Err(CmdError::other(message));
+        pending.0.lock_safe().install_failed(update);
+        return Err(CmdError::other(e.to_string()));
     }
+    // The slot deliberately stays claimed: the bundle is replaced and the app
+    // is on its way out, so no further check or install may start.
+    //
     // Tauri does not guarantee an `ExitRequested` before restart. Complete the
     // same terminal cleanup as ordinary quit first, including every tap, Caps
     // Lock's process-external HID mapping, the menu bar, and keep-awake state.
@@ -1572,6 +1611,55 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
     use tomari_core::Database;
+
+    #[test]
+    fn install_claims_the_pending_update_and_excludes_a_second_install() {
+        let mut slot = UpdateSlot::Empty;
+        slot.store(Some("1.1.0")).unwrap();
+
+        assert_eq!(slot.begin_install(), Ok("1.1.0"));
+        assert_eq!(slot.begin_install(), Err(UPDATE_INSTALL_IN_PROGRESS));
+        assert_eq!(slot, UpdateSlot::Installing);
+    }
+
+    #[test]
+    fn check_cannot_rearm_the_slot_while_an_install_runs() {
+        let mut slot = UpdateSlot::Ready("1.1.0");
+        slot.begin_install().unwrap();
+
+        // Neither a check starting now nor one that was already in flight
+        // may hand a second install something to consume.
+        assert_eq!(
+            slot.ensure_not_installing(),
+            Err(UPDATE_INSTALL_IN_PROGRESS)
+        );
+        assert_eq!(slot.store(Some("1.2.0")), Err(UPDATE_INSTALL_IN_PROGRESS));
+        assert_eq!(slot.store(None), Err(UPDATE_INSTALL_IN_PROGRESS));
+        assert_eq!(slot.begin_install(), Err(UPDATE_INSTALL_IN_PROGRESS));
+    }
+
+    #[test]
+    fn failed_install_returns_the_update_for_a_retry() {
+        let mut slot = UpdateSlot::Ready("1.1.0");
+        let update = slot.begin_install().unwrap();
+        slot.install_failed(update);
+
+        assert_eq!(slot.ensure_not_installing(), Ok(()));
+        assert_eq!(slot.begin_install(), Ok("1.1.0"));
+    }
+
+    #[test]
+    fn install_without_a_pending_update_leaves_the_slot_open() {
+        let mut slot: UpdateSlot<&str> = UpdateSlot::Empty;
+
+        assert!(slot.begin_install().is_err());
+        assert_eq!(slot, UpdateSlot::Empty);
+
+        // A later check that finds nothing clears a previously found update.
+        slot.store(Some("1.1.0")).unwrap();
+        slot.store(None).unwrap();
+        assert_eq!(slot, UpdateSlot::Empty);
+    }
 
     /// A `TapCheck` that was not touched this save: only the live state
     /// matters.
