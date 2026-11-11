@@ -176,7 +176,10 @@ pub(crate) fn keycode_for(key: &str) -> Option<u16> {
         "Enter" => 0x24,
         "Tab" => 0x30,
         "Space" => 0x31,
-        "Delete" | "Backspace" => 0x33,
+        // `Backspace` erases left of the caret (kVK_Delete); `Delete` is the
+        // forward delete that erases right of it (kVK_ForwardDelete).
+        "Backspace" => 0x33,
+        "Delete" => 0x75,
         "Left" => 0x7B,
         "Right" => 0x7C,
         "Down" => 0x7D,
@@ -285,6 +288,14 @@ mod tests {
                 "no keycode for parser-accepted key `{key}`"
             );
         }
+    }
+
+    /// Coverage alone would accept two keys sharing one keycode, so pin the
+    /// pair whose meanings differ only by direction.
+    #[test]
+    fn backspace_and_forward_delete_are_distinct_keys() {
+        assert_eq!(keycode_for("Backspace"), Some(0x33));
+        assert_eq!(keycode_for("Delete"), Some(0x75));
     }
 
     #[test]
