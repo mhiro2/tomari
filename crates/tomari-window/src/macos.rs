@@ -24,7 +24,8 @@ use core_graphics::display::CGDisplay;
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::window::{
     CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
-    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerName,
+    kCGWindowOwnerPID,
 };
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSRunningApplication, NSScreen};
@@ -204,6 +205,21 @@ fn dict_get_i32(dict: CFTypeRef, key: CFStringRef) -> Option<i32> {
     ok.then_some(out)
 }
 
+/// Read a `CFString` dictionary value, if present and actually a string.
+fn dict_get_string(dict: CFTypeRef, key: CFStringRef) -> Option<String> {
+    let mut value: *const c_void = std::ptr::null();
+    let found =
+        unsafe { CFDictionaryGetValueIfPresent(dict as CFDictionaryRef, key.cast(), &mut value) };
+    if found == 0 || value.is_null() {
+        return None;
+    }
+    let value = value as CFTypeRef;
+    if unsafe { CFGetTypeID(value) } != unsafe { CFStringGetTypeID() } {
+        return None;
+    }
+    Some(unsafe { CFString::wrap_under_get_rule(value as CFStringRef) }.to_string())
+}
+
 /// Read a Core Graphics bounds dictionary as the crate's plain rectangle type.
 fn dict_get_rect(dict: CFTypeRef, key: CFStringRef) -> Option<Rect> {
     let mut value: *const c_void = std::ptr::null();
@@ -282,7 +298,7 @@ fn pointer_window_owners(windows: &[CgWindowInfo], x: f64, y: f64) -> Vec<pid_t>
 /// This path deliberately uses no Accessibility objects. In particular, it is
 /// safe to call from an event-tap thread while Tomari's main thread is handling
 /// its own AppKit controls.
-fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<pid_t> {
+fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<PointerOwner> {
     let list = unsafe {
         CGWindowListCopyWindowInfo(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -295,6 +311,7 @@ fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<pid_t> {
     let list = CFOwned(list as CFTypeRef);
     let count = unsafe { CFArrayGetCount(list.0 as _) };
     let mut windows = Vec::with_capacity(count as usize);
+    let mut system_surface_pids: Vec<pid_t> = Vec::new();
     for i in 0..count {
         let entry = unsafe { CFArrayGetValueAtIndex(list.0 as _, i) } as CFTypeRef;
         if entry.is_null() {
@@ -306,9 +323,49 @@ fn pointer_window_owners_at_point(x: f64, y: f64) -> Vec<pid_t> {
         let Some(bounds) = dict_get_rect(entry, unsafe { kCGWindowBounds }) else {
             continue;
         };
+        let owner_name = dict_get_string(entry, unsafe { kCGWindowOwnerName });
+        if is_ax_less_system_surface_owner(owner_name.as_deref())
+            && !system_surface_pids.contains(&owner_pid)
+        {
+            system_surface_pids.push(owner_pid);
+        }
         windows.push(CgWindowInfo { owner_pid, bounds });
     }
     pointer_window_owners(&windows, x, y)
+        .into_iter()
+        .map(|pid| PointerOwner {
+            pid,
+            ax_less_system_surface: system_surface_pids.contains(&pid),
+        })
+        .collect()
+}
+
+/// A candidate owner of a surface at the pointer, with what is known about it
+/// from Window Server metadata alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointerOwner {
+    pid: pid_t,
+    /// The owner is a macOS system surface that has no Accessibility tree at all
+    /// (see [`is_ax_less_system_surface_owner`]), so a failed AX query against
+    /// it says nothing about whether a real window is being hidden.
+    ax_less_system_surface: bool,
+}
+
+/// `kCGWindowOwnerName` of the Window Server, which owns the menu bar backdrop
+/// and other system chrome.
+const WINDOW_SERVER_OWNER_NAME: &str = "Window Server";
+
+/// Whether a surface owner is a system process that never exposes Accessibility
+/// elements.
+///
+/// Measured on a live system: an `AXUIElementCopyElementAtPosition` against the
+/// Window Server answers `kAXErrorCannotComplete` (-25204) over its chrome — the
+/// same code a hung application produces — while the Dock answers with
+/// `kAXErrorNoValue` or a real `AXDockItem`. The two are only told apart by who
+/// the owner is, so the Window Server is recognised by name and its failures are
+/// treated as "nothing there".
+fn is_ax_less_system_surface_owner(owner_name: Option<&str>) -> bool {
+    owner_name == Some(WINDOW_SERVER_OWNER_NAME)
 }
 
 /// How many of the frontmost applications to ask for a focused window before
@@ -931,9 +988,12 @@ unsafe fn element_role(element: CFTypeRef) -> Option<String> {
 /// The surfaces at a point are tried front to back (see
 /// [`pointer_window_owners`]): one with no accessible element there — macOS's
 /// own full-screen Dock and Window Server chrome — is transparent to the search
-/// rather than a wall in front of the app window beneath it. Tomari's own
-/// surface is the exception: finding it in front stops the search, because a
-/// gesture over our own window is not for whatever it covers.
+/// rather than a wall in front of the app window beneath it. An application
+/// that fails to answer the hit-test (a timeout, say) is the opposite case: it
+/// may be covering the window behind it, so the gesture is abandoned with the
+/// AX error instead of acting on that window. Tomari's own surface is another
+/// exception: finding it in front stops the search, because a gesture over our
+/// own window is not for whatever it covers.
 pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
     unsafe {
         if AXIsProcessTrusted() == 0 {
@@ -957,21 +1017,46 @@ pub fn window_at_point(x: f64, y: f64) -> Result<DragWindow> {
         // No hit-test proceeds unbounded (see `set_messaging_timeout`).
         set_messaging_timeout(system.0)?;
 
-        for owner_pid in owners {
-            if !is_external_window_pid(Some(owner_pid), own_pid) {
+        let window = walk_pointer_candidates(&owners, |owner| {
+            if !is_external_window_pid(Some(owner.pid), own_pid) {
                 return Err(Error::NoFocusedWindow);
             }
-            match window_in_app_at_point(owner_pid, x, y) {
-                PointerHit::Window(window) => return DragWindow::new(window),
-                // A real surface with nothing draggable behind it as far as this
-                // gesture is concerned: a menu, the menu bar, a status item.
-                PointerHit::Blocked => return Err(Error::NoFocusedWindow),
-                // Nothing there at all; keep looking behind it.
-                PointerHit::NoHit => continue,
-            }
-        }
-        Err(Error::NoFocusedWindow)
+            Ok(window_in_app_at_point(owner, x, y))
+        })?;
+        DragWindow::new(window)
     }
+}
+
+/// Walk the candidate owners front to back, asking `probe` what each has at the
+/// point, and stop at the first one that is not transparent.
+///
+/// Only [`PointerHit::NoHit`] looks behind a candidate. A [`PointerHit::Failed`]
+/// ends the search with an error: a front application that could not answer
+/// (hung, timed out) might be covering the window behind it, and acting on that
+/// window would move something the user did not point at.
+fn walk_pointer_candidates<T>(
+    owners: &[PointerOwner],
+    mut probe: impl FnMut(PointerOwner) -> Result<PointerHit<T>>,
+) -> Result<T> {
+    for &owner in owners {
+        match probe(owner)? {
+            PointerHit::Window(window) => return Ok(window),
+            // A real surface with nothing draggable behind it as far as this
+            // gesture is concerned: a menu, the menu bar, a status item.
+            PointerHit::Blocked => return Err(Error::NoFocusedWindow),
+            PointerHit::Failed(code) => {
+                tracing::debug!(
+                    pid = owner.pid,
+                    code,
+                    "accessibility hit-test failed on a surface at the pointer; not looking behind it"
+                );
+                return Err(Error::Ax(code));
+            }
+            // Nothing there at all; keep looking behind it.
+            PointerHit::NoHit => continue,
+        }
+    }
+    Err(Error::NoFocusedWindow)
 }
 
 /// How far up the `AXParent` chain to look for the window owning a hit element.
@@ -981,21 +1066,57 @@ const PARENT_WALK_LIMIT: usize = 32;
 
 /// What one application had at a hit-tested point.
 ///
-/// The distinction between the two failures is what keeps
-/// [`pointer_window_owners`]'s candidate walk honest: only a surface that is not
-/// *there* may be looked behind.
-enum PointerHit {
+/// The distinctions here are what keep [`pointer_window_owners`]'s candidate
+/// walk honest: only a surface that is not *there* may be looked behind, never
+/// one that merely failed to answer.
+enum PointerHit<T = CFOwned> {
     /// The window owning whatever was hit.
-    Window(CFOwned),
+    Window(T),
     /// The application answered with a real element that belongs to no window —
     /// a menu, the menu bar, a status item. It is a surface the user can see and
     /// it must block whatever is behind it, exactly as before this walk existed.
     Blocked,
-    /// The application has nothing at that point: the hit-test failed, returned
-    /// nothing, or answered with the application element itself (which is how
-    /// the Dock's full-screen wallpaper surface answers — it identifies no
-    /// element there, so it is not really "there").
+    /// The application has nothing at that point: the hit-test reported no
+    /// element (`kAXErrorNoValue` or a null result), answered with the
+    /// application element itself (which is how the Dock's full-screen wallpaper
+    /// surface answers — it identifies no element there, so it is not really
+    /// "there"), or belongs to a system surface that has no Accessibility tree
+    /// at all.
     NoHit,
+    /// The hit-test could not be completed — a timeout, a messaging failure, an
+    /// API error. Whether the application has something at the point is
+    /// unknown, so the search must stop rather than fall through to whatever is
+    /// behind it. Carries the `AXError` code.
+    Failed(AXError),
+}
+
+/// How an `AXUIElementCopyElementAtPosition` call turned out, before any
+/// element is inspected.
+#[derive(Debug, PartialEq, Eq)]
+enum HitQuery {
+    /// An element came back; inspect it.
+    Element,
+    /// The application has no element at the point.
+    Absent,
+    /// The query itself failed with this code.
+    Failed(AXError),
+}
+
+/// Classify the raw result of an app-scoped element-at-position query.
+///
+/// Pure so the policy is testable without Accessibility: success with an
+/// element is [`HitQuery::Element`]; `kAXErrorNoValue` and a successful null
+/// result are [`HitQuery::Absent`]; any other error is [`HitQuery::Failed`] —
+/// unless the owner is an AX-less system surface, whose errors are its normal
+/// way of saying it has no elements.
+fn classify_hit_query(err: AXError, hit_is_null: bool, ax_less_system_surface: bool) -> HitQuery {
+    match err {
+        kAXErrorSuccess if hit_is_null => HitQuery::Absent,
+        kAXErrorSuccess => HitQuery::Element,
+        kAXErrorNoValue => HitQuery::Absent,
+        _ if ax_less_system_surface => HitQuery::Absent,
+        code => HitQuery::Failed(code),
+    }
 }
 
 /// AX hit-test one application at a screen point and walk up to the window that
@@ -1005,8 +1126,8 @@ enum PointerHit {
 /// The caller must have bounded this process's AX messaging timeout (see
 /// [`set_messaging_timeout`]) before calling this, or a wedged application can
 /// block the calling thread indefinitely.
-unsafe fn window_in_app_at_point(owner_pid: pid_t, x: f64, y: f64) -> PointerHit {
-    let application = unsafe { AXUIElementCreateApplication(owner_pid) };
+unsafe fn window_in_app_at_point(owner: PointerOwner, x: f64, y: f64) -> PointerHit {
+    let application = unsafe { AXUIElementCreateApplication(owner.pid) };
     if application.is_null() {
         return PointerHit::NoHit;
     }
@@ -1015,8 +1136,10 @@ unsafe fn window_in_app_at_point(owner_pid: pid_t, x: f64, y: f64) -> PointerHit
     let mut hit: CFTypeRef = std::ptr::null();
     let err =
         unsafe { AXUIElementCopyElementAtPosition(application.0, x as f32, y as f32, &mut hit) };
-    if err != kAXErrorSuccess || hit.is_null() {
-        return PointerHit::NoHit;
+    match classify_hit_query(err, hit.is_null(), owner.ax_less_system_surface) {
+        HitQuery::Element => {}
+        HitQuery::Absent => return PointerHit::NoHit,
+        HitQuery::Failed(code) => return PointerHit::Failed(code),
     }
     let mut element = CFOwned(hit);
 
@@ -1061,6 +1184,105 @@ mod tests {
             frame,
             visible_frame: visible,
         }
+    }
+
+    const HUNG: AXError = -25204; // kAXErrorCannotComplete
+
+    fn app(pid: pid_t) -> PointerOwner {
+        PointerOwner {
+            pid,
+            ax_less_system_surface: false,
+        }
+    }
+
+    #[test]
+    fn hit_query_success_with_an_element_is_inspected() {
+        assert_eq!(
+            classify_hit_query(kAXErrorSuccess, false, false),
+            HitQuery::Element
+        );
+    }
+
+    #[test]
+    fn hit_query_with_no_element_is_transparent() {
+        assert_eq!(
+            classify_hit_query(kAXErrorSuccess, true, false),
+            HitQuery::Absent
+        );
+        assert_eq!(
+            classify_hit_query(kAXErrorNoValue, true, false),
+            HitQuery::Absent
+        );
+    }
+
+    #[test]
+    fn hit_query_failure_on_an_application_is_a_failure() {
+        assert_eq!(
+            classify_hit_query(HUNG, true, false),
+            HitQuery::Failed(HUNG)
+        );
+        assert_eq!(
+            classify_hit_query(-25200, true, false), // kAXErrorFailure
+            HitQuery::Failed(-25200)
+        );
+    }
+
+    #[test]
+    fn hit_query_failure_on_an_ax_less_system_surface_is_transparent() {
+        assert_eq!(classify_hit_query(HUNG, true, true), HitQuery::Absent);
+    }
+
+    #[test]
+    fn only_the_window_server_is_an_ax_less_system_surface() {
+        assert!(is_ax_less_system_surface_owner(Some("Window Server")));
+        assert!(!is_ax_less_system_surface_owner(Some("Dock")));
+        assert!(!is_ax_less_system_surface_owner(Some("Safari")));
+        assert!(!is_ax_less_system_surface_owner(None));
+    }
+
+    #[test]
+    fn walk_does_not_look_behind_a_front_candidate_that_timed_out() {
+        let mut probed = Vec::new();
+        let result = walk_pointer_candidates(&[app(1), app(2)], |owner| {
+            probed.push(owner.pid);
+            Ok(match owner.pid {
+                1 => PointerHit::Failed(HUNG),
+                _ => PointerHit::Window("behind"),
+            })
+        });
+        assert!(matches!(result, Err(Error::Ax(HUNG))));
+        assert_eq!(probed, vec![1]);
+    }
+
+    #[test]
+    fn walk_looks_behind_a_candidate_with_nothing_at_the_point() {
+        // The Dock's full-screen surface answering with the application element
+        // (or no element) is a `NoHit`.
+        let result = walk_pointer_candidates(&[app(1), app(2)], |owner| {
+            Ok(match owner.pid {
+                1 => PointerHit::NoHit,
+                _ => PointerHit::Window("behind"),
+            })
+        });
+        assert!(matches!(result, Ok("behind")));
+    }
+
+    #[test]
+    fn walk_stops_at_a_blocking_surface() {
+        let result: Result<&str> = walk_pointer_candidates(&[app(1), app(2)], |owner| {
+            Ok(match owner.pid {
+                1 => PointerHit::Blocked,
+                _ => PointerHit::Window("behind"),
+            })
+        });
+        assert!(matches!(result, Err(Error::NoFocusedWindow)));
+    }
+
+    #[test]
+    fn walk_with_nothing_anywhere_finds_no_window() {
+        let result: Result<&str> =
+            walk_pointer_candidates(&[app(1), app(2)], |_| Ok(PointerHit::NoHit));
+        assert!(matches!(result, Err(Error::NoFocusedWindow)));
     }
 
     #[test]
