@@ -978,7 +978,11 @@ and applies none of them.
 - **Updater**: `tauri-plugin-updater`. The `Update` found by
   `check_for_update` is held in `PendingUpdate` until `install_update`
   consumes it, completes the terminal shutdown above, and relaunches. The
-  endpoint is `latest.json` on GitHub Releases.
+  same slot marks a running install, during which further installs and checks
+  are rejected so two downloads never race to replace the bundle. The
+  frontend keeps check/install progress in a module-level store
+  (`src/lib/appUpdate.ts`), so it survives navigating away from General and
+  tray-requested checks. The endpoint is `latest.json` on GitHub Releases.
 - **External control / URL scheme** (`tomari-core::external`,
   `dispatch_deep_link` in `main.rs`): launchers like Raycast/Alfred drive
   Tomari through `tomari://v1/...`. `tauri-plugin-deep-link` delivers URLs; the

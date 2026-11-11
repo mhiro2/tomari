@@ -3,11 +3,10 @@ import { useEffect, useRef, useState } from 'react';
 
 import { SettingsBackupPanel } from '../components/SettingsBackupPanel';
 import { Banner, FeaturePageHeader, SettingsList, SettingsRow, SwitchRow } from '../components/ui';
-import * as api from '../lib/api';
-import { cmdErrorMessage } from '../lib/errors';
+import { checkForUpdate, installUpdate, useUpdateState, type UpdateState } from '../lib/appUpdate';
 import { useT, type Translator } from '../lib/i18n';
 import { useSettings } from '../lib/settings';
-import type { Language, UpdateInfo } from '../lib/types';
+import type { Language } from '../lib/types';
 
 // Each language is listed in its own name, so it stays findable whatever the
 // current UI language; only "System" follows the UI language.
@@ -16,14 +15,6 @@ const LANGUAGE_NAMES: Record<Exclude<Language, 'system'>, string> = {
   en: 'English',
   ja: '日本語',
 };
-
-type UpdateState =
-  | { phase: 'idle' }
-  | { phase: 'checking' }
-  | { phase: 'upToDate' }
-  | { phase: 'available'; update: UpdateInfo; error?: string }
-  | { phase: 'installing'; update: UpdateInfo }
-  | { phase: 'error'; message: string };
 
 export function GeneralView({
   autoCheckUpdate = false,
@@ -35,14 +26,13 @@ export function GeneralView({
   const t = useT();
   const { settings, update } = useSettings();
   const [version, setVersion] = useState('');
-  const [updateStatus, setUpdateStatus] = useState<UpdateState>({ phase: 'idle' });
+  // Check/install progress is app-wide state, so it survives leaving and
+  // re-entering this view.
+  const updateStatus = useUpdateState();
   // Turning the menu bar icon off hides the only visible affordance of an
   // Accessory app (no Dock icon either), so confirm it first and spell out the
   // ways back in. Turning it back on needs no confirmation.
   const [confirmHideTray, setConfirmHideTray] = useState(false);
-  // Guards against overlapping checks: the tray entry (via StrictMode's double
-  // mount, or rapid clicks) and the manual button share one in-flight check.
-  const checking = useRef(false);
   const hideTrayConfirmRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -57,41 +47,13 @@ export function GeneralView({
   }, [confirmHideTray]);
 
   // The tray's "Check for Updates" entry opens this panel and asks it to run
-  // the check, so the result shows up here. The `checking` ref serializes
-  // runs, so a setter resolving after `await` can never be a stale overlap.
-  // oxlint-disable-next-line react-doctor/no-set-state-after-await-in-effect
+  // the check, so the result shows up here. The shared update state drops the
+  // request while a check or an install is already running.
   useEffect(() => {
     if (!autoCheckUpdate) return;
     void checkForUpdate();
     onAutoCheckHandled?.();
   }, [autoCheckUpdate, onAutoCheckHandled]);
-
-  async function checkForUpdate() {
-    if (checking.current) return;
-    checking.current = true;
-    setUpdateStatus({ phase: 'checking' });
-    try {
-      const found = await api.checkForUpdate();
-      setUpdateStatus(found ? { phase: 'available', update: found } : { phase: 'upToDate' });
-    } catch (e) {
-      // Update-check failures are always uncategorized (updater/network), so
-      // show the message directly and keep `t` out of this effect-run path.
-      setUpdateStatus({ phase: 'error', message: cmdErrorMessage(e) });
-    } finally {
-      checking.current = false;
-    }
-  }
-
-  async function installUpdate(info: UpdateInfo) {
-    setUpdateStatus({ phase: 'installing', update: info });
-    try {
-      // On success the app relaunches, so this never resolves.
-      await api.installUpdate();
-    } catch (e) {
-      // The backend keeps the pending update, so offer the install again.
-      setUpdateStatus({ phase: 'available', update: info, error: cmdErrorMessage(e) });
-    }
-  }
 
   if (!settings) return <div className="view">{t('common.loading')}</div>;
 
@@ -194,7 +156,7 @@ export function GeneralView({
                 type="button"
                 className="btn btn--primary"
                 disabled={updateStatus.phase === 'installing'}
-                onClick={() => void installUpdate(updateStatus.update)}
+                onClick={() => void installUpdate()}
               >
                 {updateStatus.phase === 'installing'
                   ? t('settings.installing')

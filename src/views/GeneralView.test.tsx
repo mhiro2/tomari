@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { resetUpdateStateForTest } from '../lib/appUpdate';
 import { SettingsProvider } from '../lib/settings';
 import type { AppSettings } from '../lib/types';
 import { GeneralView } from './GeneralView';
@@ -67,6 +68,7 @@ describe('GeneralView', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockCommands();
+    resetUpdateStateForTest();
   });
 
   it('checks for an update and shows "up to date" when none is found', async () => {
@@ -100,7 +102,7 @@ describe('GeneralView', () => {
     await screen.findByText('Checking…');
 
     // The button is disabled while checking, but exercise the guard itself
-    // (the `checking` ref) by invoking the handler again directly.
+    // (the shared update state) by invoking the handler again directly.
     fireEvent.click(screen.getByText('Checking…'));
     fireEvent.click(screen.getByText('Checking…'));
 
@@ -145,6 +147,52 @@ describe('GeneralView', () => {
     ).toBeInTheDocument();
     // Install is offered again rather than leaving the panel stuck in "installing".
     expect(screen.getByText('Install and Restart')).toBeEnabled();
+  });
+
+  it('keeps the install in progress across a remount and a tray-requested check', async () => {
+    mockCommands({
+      check_for_update: { version: '9.9.9', notes: null },
+      install_update: new Promise(() => {}),
+    });
+    const first = renderView(<GeneralView />);
+
+    fireEvent.click(await screen.findByText('Check for Updates'));
+    fireEvent.click(await screen.findByText('Install and Restart'));
+    await screen.findByText('Installing…');
+
+    // Navigating to another section and back remounts the view; the tray's
+    // "Check for Updates" then asks the fresh mount to run a check.
+    first.unmount();
+    renderView(<GeneralView autoCheckUpdate />);
+
+    expect(await screen.findByText('Installing…')).toBeDisabled();
+    expect(screen.queryByText('Install and Restart')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Installing…'));
+
+    expect(checkCalls()).toHaveLength(1);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'install_update')).toHaveLength(1);
+  });
+
+  it('keeps a running check across a remount instead of starting another', async () => {
+    let resolveCheck: ((value: null) => void) | undefined;
+    mockCommands({
+      check_for_update: new Promise((resolve) => {
+        resolveCheck = resolve;
+      }),
+    });
+    const first = renderView(<GeneralView />);
+
+    fireEvent.click(await screen.findByText('Check for Updates'));
+    await screen.findByText('Checking…');
+
+    first.unmount();
+    renderView(<GeneralView autoCheckUpdate />);
+
+    expect(await screen.findByText('Checking…')).toBeDisabled();
+    expect(checkCalls()).toHaveLength(1);
+
+    resolveCheck?.(null);
+    expect(await screen.findByText('Tomari is up to date.')).toBeInTheDocument();
   });
 
   it('shows the error message when the update check fails', async () => {
