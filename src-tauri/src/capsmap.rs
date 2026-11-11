@@ -997,11 +997,11 @@ fn reconcile_keyboards(systems: &[impl CapsMapSys], should_manage: bool) -> Reco
 /// Serializes every Caps Lock reconcile. Each one is a read-modify-write across
 /// two stores (the claim record and the OS property) plus the proxy flag, and it
 /// is reachable concurrently from the settings commands, the wake and session
-/// callbacks, the permission poll and quit. Without this, one caller's live read
-/// could straddle another's write — dropping a claim whose mapping the other had
-/// just recorded, or leaving the flag set from whichever call happened to return
-/// last. Holding it across the whole sequence also gives the record's temporary
-/// file a single writer.
+/// callbacks, the keyboard hot-plug watcher, the permission poll and quit.
+/// Without this, one caller's live read could straddle another's write —
+/// dropping a claim whose mapping the other had just recorded, or leaving the
+/// flag set from whichever call happened to return last. Holding it across the
+/// whole sequence also gives the record's temporary file a single writer.
 static RECONCILE: Mutex<()> = Mutex::new(());
 
 /// The live Caps Lock remap status, packed into one word so the two facts a

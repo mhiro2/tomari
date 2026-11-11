@@ -21,6 +21,8 @@ mod eventtap;
 mod instance_lock;
 mod keepawake;
 #[cfg(target_os = "macos")]
+mod keyboard_hotplug;
+#[cfg(target_os = "macos")]
 mod keycodes;
 #[cfg(target_os = "macos")]
 mod keysend;
@@ -348,6 +350,11 @@ fn main() {
             // key-tracking state whenever the system comes back.
             #[cfg(target_os = "macos")]
             wake::install(&handle);
+
+            // A keyboard connected after launch has no Caps Lock HID remap
+            // until the next reconcile; watch for keyboard arrival/removal.
+            #[cfg(target_os = "macos")]
+            keyboard_hotplug::install(&handle);
 
             // Keep-awake never persists as "on". A lid-close sleep override a
             // previous run left behind after an unclean exit is not cleared
