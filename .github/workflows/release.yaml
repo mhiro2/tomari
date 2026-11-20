@@ -63,7 +63,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable # toolchain version comes from rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master # toolchain version comes from rust-toolchain.toml
+        with:
+          toolchain: stable
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
@@ -94,7 +96,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable # toolchain version comes from rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master # toolchain version comes from rust-toolchain.toml
+        with:
+          toolchain: stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-deny
@@ -117,7 +121,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable # toolchain version comes from rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master # toolchain version comes from rust-toolchain.toml
+        with:
+          toolchain: stable
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # No dependency cache in the publishing job: a poisoned cache entry
