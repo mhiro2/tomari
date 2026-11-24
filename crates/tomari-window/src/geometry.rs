@@ -93,16 +93,27 @@ pub fn normalize_frame(frame: Rect, area: Rect) -> Option<NormalizedRect> {
     {
         return None;
     }
-    let width = frame.width.clamp(f64::EPSILON, area.width);
-    let height = frame.height.clamp(f64::EPSILON, area.height);
-    let x = frame.x.clamp(area.x, area.x + area.width - width);
-    let y = frame.y.clamp(area.y, area.y + area.height - height);
+    // `f64::clamp` panics when its lower bound exceeds the upper one, and the
+    // release build aborts on panic. Apply the upper bound last for the size so
+    // a work area narrower than `f64::EPSILON` cannot invert the range.
+    let width = frame.width.max(f64::EPSILON).min(area.width);
+    let height = frame.height.max(f64::EPSILON).min(area.height);
+    // Clamp the origin as an offset from the area's edge rather than against
+    // `area.x + area.width - width`: that sum is rounded, so for a full-width
+    // window on a non-integer work area it can land 1ulp *below* `area.x` and
+    // invert the range. `area.width - width` is exact in sign (never negative
+    // because `width <= area.width`), so the range below is always valid.
+    let dx = (frame.x - area.x).clamp(0.0, area.width - width);
+    let dy = (frame.y - area.y).clamp(0.0, area.height - height);
+    // On extreme areas the division can still underflow a size to zero; refuse
+    // such a position here rather than store one `recall_frame` would reject.
     Some(NormalizedRect::new(
-        (x - area.x) / area.width,
-        (y - area.y) / area.height,
+        dx / area.width,
+        dy / area.height,
         width / area.width,
         height / area.height,
     ))
+    .filter(|normalized| normalized.is_valid())
 }
 
 /// Expand a remembered display-relative position into one display's usable
@@ -538,6 +549,44 @@ mod tests {
 
         assert_eq!(remembered, NormalizedRect::new(0.0, 0.0, 1.0, 1.0));
         assert_eq!(recall_frame(remembered, area), Some(area));
+    }
+
+    #[test]
+    fn capture_of_a_full_size_window_on_a_fractional_work_area_does_not_panic() {
+        // `(area.x + area.width) - area.width` rounds to 1ulp below `area.x`
+        // here, which used to invert the clamp range and abort the app.
+        let area = Rect::new(
+            -1452.7,
+            7572.038482603363,
+            370.80000000000007,
+            9653.612012272337,
+        );
+        assert!(area.x + area.width - area.width < area.x);
+        assert!(area.y + area.height - area.height < area.y);
+
+        let remembered = normalize_frame(area, area).unwrap();
+
+        assert_eq!(remembered, NormalizedRect::new(0.0, 0.0, 1.0, 1.0));
+        assert!(remembered.is_valid());
+    }
+
+    #[test]
+    fn capture_on_a_work_area_narrower_than_epsilon_does_not_panic() {
+        let area = Rect::new(0.0, 0.0, 1e-300, 1e-300);
+        let frame = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+        assert_eq!(
+            normalize_frame(frame, area),
+            Some(NormalizedRect::new(0.0, 0.0, 1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn capture_refuses_a_position_whose_size_underflows_to_zero() {
+        let area = Rect::new(0.0, 0.0, f64::MAX, f64::MAX);
+        let frame = Rect::new(0.0, 0.0, 0.0, 0.0);
+
+        assert_eq!(normalize_frame(frame, area), None);
     }
 
     #[test]
